@@ -3,7 +3,9 @@ mod backend;
 mod catalog;
 mod config;
 mod credentials;
+mod diff;
 mod session;
+mod tools;
 mod ui;
 mod update;
 
@@ -22,7 +24,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{sync::mpsc, task::JoinHandle, time::Duration};
 
 use crate::{
-    app::{Action, App},
+    app::{Action, App, ToolEvent},
     backend::{Backend, StreamEvent},
     catalog::FetchResult,
     config::{Cli, Command, Config, load_session},
@@ -49,6 +51,7 @@ async fn run() -> Result<()> {
     let mut app = App::new(session, backend, session_path, config_path);
     let mut terminal = TerminalGuard::new()?;
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
+    let (tool_sender, mut tool_receiver) = mpsc::unbounded_channel::<ToolEvent>();
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
@@ -67,30 +70,15 @@ async fn run() -> Result<()> {
             event = terminal_events.next() => {
                 match event {
                     Some(Ok(Event::Key(key))) => {
-                        match app.handle_key(key) {
-                            Action::None => {}
-                            Action::Start { request_id, messages } => {
-                                let backend = app.backend.clone();
-                                let sender = sender.clone();
-                                let task = tokio::spawn(async move {
-                                    backend.stream(request_id, messages, sender).await;
-                                });
-                                active_task = Some((request_id, task));
-                            }
-                            Action::Cancel(request_id) => {
-                                cancel_task(&mut active_task, request_id);
-                            }
-                            Action::Quit => {}
-                            Action::LoadCatalog => {
-                                let sender = catalog_sender.clone();
-                                tokio::spawn(async move {
-                                    let result = catalog::fetch()
-                                        .await
-                                        .map_err(|error| format!("{error:#}"));
-                                    let _ = sender.send(result);
-                                });
-                            }
-                        }
+                        let action = app.handle_key(key);
+                        dispatch(
+                            action,
+                            &mut app,
+                            &sender,
+                            &tool_sender,
+                            &catalog_sender,
+                            &mut active_task,
+                        );
                     }
                     Some(Ok(Event::Paste(value))) => app.handle_paste(&value),
                     Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
@@ -104,21 +92,42 @@ async fn run() -> Result<()> {
                 let Some(event) = event else { break; };
                 let request_id = match &event {
                     StreamEvent::Delta { request_id, .. }
+                    | StreamEvent::ToolCalls { request_id, .. }
                     | StreamEvent::Done { request_id }
                     | StreamEvent::Error { request_id, .. } => *request_id,
                 };
                 let finished = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
-                app.on_stream_event(event);
+                let action = app.on_stream_event(event);
                 if finished && active_task.as_ref().is_some_and(|(id, _)| *id == request_id) {
                     active_task = None;
                 }
+                dispatch(
+                    action,
+                    &mut app,
+                    &sender,
+                    &tool_sender,
+                    &catalog_sender,
+                    &mut active_task,
+                );
+            }
+            result = tool_receiver.recv() => {
+                let Some(result) = result else { break; };
+                let action = app.on_tool_result(result);
+                dispatch(
+                    action,
+                    &mut app,
+                    &sender,
+                    &tool_sender,
+                    &catalog_sender,
+                    &mut active_task,
+                );
             }
             result = catalog_receiver.recv() => {
                 if let Some(result) = result {
                     app.on_catalog(result);
                 }
             }
-            _ = ticker.tick(), if app.is_streaming() || app.connect_open() => app.tick(),
+            _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
         }
     }
 
@@ -127,6 +136,57 @@ async fn run() -> Result<()> {
     }
     drop(terminal);
     app.persist()
+}
+
+fn dispatch(
+    action: Action,
+    app: &mut App,
+    events: &mpsc::UnboundedSender<StreamEvent>,
+    tool_events: &mpsc::UnboundedSender<ToolEvent>,
+    catalog_events: &mpsc::UnboundedSender<FetchResult>,
+    active_task: &mut Option<(u64, JoinHandle<()>)>,
+) {
+    match action {
+        Action::None | Action::Quit => {}
+        Action::Start {
+            request_id,
+            messages,
+            tools_enabled,
+        } => {
+            if let Some((_, previous)) = active_task.take() {
+                previous.abort();
+            }
+            let backend = app.backend.clone();
+            let sender = events.clone();
+            let task = tokio::spawn(async move {
+                backend
+                    .stream(request_id, messages, tools_enabled, sender)
+                    .await;
+            });
+            *active_task = Some((request_id, task));
+        }
+        Action::Cancel(request_id) => cancel_task(active_task, request_id),
+        Action::RunTool { call } => {
+            let sender = tool_events.clone();
+            tokio::spawn(async move {
+                let task_call = call.clone();
+                let joined = tokio::task::spawn_blocking(move || tools::execute(&task_call)).await;
+                let result = match joined {
+                    Ok(Ok(output)) => Ok(output),
+                    Ok(Err(error)) => Err(format!("{error:#}")),
+                    Err(error) => Err(format!("tool task failed: {error}")),
+                };
+                let _ = sender.send(ToolEvent { call, result });
+            });
+        }
+        Action::LoadCatalog => {
+            let sender = catalog_events.clone();
+            tokio::spawn(async move {
+                let result = catalog::fetch().await.map_err(|error| format!("{error:#}"));
+                let _ = sender.send(result);
+            });
+        }
+    }
 }
 
 fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64) {

@@ -5,6 +5,7 @@ A better coding CLI, Built with Rust, Ratatui, and Tokio.
 ## Highlights
 
 - Streaming OpenAI-compatible providers, including custom endpoints.
+- Tool calling for reading, writing, editing, and running commands, with per-tool approval and a diff viewer.
 - A quiet, minimal interface with a popout command palette.
 - Provider and model discovery from [models.dev](https://models.dev) plus custom endpoints with `/connect`.
 - One-command self-updates with `yopes update`.
@@ -24,7 +25,10 @@ Download the latest build for your platform from [Releases](https://github.com/J
 | `Alt+Enter` / `Shift+Enter` | Insert a newline |
 | `/` | Open the command palette below the conversation |
 | `Tab` | Complete the selected palette command |
-| `Esc` | Close the palette, stop streaming, or close help |
+| `Esc` | Close the palette, stop streaming, deny a pending tool, or close help |
+| `Enter` | Run the pending tool when the approval dialog is open |
+| `a` | Always allow the pending tool for this session |
+| `v` | Toggle unified / side-by-side diff in the approval dialog |
 | `Ctrl+C` / `Ctrl+Q` | Quit |
 | `Ctrl+N` | Start a new session |
 | `Ctrl+U` | Clear the composer |
@@ -44,7 +48,22 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 - `/connect` — browse models.dev providers or configure a custom OpenAI-compatible endpoint.
 - `/model <name>` — switch model for subsequent messages.
 - `/model` — show the active model.
+- `/tools` — show the current tool mode.
+- `/tools on|off|auto|ask` — change how tool calls are approved.
 - `/quit` — save and quit.
+
+### Tools
+
+Yopes offers tools to OpenAI-compatible providers (`openai` and `custom`): `list_dir`, `read_file`, `write_file`, `edit_file`, and `run_command`. Ollama sessions remain text-only for now.
+
+Tool modes:
+
+- `on` (default) — reads run automatically; writes and commands ask for approval.
+- `off` — tools are not offered to the model.
+- `auto` — every tool call runs automatically.
+- `ask` — every tool call asks for approval.
+
+When a tool needs approval, yopes shows its arguments and, for `write_file` and `edit_file`, a diff of the change. The default view is a unified diff with line numbers, hunk headers, red deletions, and green insertions. Press `v` for a side-by-side view. Press `Enter` to run the tool, `a` to always allow that tool for the current session, or `Esc` to deny it. Denials and errors are returned to the model, and the model continues the turn after each tool result.
 
 ### Connecting a provider
 
