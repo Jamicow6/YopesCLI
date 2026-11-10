@@ -133,7 +133,9 @@ async fn run() -> Result<()> {
                 }
             }
             #[cfg(unix)]
-            _ = term_signal.recv() => break,
+            _ = term_signal.recv() => {
+                break;
+            }
             _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
         }
     }
