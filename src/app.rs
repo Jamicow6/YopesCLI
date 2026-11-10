@@ -164,13 +164,15 @@ pub struct ToolEvent {
     pub result: std::result::Result<String, String>,
 }
 
-const CUSTOM_PROVIDER_ID: &str = "custom";
+pub const CUSTOM_PROVIDER_ID: &str = "custom";
+const ADD_MODEL_ID: &str = "add-model";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
     Providers,
     Models,
     ApiKey,
+    ProviderName,
     Endpoint,
     Auth,
     CustomToken,
@@ -186,6 +188,7 @@ impl ConnectStage {
             Self::Providers => "provider",
             Self::Models => "model",
             Self::ApiKey => "api key",
+            Self::ProviderName => "name",
             Self::Endpoint => "endpoint",
             Self::Auth => "authorization",
             Self::CustomToken => "token",
@@ -202,6 +205,33 @@ pub struct ConnectItem {
     pub id: String,
     pub title: String,
     pub detail: String,
+    pub logo: &'static str,
+    /// Set when the item is a saved custom endpoint, holding its provider id.
+    pub custom_id: Option<String>,
+}
+
+/// A single-glyph logo for a models.dev provider or the custom flow.
+pub fn provider_logo(id: &str) -> &'static str {
+    match id {
+        "openai" => "●",
+        "openrouter" => "⇄",
+        "anthropic" => "◇",
+        "google" => "▴",
+        "cohere" => "∞",
+        "mistral" => "↯",
+        "deepseek" => "∿",
+        "groq" => "»",
+        "fireworks" => "✦",
+        "xai" => "✕",
+        "perplexity" => "?",
+        "together" => "◈",
+        "azure" => "▣",
+        "aws" => "☁",
+        "cerebras" => "□",
+        "friendliai" => "♥",
+        "custom" => "⚙",
+        _ => "▸",
+    }
 }
 
 pub struct ConnectState {
@@ -211,11 +241,14 @@ pub struct ConnectState {
     pub filter: String,
     pub selected: usize,
     catalog: Option<Catalog>,
+    saved_custom: Vec<config::CustomProvider>,
     provider_id: Option<String>,
     model_id: Option<String>,
     api_key: String,
     password: String,
     custom_flow: bool,
+    custom_provider_id: Option<String>,
+    custom_name: String,
     custom_endpoint: String,
     custom_auth: AuthKind,
     custom_token: String,
@@ -233,11 +266,14 @@ impl ConnectState {
             filter: String::new(),
             selected: 0,
             catalog: None,
+            saved_custom: Vec::new(),
             provider_id: None,
             model_id: None,
             api_key: String::new(),
             password: String::new(),
             custom_flow: false,
+            custom_provider_id: None,
+            custom_name: String::new(),
             custom_endpoint: String::new(),
             custom_auth: AuthKind::Bearer,
             custom_token: String::new(),
@@ -256,7 +292,20 @@ impl ConnectState {
                     items.push(ConnectItem {
                         id: CUSTOM_PROVIDER_ID.to_owned(),
                         title: "Custom".to_owned(),
-                        detail: "OpenAI-compatible endpoint".to_owned(),
+                        detail: "New OpenAI-compatible endpoint".to_owned(),
+                        logo: provider_logo(CUSTOM_PROVIDER_ID),
+                        custom_id: None,
+                    });
+                }
+                for saved in self.saved_custom.iter().filter(|saved| {
+                    filter.is_empty() || saved.name.to_ascii_lowercase().contains(filter.as_str())
+                }) {
+                    items.push(ConnectItem {
+                        id: saved.id.clone(),
+                        title: saved.name.clone(),
+                        detail: format!("saved · {} models", saved.models.len()),
+                        logo: "★",
+                        custom_id: Some(saved.id.clone()),
                     });
                 }
                 if let Some(catalog) = &self.catalog {
@@ -273,6 +322,8 @@ impl ConnectState {
                                 id: id.to_owned(),
                                 title: provider.name.clone(),
                                 detail: format!("{} models", provider.models.len()),
+                                logo: provider_logo(id),
+                                custom_id: None,
                             }),
                     );
                 }
@@ -303,10 +354,13 @@ impl ConnectState {
                                 || id.to_owned(),
                                 |context| format!("{id} · {}k context", context / 1000),
                             );
+                        let provider_id = self.provider_id.as_deref().unwrap_or_default();
                         ConnectItem {
                             id: id.to_owned(),
                             title,
                             detail: context,
+                            logo: provider_logo(provider_id),
+                            custom_id: None,
                         }
                     })
                     .collect()
@@ -317,26 +371,43 @@ impl ConnectState {
                     id: auth.id().to_owned(),
                     title: auth.label().to_owned(),
                     detail: auth.detail().to_owned(),
+                    logo: "•",
+                    custom_id: None,
                 })
                 .collect(),
-            ConnectStage::CustomModels => self
-                .custom_models
-                .iter()
-                .map(|model| ConnectItem {
-                    id: model.id.clone(),
-                    title: if model.name.trim().is_empty() {
-                        model.id.clone()
-                    } else {
-                        model.name.clone()
-                    },
-                    detail: if model.name.trim().is_empty() {
-                        "model id".to_owned()
-                    } else {
-                        model.id.clone()
-                    },
-                })
-                .collect(),
+            ConnectStage::CustomModels => {
+                let mut items: Vec<ConnectItem> = self
+                    .custom_models
+                    .iter()
+                    .map(|model| ConnectItem {
+                        id: model.id.clone(),
+                        title: if model.name.trim().is_empty() {
+                            model.id.clone()
+                        } else {
+                            model.name.clone()
+                        },
+                        detail: if model.name.trim().is_empty() {
+                            "model id".to_owned()
+                        } else {
+                            model.id.clone()
+                        },
+                        logo: "▸",
+                        custom_id: None,
+                    })
+                    .collect();
+                if filter.is_empty() || "add".contains(filter.as_str()) {
+                    items.push(ConnectItem {
+                        id: ADD_MODEL_ID.to_owned(),
+                        title: "Add new model".to_owned(),
+                        detail: "enter a model id".to_owned(),
+                        logo: "+",
+                        custom_id: None,
+                    });
+                }
+                items
+            }
             ConnectStage::ApiKey
+            | ConnectStage::ProviderName
             | ConnectStage::Endpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
@@ -358,6 +429,7 @@ impl ConnectState {
         let value = match self.stage {
             ConnectStage::ApiKey => &self.api_key,
             ConnectStage::Password => &self.password,
+            ConnectStage::ProviderName => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
             ConnectStage::CustomToken => &self.custom_token,
             ConnectStage::ModelId => &self.custom_model_id,
@@ -380,6 +452,7 @@ impl ConnectState {
         match self.stage {
             ConnectStage::Providers | ConnectStage::Models => "search",
             ConnectStage::ApiKey => "api key",
+            ConnectStage::ProviderName => "provider name",
             ConnectStage::Endpoint => "completion endpoint",
             ConnectStage::Auth => "authorization",
             ConnectStage::CustomToken => "token",
@@ -457,6 +530,7 @@ fn custom_field_mut<'a>(
     stage: ConnectStage,
 ) -> Option<&'a mut String> {
     match stage {
+        ConnectStage::ProviderName => Some(&mut connect.custom_name),
         ConnectStage::Endpoint => Some(&mut connect.custom_endpoint),
         ConnectStage::CustomToken => Some(&mut connect.custom_token),
         ConnectStage::ModelId => Some(&mut connect.custom_model_id),
@@ -592,6 +666,7 @@ pub struct App {
     tool_rounds: usize,
     session_path: Option<PathBuf>,
     config_path: PathBuf,
+    custom_providers: Vec<config::CustomProvider>,
     palette_index: usize,
     palette_hidden: bool,
     connect: Option<ConnectState>,
@@ -603,6 +678,7 @@ impl App {
         backend: Backend,
         session_path: Option<PathBuf>,
         config_path: PathBuf,
+        custom_providers: Vec<config::CustomProvider>,
     ) -> Self {
         Self {
             session,
@@ -626,6 +702,7 @@ impl App {
             tool_rounds: 0,
             session_path,
             config_path,
+            custom_providers,
             palette_index: 0,
             palette_hidden: false,
             connect: None,
@@ -678,9 +755,7 @@ impl App {
     pub fn stream_tokens(&self) -> Option<(u64, u64)> {
         let active = self.active.as_ref()?;
         match active.usage {
-            Some((prompt, completion)) => {
-                Some((prompt.max(active.prompt_tokens), completion))
-            }
+            Some((prompt, completion)) => Some((prompt.max(active.prompt_tokens), completion)),
             None => Some((active.prompt_tokens, estimated_output_tokens(&self.session))),
         }
     }
@@ -757,6 +832,7 @@ impl App {
             match connect.stage {
                 ConnectStage::ApiKey => connect.api_key.push_str(&clean),
                 ConnectStage::Password => connect.password.push_str(&clean),
+                ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
                 ConnectStage::ModelId => connect.custom_model_id.push_str(&clean),
@@ -1090,7 +1166,8 @@ impl App {
         match stage {
             ConnectStage::Providers | ConnectStage::Models => self.handle_connect_list_key(key),
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
-            ConnectStage::Endpoint
+            ConnectStage::ProviderName
+            | ConnectStage::Endpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName => self.handle_connect_custom_text(key),
@@ -1265,7 +1342,7 @@ impl App {
     }
 
     fn back_from_custom_text(&mut self, stage: ConnectStage) {
-        if stage == ConnectStage::Endpoint {
+        if stage == ConnectStage::ProviderName {
             self.connect = None;
             return;
         }
@@ -1274,6 +1351,10 @@ impl App {
         };
         connect.error = None;
         match stage {
+            ConnectStage::Endpoint => {
+                connect.stage = ConnectStage::ProviderName;
+                connect.selected = 0;
+            }
             ConnectStage::CustomToken => {
                 let selected = connect.auth_index();
                 connect.stage = ConnectStage::Auth;
@@ -1303,6 +1384,23 @@ impl App {
 
     fn advance_custom_text(&mut self, stage: ConnectStage) -> Action {
         match stage {
+            ConnectStage::ProviderName => {
+                let name = self
+                    .connect
+                    .as_ref()
+                    .map(|connect| connect.custom_name.trim().to_owned())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    self.connect_error("Enter a name for this provider.");
+                    return Action::None;
+                }
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.custom_name = name;
+                    connect.stage = ConnectStage::Endpoint;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
             ConnectStage::Endpoint => {
                 let endpoint = self
                     .connect
@@ -1542,10 +1640,39 @@ impl App {
                 if item.id == CUSTOM_PROVIDER_ID {
                     connect.provider_id = None;
                     connect.custom_flow = true;
+                    connect.custom_provider_id = None;
+                    connect.custom_name.clear();
+                    connect.custom_endpoint.clear();
                     connect.custom_token.clear();
+                    connect.custom_models.clear();
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
-                    connect.stage = ConnectStage::Endpoint;
+                    connect.stage = ConnectStage::ProviderName;
+                } else if let Some(saved_id) = &item.custom_id {
+                    let Some(saved) = connect
+                        .saved_custom
+                        .iter()
+                        .find(|provider| &provider.id == saved_id)
+                    else {
+                        return Action::None;
+                    };
+                    connect.provider_id = None;
+                    connect.custom_flow = true;
+                    connect.custom_provider_id = Some(saved.id.clone());
+                    connect.custom_name = saved.name.clone();
+                    connect.custom_endpoint = saved.base_url.clone();
+                    connect.custom_auth = saved.auth;
+                    connect.custom_models = saved.models.clone();
+                    connect.custom_token = saved.token.clone().unwrap_or_default();
+                    connect.custom_model_id.clear();
+                    connect.custom_model_name.clear();
+                    connect.stage = if saved.auth.requires_token() {
+                        ConnectStage::CustomToken
+                    } else if !saved.models.is_empty() {
+                        ConnectStage::CustomModels
+                    } else {
+                        ConnectStage::ModelId
+                    };
                 } else {
                     connect.provider_id = Some(item.id);
                     connect.custom_flow = false;
@@ -1577,6 +1704,14 @@ impl App {
                 }
             }
             ConnectStage::CustomModels => {
+                if item.id == ADD_MODEL_ID {
+                    connect.custom_model_id.clear();
+                    connect.custom_model_name.clear();
+                    connect.stage = ConnectStage::ModelId;
+                    connect.selected = 0;
+                    connect.error = None;
+                    return Action::None;
+                }
                 connect.model_id = Some(item.id);
                 connect.password.clear();
                 connect.stage = ConnectStage::Password;
@@ -1584,6 +1719,7 @@ impl App {
                 connect.error = None;
             }
             ConnectStage::ApiKey
+            | ConnectStage::ProviderName
             | ConnectStage::Endpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
@@ -1642,6 +1778,7 @@ impl App {
             api_key_env,
             auth: AuthKind::Bearer,
             models: Vec::new(),
+            custom_provider_id: None,
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
         self.backend.configure(
@@ -1676,9 +1813,15 @@ impl App {
                 connect.custom_auth,
                 connect.custom_token.trim().to_owned(),
                 connect.custom_models.clone(),
+                if connect.custom_name.trim().is_empty() {
+                    "Custom".to_owned()
+                } else {
+                    connect.custom_name.trim().to_owned()
+                },
+                connect.custom_provider_id.clone(),
             )
         };
-        let (endpoint, model_id, auth, token, models) = plan;
+        let (endpoint, model_id, auth, token, models, name, custom_provider_id) = plan;
         let Some(model_id) = model_id else {
             self.connect_error("Choose a model.");
             return Action::None;
@@ -1705,18 +1848,19 @@ impl App {
         };
         let connection = Connection {
             provider: ProviderKind::Custom,
-            provider_name: "Custom".to_owned(),
+            provider_name: name.clone(),
             model: model_id.clone(),
             base_url: endpoint.clone(),
             api_key: api_key.clone(),
             api_key_env: None,
             auth,
             models: models.clone(),
+            custom_provider_id,
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
         self.backend.configure(
             ProviderKind::Custom,
-            "Custom".to_owned(),
+            name.clone(),
             model_id.clone(),
             endpoint,
             api_key,
@@ -1727,7 +1871,8 @@ impl App {
         if let Err(error) = saved {
             self.error(format!("Connected, but could not save: {error:#}"));
         } else {
-            self.info(format!("Connected to Custom · {model_id}"));
+            self.custom_providers = config::load_custom_providers(&self.config_path);
+            self.info(format!("Connected to {name} · {model_id}"));
         }
         Action::None
     }
@@ -1899,10 +2044,20 @@ impl App {
         }
         self.palette_hidden = true;
         let mut connect = ConnectState::loading();
+        connect.saved_custom = self.custom_providers.clone();
         if self.backend.provider_kind() == ProviderKind::Custom {
             connect.custom_endpoint = self.backend.base_url().to_owned();
             connect.custom_auth = self.backend.auth();
             connect.custom_models = self.backend.saved_models().to_vec();
+            if let Some(matched) = self
+                .custom_providers
+                .iter()
+                .find(|provider| provider.base_url == connect.custom_endpoint)
+            {
+                connect.custom_provider_id = Some(matched.id.clone());
+                connect.custom_name = matched.name.clone();
+                connect.custom_token = matched.token.clone().unwrap_or_default();
+            }
         }
         self.connect = Some(connect);
         Action::LoadCatalog
