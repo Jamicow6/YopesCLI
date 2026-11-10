@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
@@ -8,14 +8,27 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{AuthKind, Config, ProviderKind, SavedModel},
-    session::Message,
+    session::{Message, Role, ToolCall},
+    tools,
 };
 
 #[derive(Debug)]
 pub enum StreamEvent {
-    Delta { request_id: u64, text: String },
-    Done { request_id: u64 },
-    Error { request_id: u64, message: String },
+    Delta {
+        request_id: u64,
+        text: String,
+    },
+    ToolCalls {
+        request_id: u64,
+        calls: Vec<ToolCall>,
+    },
+    Done {
+        request_id: u64,
+    },
+    Error {
+        request_id: u64,
+        message: String,
+    },
 }
 
 #[derive(Clone)]
@@ -104,14 +117,18 @@ impl Backend {
         self,
         request_id: u64,
         messages: Vec<Message>,
+        tools_enabled: bool,
         events: mpsc::UnboundedSender<StreamEvent>,
     ) {
+        let tooling =
+            tools_enabled && matches!(self.provider, ProviderKind::OpenAi | ProviderKind::Custom);
         let result = match self.provider {
             ProviderKind::Unconfigured => Err(anyhow!(
                 "no provider connected; run /connect to get started"
             )),
             ProviderKind::OpenAi | ProviderKind::Custom => {
-                self.stream_openai(request_id, &messages, &events).await
+                self.stream_openai(request_id, &messages, tooling, &events)
+                    .await
             }
             ProviderKind::Ollama => self.stream_ollama(request_id, &messages, &events).await,
         };
@@ -132,13 +149,17 @@ impl Backend {
         &self,
         request_id: u64,
         messages: &[Message],
+        tooling: bool,
         events: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "model": self.model,
-            "messages": messages,
+            "messages": request_messages(messages, tooling)?,
             "stream": true,
         });
+        if tooling {
+            request["tools"] = tools::definitions();
+        }
         let mut builder = self
             .client
             .post(completion_url(&self.base_url))
@@ -155,11 +176,17 @@ impl Backend {
             .await
             .context("connecting to OpenAI-compatible API")?;
         let response = check_response(response, "OpenAI-compatible API").await?;
+        let mut state = OpenAiState::default();
         consume_lines(response, |line| {
-            let event = parse_openai_line(line)?;
+            let event = parse_openai_line(line, &mut state)?;
             send_parsed(request_id, event, events)
         })
-        .await
+        .await?;
+        let calls = state.finish(request_id);
+        if !calls.is_empty() {
+            events.send(StreamEvent::ToolCalls { request_id, calls })?;
+        }
+        Ok(())
     }
 
     async fn stream_ollama(
@@ -170,7 +197,7 @@ impl Backend {
     ) -> Result<()> {
         let request = serde_json::json!({
             "model": self.model,
-            "messages": messages,
+            "messages": request_messages(messages, false)?,
             "stream": true,
         });
         let response = self
@@ -196,6 +223,41 @@ fn completion_url(base_url: &str) -> String {
     } else {
         format!("{base_url}/chat/completions")
     }
+}
+
+fn request_messages(messages: &[Message], tooling: bool) -> Result<Vec<serde_json::Value>> {
+    let mut request = Vec::with_capacity(messages.len() + 1);
+    request.push(serde_json::json!({
+        "role": "system",
+        "content": tools::system_prompt(tooling),
+    }));
+    for message in messages {
+        if message.role == Role::Tool && !tooling {
+            request.push(serde_json::json!({
+                "role": "user",
+                "content": format!("Tool result:\n{}", message.content),
+            }));
+            continue;
+        }
+        if message.role == Role::Assistant
+            && message.content.is_empty()
+            && message.tool_calls.is_none()
+        {
+            continue;
+        }
+        let mut value = serde_json::to_value(message)?;
+        if !tooling {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("tool_calls");
+                object.remove("tool_call_id");
+            }
+            if message.role == Role::Assistant && message.content.is_empty() {
+                continue;
+            }
+        }
+        request.push(value);
+    }
+    Ok(request)
 }
 
 async fn check_response(response: Response, provider: &str) -> Result<Response> {
@@ -272,6 +334,67 @@ fn send_parsed(
     }
 }
 
+#[derive(Default)]
+struct OpenAiState {
+    calls: BTreeMap<usize, ToolCallBuilder>,
+}
+
+impl OpenAiState {
+    fn record(&mut self, calls: Vec<OpenAiToolCall>) {
+        for call in calls {
+            let builder = self.calls.entry(call.index).or_default();
+            if let Some(id) = call.id.filter(|id| !id.is_empty()) {
+                if builder.id.is_empty() {
+                    builder.id = id;
+                }
+            }
+            let Some(function) = call.function else {
+                continue;
+            };
+            if let Some(name) = function.name.filter(|name| !name.is_empty()) {
+                if builder.name.is_empty() {
+                    builder.name = name;
+                } else if !builder.name.ends_with(&name) {
+                    builder.name.push_str(&name);
+                }
+            }
+            if let Some(arguments) = function.arguments {
+                builder.arguments.push_str(&arguments);
+            }
+        }
+    }
+
+    fn finish(self, request_id: u64) -> Vec<ToolCall> {
+        self.calls
+            .into_iter()
+            .filter_map(|(index, builder)| {
+                let name = builder.name.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let id = if builder.id.is_empty() {
+                    format!("call_{request_id}_{index}")
+                } else {
+                    builder.id
+                };
+                let arguments = if builder.arguments.trim().is_empty() {
+                    "{}".to_owned()
+                } else {
+                    builder.arguments
+                };
+                Some(ToolCall::new(id, name, arguments))
+            })
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct ToolCallBuilder {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 #[derive(Deserialize)]
 struct OpenAiChunk {
     #[serde(default)]
@@ -287,6 +410,22 @@ struct OpenAiChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiToolCall {
+    #[serde(default)]
+    index: usize,
+    id: Option<String>,
+    function: Option<OpenAiFunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -294,7 +433,7 @@ struct OpenAiError {
     message: String,
 }
 
-fn parse_openai_line(line: &str) -> Result<ParsedLine> {
+fn parse_openai_line(line: &str, state: &mut OpenAiState) -> Result<ParsedLine> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') {
         return Ok(ParsedLine::Ignore);
@@ -310,11 +449,15 @@ fn parse_openai_line(line: &str) -> Result<ParsedLine> {
     if let Some(error) = chunk.error {
         bail!("OpenAI stream error: {}", error.message);
     }
-    let text = chunk
-        .choices
-        .into_iter()
-        .filter_map(|choice| choice.delta.content)
-        .collect::<String>();
+    let mut text = String::new();
+    for choice in chunk.choices {
+        if let Some(content) = choice.delta.content {
+            text.push_str(&content);
+        }
+        if let Some(calls) = choice.delta.tool_calls {
+            state.record(calls);
+        }
+    }
     Ok(if text.is_empty() {
         ParsedLine::Ignore
     } else {
@@ -353,8 +496,10 @@ fn parse_ollama_line(line: &str) -> Result<ParsedLine> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedLine, completion_url, parse_ollama_line, parse_openai_line, response_error_detail,
+        OpenAiState, ParsedLine, completion_url, parse_ollama_line, parse_openai_line,
+        request_messages, response_error_detail,
     };
+    use crate::session::{Message, Role, ToolCall};
 
     #[test]
     fn completion_url_accepts_a_base_or_full_endpoint() {
@@ -370,19 +515,87 @@ mod tests {
 
     #[test]
     fn parses_openai_deltas_and_done() {
+        let mut state = OpenAiState::default();
         assert_eq!(
-            parse_openai_line(": keep-alive").unwrap(),
+            parse_openai_line(": keep-alive", &mut state).unwrap(),
             ParsedLine::Ignore
         );
         assert_eq!(
-            parse_openai_line("event: message").unwrap(),
+            parse_openai_line("event: message", &mut state).unwrap(),
             ParsedLine::Ignore
         );
         assert_eq!(
-            parse_openai_line(r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#).unwrap(),
+            parse_openai_line(
+                r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
+                &mut state
+            )
+            .unwrap(),
             ParsedLine::Delta("Hello".to_owned())
         );
-        assert_eq!(parse_openai_line("data: [DONE]").unwrap(), ParsedLine::Done);
+        assert_eq!(
+            parse_openai_line("data: [DONE]", &mut state).unwrap(),
+            ParsedLine::Done
+        );
+    }
+
+    #[test]
+    fn accumulates_streamed_tool_calls() {
+        let mut state = OpenAiState::default();
+        parse_openai_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"write_file","arguments":"{\"path\":"}}]}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        parse_openai_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"test.html\"}"}}]}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        parse_openai_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"read_file","arguments":"{\"path\":\"src/main.rs\"}"}}]}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+
+        let calls = state.finish(7);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[0].function.name, "write_file");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"test.html"}"#);
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(calls[1].function.name, "read_file");
+    }
+
+    #[test]
+    fn request_messages_keep_tool_history_only_when_tooling_is_enabled() {
+        let mut assistant = Message::new(Role::Assistant, "");
+        assistant.tool_calls = Some(vec![ToolCall::new(
+            "call_1",
+            "read_file",
+            r#"{"path":"README.md"}"#,
+        )]);
+        let messages = vec![
+            Message::new(Role::User, "read it"),
+            assistant,
+            Message::tool_result("call_1", "contents"),
+        ];
+
+        let tooling = request_messages(&messages, true).unwrap();
+        assert_eq!(tooling[0]["role"], "system");
+        assert_eq!(tooling[2]["tool_calls"][0]["function"]["name"], "read_file");
+        assert_eq!(tooling[3]["tool_call_id"], "call_1");
+
+        let plain = request_messages(&messages, false).unwrap();
+        assert!(
+            plain
+                .iter()
+                .all(|message| message.get("tool_calls").is_none())
+        );
+        assert!(plain.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Tool result"))
+        }));
     }
 
     #[test]
@@ -399,7 +612,8 @@ mod tests {
 
     #[test]
     fn stream_errors_are_not_silently_ignored() {
-        assert!(parse_openai_line(r#"data: {"error":{"message":"bad key"}}"#).is_err());
+        let mut state = OpenAiState::default();
+        assert!(parse_openai_line(r#"data: {"error":{"message":"bad key"}}"#, &mut state).is_err());
         assert!(parse_ollama_line(r#"{"error":"model missing"}"#).is_err());
         assert_eq!(
             response_error_detail(r#"{"error":{"message":"nope"}}"#),

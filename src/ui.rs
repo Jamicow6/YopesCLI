@@ -7,13 +7,17 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, COMMANDS, CommandSpec, ConnectStage, ConnectState, NoticeKind},
+    app::{App, COMMANDS, CommandSpec, ConnectStage, ConnectState, NoticeKind, ToolApproval},
+    diff::{ChangeKind, DiffLine, FileDiff},
     session::Role,
+    tools,
 };
 
 const MUTED: Color = Color::DarkGray;
 const ACCENT: Color = Color::Cyan;
 const ERROR: Color = Color::Red;
+const ADDED: Color = Color::Green;
+const REMOVED: Color = Color::Red;
 const TEXT: Color = Color::Reset;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PALETTE_WIDTH: u16 = 60;
@@ -30,7 +34,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let palette = if app.show_help || app.connect_open() {
+    let palette = if app.show_help || app.connect_open() || app.approval.is_some() {
         Vec::new()
     } else {
         app.palette_matches()
@@ -68,10 +72,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_composer(frame, app, chunks[index + 1]);
     draw_footer(frame, app, chunks[index + 2]);
 
-    if app.show_help {
+    let spinner = app.spinner;
+    if let Some(approval) = app.approval.as_mut() {
+        draw_approval(frame, approval, area);
+    } else if app.show_help {
         draw_help(frame, area);
     } else if let Some(connect) = app.connect_state() {
-        draw_connect(frame, connect, app.spinner, area);
+        draw_connect(frame, connect, spinner, area);
     }
 }
 
@@ -155,24 +162,50 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines = Vec::new();
     for (index, message) in app.session.messages.iter().enumerate() {
-        if index > 0 {
+        let has_calls = message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty());
+        let streaming = index + 1 == app.session.messages.len() && app.is_streaming();
+        if message.role == Role::Assistant && message.content.is_empty() && !has_calls && !streaming
+        {
+            continue;
+        }
+        if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
         let (label, color) = match message.role {
             Role::User => ("you", MUTED),
             Role::Assistant => ("yopes", ACCENT),
+            Role::Tool => ("tool", MUTED),
         };
         lines.push(Line::styled(
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
-        let streaming = index + 1 == app.session.messages.len() && app.is_streaming();
-        if message.content.is_empty() && streaming {
+        if message.content.is_empty() && streaming && !has_calls {
             lines.push(Line::styled("▌", Style::default().fg(ACCENT)));
             continue;
         }
-        for content_line in message.content.split('\n') {
-            lines.push(Line::styled(content_line, Style::default().fg(TEXT)));
+        if !message.content.is_empty() {
+            for content_line in message.content.split('\n') {
+                lines.push(Line::styled(content_line, Style::default().fg(TEXT)));
+            }
+        }
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                lines.push(Line::from(vec![
+                    Span::styled("→ ", Style::default().fg(ACCENT)),
+                    Span::styled(
+                        call.function.name.clone(),
+                        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", tools::preview(call)),
+                        Style::default().fg(MUTED),
+                    ),
+                ]));
+            }
         }
         if streaming {
             if let Some(line) = lines.last_mut() {
@@ -284,7 +317,7 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(inner);
-    let prompt_style = if app.is_streaming() {
+    let prompt_style = if app.is_busy() {
         Style::default().fg(MUTED)
     } else {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -330,7 +363,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(8), Constraint::Length(right_width)])
         .split(inner);
 
-    let (text, color) = if let Some(elapsed) = app.elapsed_seconds() {
+    let (text, color) = if app.approval.is_some() {
+        (
+            "approval needed · enter run · a always allow · esc deny · v diff".to_owned(),
+            ACCENT,
+        )
+    } else if let Some(running) = &app.running_tool {
+        let elapsed = app.running_tool_elapsed().unwrap_or_default();
+        (
+            format!(
+                "{} running {} · {elapsed:.1}s",
+                SPINNER[app.spinner % SPINNER.len()],
+                running.call.function.name
+            ),
+            ACCENT,
+        )
+    } else if let Some(elapsed) = app.elapsed_seconds() {
         (
             format!(
                 "{} thinking · {elapsed:.1}s · esc stop",
@@ -362,6 +410,267 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             columns[1],
         );
     }
+}
+
+fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
+    let width = area.width.saturating_sub(4).min(160);
+    let height = area.height.saturating_sub(4);
+    if width < 40 || height < 8 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+
+    let name = approval.call.function.name.as_str();
+    let view = if approval.side_by_side {
+        "unified"
+    } else {
+        "side-by-side"
+    };
+    let hint = if approval.diff.is_some() {
+        format!(" enter run · a always allow {name} · esc deny · v {view} ")
+    } else {
+        format!(" enter run · a always allow {name} · esc deny ")
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title_top(Line::from(vec![
+            Span::styled(
+                " approval ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("· {name} "), Style::default().fg(MUTED)),
+        ]))
+        .title_bottom(Line::styled(hint, Style::default().fg(MUTED)))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    approval.page_height = inner.height;
+    let mut lines = approval_lines(approval, usize::from(inner.width));
+    let maximum = lines.len().saturating_sub(usize::from(inner.height));
+    approval.scroll = approval.scroll.min(maximum);
+    if lines.len() < usize::from(inner.height) {
+        while lines.len() < usize::from(inner.height) {
+            lines.push(Line::raw(""));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).scroll((approval.scroll.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
+}
+
+fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    if let Some(diff) = &approval.diff {
+        let mut spans = vec![Span::styled(
+            truncate(&diff.path, width.saturating_sub(20)),
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )];
+        if diff.created {
+            spans.push(Span::styled("  new file", Style::default().fg(MUTED)));
+        }
+        spans.push(Span::styled(
+            format!("  +{}", diff.additions),
+            Style::default().fg(ADDED),
+        ));
+        spans.push(Span::styled(
+            format!("  −{}", diff.deletions),
+            Style::default().fg(REMOVED),
+        ));
+        lines.push(Line::from(spans));
+        if let Some(note) = &approval.note {
+            lines.push(Line::styled(
+                truncate(note, width),
+                Style::default().fg(ERROR),
+            ));
+        }
+        lines.push(Line::raw(""));
+        if diff.is_empty() {
+            if diff.note.is_none() {
+                lines.push(Line::styled("No changes.", Style::default().fg(MUTED)));
+            } else if let Some(note) = &diff.note {
+                lines.push(Line::styled(
+                    truncate(note, width),
+                    Style::default().fg(MUTED),
+                ));
+            }
+        } else if approval.side_by_side {
+            lines.extend(side_by_side_lines(diff, width));
+        } else {
+            lines.extend(unified_lines(diff, width));
+        }
+        return lines;
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            approval.call.function.name.clone(),
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}", tools::preview(&approval.call)),
+            Style::default().fg(MUTED),
+        ),
+    ]));
+    if let Some(note) = &approval.note {
+        lines.push(Line::styled(
+            truncate(note, width),
+            Style::default().fg(ERROR),
+        ));
+    }
+    lines.push(Line::raw(""));
+    if let Some(command) = tools::command_text(&approval.call) {
+        for (index, line) in command.lines().enumerate() {
+            let line = if index == 0 {
+                format!("$ {line}")
+            } else {
+                format!("  {line}")
+            };
+            for wrapped in textwrap::wrap(&line, textwrap::Options::new(width.max(1))) {
+                lines.push(Line::styled(
+                    wrapped.into_owned(),
+                    Style::default().fg(TEXT),
+                ));
+            }
+        }
+    } else {
+        lines.push(Line::styled(
+            "This tool only reads the workspace.",
+            Style::default().fg(MUTED),
+        ));
+    }
+    lines
+}
+
+fn unified_lines(diff: &FileDiff, width: usize) -> Vec<Line<'static>> {
+    let gutter = line_number_width(diff);
+    let text_width = width.saturating_sub(gutter * 2 + 4).max(1);
+    let mut lines = Vec::new();
+    for (index, hunk) in diff.hunks.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            diff.header(hunk),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        for line in &hunk.lines {
+            let (sign, color) = diff_sign(line.kind);
+            let old = line
+                .old_line
+                .map(|number| number.to_string())
+                .unwrap_or_default();
+            let new = line
+                .new_line
+                .map(|number| number.to_string())
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{old:>gutter$} {new:>gutter$} "),
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(format!("{sign} "), Style::default().fg(color)),
+                Span::styled(truncate(&line.text, text_width), Style::default().fg(color)),
+            ]));
+        }
+    }
+    lines
+}
+
+fn side_by_side_lines(diff: &FileDiff, width: usize) -> Vec<Line<'static>> {
+    let gutter = line_number_width(diff);
+    let text_width = width.saturating_sub(gutter * 2 + 5).max(1) / 2;
+    let mut lines = Vec::new();
+    for (index, hunk) in diff.hunks.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            diff.header(hunk),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        for row in hunk.side_rows() {
+            let left_number = row
+                .left
+                .as_ref()
+                .and_then(|line| line.old_line)
+                .map(|number| number.to_string())
+                .unwrap_or_default();
+            let right_number = row
+                .right
+                .as_ref()
+                .and_then(|line| line.new_line)
+                .map(|number| number.to_string())
+                .unwrap_or_default();
+            let left_text = row
+                .left
+                .as_ref()
+                .map_or_else(String::new, |line| truncate(&line.text, text_width));
+            let right_text = row
+                .right
+                .as_ref()
+                .map_or_else(String::new, |line| truncate(&line.text, text_width));
+            let left_style = row
+                .left
+                .as_ref()
+                .map_or_else(|| Style::default().fg(TEXT), |line| diff_style(line));
+            let right_style = row
+                .right
+                .as_ref()
+                .map_or_else(|| Style::default().fg(TEXT), |line| diff_style(line));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{left_number:>gutter$} "),
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(format!("{left_text:<text_width$}"), left_style),
+                Span::styled(" │ ", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!("{right_number:>gutter$} "),
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(right_text, right_style),
+            ]));
+        }
+    }
+    lines
+}
+
+fn line_number_width(diff: &FileDiff) -> usize {
+    diff.hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .filter_map(|line| line.old_line.or(line.new_line))
+        .max()
+        .unwrap_or(1)
+        .to_string()
+        .len()
+        .max(3)
+}
+
+fn diff_sign(kind: ChangeKind) -> (&'static str, Color) {
+    match kind {
+        ChangeKind::Context => (" ", TEXT),
+        ChangeKind::Insert => ("+", ADDED),
+        ChangeKind::Delete => ("-", REMOVED),
+    }
+}
+
+fn diff_style(line: &DiffLine) -> Style {
+    let (_, color) = diff_sign(line.kind);
+    Style::default().fg(color)
 }
 
 fn draw_connect(frame: &mut Frame, connect: &ConnectState, spinner: usize, area: Rect) {
@@ -616,8 +925,8 @@ fn truncate(text: &str, width: usize) -> String {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let width = area.width.min(62);
-    let height = area.height.min(24);
+    let width = area.width.min(68);
+    let height = area.height.min(32);
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,
@@ -644,8 +953,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("alt+enter", "new line"),
         help_row("/", "open command palette"),
         help_row("tab", "complete selected command"),
-        help_row("↑ ↓", "palette or conversation"),
-        help_row("esc", "stop streaming / close"),
+        help_row("↑ ↓", "palette, conversation, or diff"),
+        help_row("esc", "stop streaming / deny tool / close"),
+        help_row("enter", "run the pending tool"),
+        help_row("a", "always allow that tool this session"),
+        help_row("v", "toggle unified / side-by-side diff"),
         help_row("ctrl+n", "new session"),
         help_row("ctrl+u", "clear input"),
         help_row("ctrl+w", "delete previous word"),

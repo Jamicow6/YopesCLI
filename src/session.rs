@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -14,12 +15,48 @@ const SESSION_VERSION: u32 = 1;
 pub enum Role {
     User,
     Assistant,
+    Tool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+impl ToolCall {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: "function".to_owned(),
+            function: FunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
@@ -27,6 +64,17 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: Some(call_id.into()),
         }
     }
 }
@@ -71,14 +119,54 @@ impl Session {
                 SESSION_VERSION
             );
         }
-        while session
-            .messages
-            .last()
-            .is_some_and(|message| message.role == Role::Assistant && message.content.is_empty())
-        {
-            session.messages.pop();
-        }
+        session.repair_messages();
         Ok(session)
+    }
+
+    fn repair_messages(&mut self) {
+        loop {
+            let Some(position) = self.messages.iter().rposition(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+            }) else {
+                break;
+            };
+            let expected = self.messages[position]
+                .tool_calls
+                .as_ref()
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|call| call.id.clone())
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            let mut answered = BTreeSet::new();
+            for message in &self.messages[position + 1..] {
+                if message.role != Role::Tool {
+                    break;
+                }
+                if let Some(id) = &message.tool_call_id {
+                    if expected.contains(id) {
+                        answered.insert(id.clone());
+                    }
+                }
+            }
+            if answered.len() == expected.len() {
+                break;
+            }
+            self.messages.truncate(position);
+        }
+        while self.messages.last().is_some_and(|message| {
+            message.role == Role::Assistant
+                && message.content.is_empty()
+                && message.tool_calls.is_none()
+        }) {
+            self.messages.pop();
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -124,7 +212,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, Role, Session};
+    use super::{Message, Role, Session, ToolCall};
 
     #[test]
     fn title_is_normalized_and_bounded() {
@@ -145,5 +233,45 @@ mod tests {
             serde_json::to_string(&message).unwrap(),
             r#"{"role":"user","content":"hello"}"#
         );
+    }
+
+    #[test]
+    fn tool_messages_use_openai_compatible_shapes() {
+        let mut assistant = Message::new(Role::Assistant, "");
+        assistant.tool_calls = Some(vec![ToolCall::new(
+            "call_1",
+            "write_file",
+            r#"{"path":"test.html"}"#,
+        )]);
+        assert_eq!(
+            serde_json::to_string(&assistant).unwrap(),
+            r#"{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"test.html\"}"}}]}"#
+        );
+
+        let result = Message::tool_result("call_1", "Wrote 12 bytes.");
+        assert_eq!(
+            serde_json::to_string(&result).unwrap(),
+            r#"{"role":"tool","content":"Wrote 12 bytes.","tool_call_id":"call_1"}"#
+        );
+    }
+
+    #[test]
+    fn incomplete_tool_calls_are_removed_with_their_results() {
+        let mut session = Session::new();
+        session
+            .messages
+            .push(Message::new(Role::User, "write a file"));
+        let mut assistant = Message::new(Role::Assistant, "");
+        assistant.tool_calls = Some(vec![
+            ToolCall::new("call_1", "write_file", "{}"),
+            ToolCall::new("call_2", "read_file", "{}"),
+        ]);
+        session.messages.push(assistant);
+        session.messages.push(Message::tool_result("call_1", "ok"));
+
+        session.repair_messages();
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content, "write a file");
     }
 }

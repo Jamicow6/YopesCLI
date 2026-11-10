@@ -1,4 +1,8 @@
-use std::{path::PathBuf, time::Instant};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::PathBuf,
+    time::Instant,
+};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
@@ -7,8 +11,12 @@ use crate::{
     backend::{Backend, StreamEvent},
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
-    session::{Message, Role, Session},
+    diff::FileDiff,
+    session::{Message, Role, Session, ToolCall},
+    tools,
 };
+
+const MAX_TOOL_ROUNDS: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoticeKind {
@@ -25,20 +33,19 @@ pub struct Notice {
 pub struct CommandSpec {
     pub name: &'static str,
     pub description: &'static str,
-    pub takes_argument: bool,
+    pub argument: Option<&'static str>,
 }
 
 impl CommandSpec {
     pub fn display_name(self) -> String {
-        if self.takes_argument {
-            format!("{} [name]", self.name)
-        } else {
-            self.name.to_owned()
-        }
+        self.argument.map_or_else(
+            || self.name.to_owned(),
+            |argument| format!("{} [{argument}]", self.name),
+        )
     }
 
     fn completion(self) -> String {
-        if self.takes_argument {
+        if self.argument.is_some() {
             format!("{} ", self.name)
         } else {
             self.name.to_owned()
@@ -46,37 +53,112 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 5] = [
+pub const COMMANDS: [CommandSpec; 6] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
-        takes_argument: false,
+        argument: None,
     },
     CommandSpec {
         name: "/new",
         description: "Start a fresh session",
-        takes_argument: false,
+        argument: None,
     },
     CommandSpec {
         name: "/connect",
         description: "Connect a provider and model",
-        takes_argument: false,
+        argument: None,
     },
     CommandSpec {
         name: "/model",
         description: "Show or change the active model",
-        takes_argument: true,
+        argument: Some("name"),
+    },
+    CommandSpec {
+        name: "/tools",
+        description: "Set tool mode: on, off, auto, ask",
+        argument: Some("mode"),
     },
     CommandSpec {
         name: "/quit",
         description: "Save and exit",
-        takes_argument: false,
+        argument: None,
     },
 ];
 
 struct ActiveRequest {
     id: u64,
     started: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolsMode {
+    #[default]
+    On,
+    Off,
+    Auto,
+    Ask,
+}
+
+impl ToolsMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Ask => "ask",
+        }
+    }
+
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::On => "reads run automatically; writes and commands ask",
+            Self::Off => "tools are not offered to the model",
+            Self::Auto => "all tool calls run automatically",
+            Self::Ask => "every tool call asks for approval",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            "auto" => Some(Self::Auto),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+
+    pub const fn advertised(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    fn needs_approval(self, tool: &str, approved: &HashSet<String>) -> bool {
+        match self {
+            Self::Off | Self::Auto => false,
+            Self::Ask => true,
+            Self::On => tools::requires_approval(tool) && !approved.contains(tool),
+        }
+    }
+}
+
+pub struct ToolApproval {
+    pub call: ToolCall,
+    pub diff: Option<FileDiff>,
+    pub note: Option<String>,
+    pub scroll: usize,
+    pub page_height: u16,
+    pub side_by_side: bool,
+}
+
+pub struct RunningTool {
+    pub call: ToolCall,
+    pub started: Instant,
+}
+
+pub struct ToolEvent {
+    pub call: ToolCall,
+    pub result: std::result::Result<String, String>,
 }
 
 const CUSTOM_PROVIDER_ID: &str = "custom";
@@ -385,8 +467,12 @@ pub enum Action {
     Start {
         request_id: u64,
         messages: Vec<Message>,
+        tools_enabled: bool,
     },
     Cancel(u64),
+    RunTool {
+        call: ToolCall,
+    },
     Quit,
     LoadCatalog,
 }
@@ -493,8 +579,14 @@ pub struct App {
     pub should_quit: bool,
     pub notice: Option<Notice>,
     pub spinner: usize,
+    pub tools_mode: ToolsMode,
+    pub approval: Option<ToolApproval>,
+    pub running_tool: Option<RunningTool>,
     active: Option<ActiveRequest>,
     next_request_id: u64,
+    pending_tools: VecDeque<ToolCall>,
+    approved_tools: HashSet<String>,
+    tool_rounds: usize,
     session_path: Option<PathBuf>,
     config_path: PathBuf,
     palette_index: usize,
@@ -521,8 +613,14 @@ impl App {
             should_quit: false,
             notice: None,
             spinner: 0,
+            tools_mode: ToolsMode::default(),
+            approval: None,
+            running_tool: None,
             active: None,
             next_request_id: 0,
+            pending_tools: VecDeque::new(),
+            approved_tools: HashSet::new(),
+            tool_rounds: 0,
             session_path,
             config_path,
             palette_index: 0,
@@ -541,6 +639,20 @@ impl App {
 
     pub fn is_streaming(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn tools_busy(&self) -> bool {
+        self.approval.is_some() || self.running_tool.is_some() || !self.pending_tools.is_empty()
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.is_streaming() || self.tools_busy()
+    }
+
+    pub fn running_tool_elapsed(&self) -> Option<f64> {
+        self.running_tool
+            .as_ref()
+            .map(|running| running.started.elapsed().as_secs_f64())
     }
 
     pub fn active_request_id(&self) -> Option<u64> {
@@ -614,6 +726,9 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, value: &str) {
+        if self.approval.is_some() {
+            return;
+        }
         if let Some(connect) = self.connect.as_mut() {
             let clean = value
                 .chars()
@@ -641,6 +756,18 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(approval) = self.approval.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    approval.scroll = approval.scroll.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    approval.scroll = approval.scroll.saturating_add(3);
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.connect.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.connect_move(false),
@@ -665,6 +792,9 @@ impl App {
         {
             self.should_quit = true;
             return Action::Quit;
+        }
+        if self.approval.is_some() {
+            return self.handle_approval_key(key);
         }
         if self.connect.is_some() {
             return self.handle_connect_key(key);
@@ -780,6 +910,151 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    fn handle_approval_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => self.deny_pending_tool(),
+            KeyCode::Enter => self.approve_pending_tool(false),
+            KeyCode::Char('a' | 'A')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.approve_pending_tool(true)
+            }
+            KeyCode::Char('v' | 'V')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(approval) = self.approval.as_mut() {
+                    approval.side_by_side = !approval.side_by_side;
+                    approval.scroll = 0;
+                }
+                Action::None
+            }
+            KeyCode::Up => {
+                if let Some(approval) = self.approval.as_mut() {
+                    approval.scroll = approval.scroll.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Some(approval) = self.approval.as_mut() {
+                    approval.scroll = approval.scroll.saturating_add(1);
+                }
+                Action::None
+            }
+            KeyCode::PageUp => {
+                if let Some(approval) = self.approval.as_mut() {
+                    let page = usize::from(approval.page_height.max(1));
+                    approval.scroll = approval.scroll.saturating_sub(page);
+                }
+                Action::None
+            }
+            KeyCode::PageDown => {
+                if let Some(approval) = self.approval.as_mut() {
+                    let page = usize::from(approval.page_height.max(1));
+                    approval.scroll = approval.scroll.saturating_add(page);
+                }
+                Action::None
+            }
+            KeyCode::Home => {
+                if let Some(approval) = self.approval.as_mut() {
+                    approval.scroll = 0;
+                }
+                Action::None
+            }
+            KeyCode::End => {
+                if let Some(approval) = self.approval.as_mut() {
+                    approval.scroll = usize::MAX;
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn approve_pending_tool(&mut self, always: bool) -> Action {
+        self.approval = None;
+        let Some(call) = self.pending_tools.pop_front() else {
+            return Action::None;
+        };
+        if always {
+            self.approved_tools.insert(call.function.name.clone());
+        }
+        self.start_tool(call)
+    }
+
+    fn deny_pending_tool(&mut self) -> Action {
+        self.approval = None;
+        let Some(call) = self.pending_tools.pop_front() else {
+            return Action::None;
+        };
+        self.record_tool_result(
+            call.id,
+            "The user denied this tool call. Do not retry it without asking.",
+        );
+        self.follow_tail = true;
+        self.save_session();
+        self.advance_tools()
+    }
+
+    fn start_tool(&mut self, call: ToolCall) -> Action {
+        self.running_tool = Some(RunningTool {
+            call: call.clone(),
+            started: Instant::now(),
+        });
+        self.follow_tail = true;
+        Action::RunTool { call }
+    }
+
+    fn advance_tools(&mut self) -> Action {
+        if self.is_streaming() || self.approval.is_some() || self.running_tool.is_some() {
+            return Action::None;
+        }
+        let Some(call) = self.pending_tools.front().cloned() else {
+            return self.continue_after_tools();
+        };
+        if self
+            .tools_mode
+            .needs_approval(&call.function.name, &self.approved_tools)
+        {
+            let change = tools::change_preview(&call);
+            self.approval = Some(ToolApproval {
+                call,
+                diff: change.diff,
+                note: change.note,
+                scroll: 0,
+                page_height: 0,
+                side_by_side: true,
+            });
+            self.follow_tail = true;
+            return Action::None;
+        }
+        self.pending_tools.pop_front();
+        self.start_tool(call)
+    }
+
+    fn continue_after_tools(&mut self) -> Action {
+        if !self
+            .session
+            .messages
+            .last()
+            .is_some_and(|message| message.role == Role::Tool)
+        {
+            return Action::None;
+        }
+        if self.tool_rounds >= MAX_TOOL_ROUNDS {
+            self.error(format!(
+                "Stopped after {MAX_TOOL_ROUNDS} tool rounds. Send another message to continue."
+            ));
+            self.save_session();
+            return Action::None;
+        }
+        let messages = self.session.messages.clone();
+        self.begin_request(messages)
     }
 
     fn handle_connect_key(&mut self, key: KeyEvent) -> Action {
@@ -1478,8 +1753,8 @@ impl App {
     }
 
     fn submit(&mut self) -> Action {
-        if self.is_streaming() {
-            self.info("Stop the current response before sending another message.");
+        if self.is_busy() {
+            self.info("Wait for the current response or tool to finish.");
             return Action::None;
         }
         let value = self.input.take();
@@ -1497,9 +1772,14 @@ impl App {
         }
 
         self.notice = None;
+        self.tool_rounds = 0;
         self.session.update_title(prompt);
         self.session.messages.push(Message::new(Role::User, value));
         let messages = self.session.messages.clone();
+        self.begin_request(messages)
+    }
+
+    fn begin_request(&mut self, messages: Vec<Message>) -> Action {
         self.session
             .messages
             .push(Message::new(Role::Assistant, ""));
@@ -1514,6 +1794,7 @@ impl App {
         Action::Start {
             request_id,
             messages,
+            tools_enabled: self.tools_mode.advertised(),
         }
     }
 
@@ -1532,6 +1813,34 @@ impl App {
                     self.info(format!("Model changed to {model}"));
                 }
             }
+            "/tools" => {
+                let value = parts.next().unwrap_or_default().to_ascii_lowercase();
+                if value.is_empty() {
+                    self.info(format!(
+                        "Tools: {} — {} · /tools on|off|auto|ask",
+                        self.tools_mode.label(),
+                        self.tools_mode.detail()
+                    ));
+                } else if let Some(mode) = ToolsMode::parse(&value) {
+                    self.tools_mode = mode;
+                    let suffix = if mode.advertised()
+                        && !matches!(
+                            self.backend.provider_kind(),
+                            ProviderKind::OpenAi | ProviderKind::Custom
+                        ) {
+                        " · tools require an OpenAI-compatible provider"
+                    } else {
+                        ""
+                    };
+                    self.info(format!(
+                        "Tools: {} — {}{suffix}",
+                        mode.label(),
+                        mode.detail()
+                    ));
+                } else {
+                    self.error("Usage: /tools on|off|auto|ask");
+                }
+            }
             "/quit" => {
                 self.should_quit = true;
                 return Action::Quit;
@@ -1544,8 +1853,8 @@ impl App {
     }
 
     fn begin_connect(&mut self) -> Action {
-        if self.is_streaming() {
-            self.info("Stop the current response before connecting a provider.");
+        if self.is_busy() {
+            self.info("Finish the current turn before connecting a provider.");
             return Action::None;
         }
         self.palette_hidden = true;
@@ -1560,14 +1869,18 @@ impl App {
     }
 
     fn new_session(&mut self) {
-        if self.is_streaming() {
-            self.info("Stop the current response before starting a new session.");
+        if self.is_busy() {
+            self.info("Finish the current turn before starting a new session.");
             return;
         }
         self.session = Session::new();
         self.scroll = 0;
         self.follow_tail = true;
         self.notice = None;
+        self.tool_rounds = 0;
+        self.pending_tools.clear();
+        self.approval = None;
+        self.approved_tools.clear();
         self.save_session();
     }
 
@@ -1575,13 +1888,15 @@ impl App {
         let Some(active) = self.active.take() else {
             return Action::None;
         };
+        self.discard_pending_tools("The user stopped the response before this tool could run.");
+        self.tool_rounds = 0;
         self.remove_empty_response();
         self.info("Response stopped. Partial output was kept.");
         self.save_session();
         Action::Cancel(active.id)
     }
 
-    pub fn on_stream_event(&mut self, event: StreamEvent) {
+    pub fn on_stream_event(&mut self, event: StreamEvent) -> Action {
         match event {
             StreamEvent::Delta { request_id, text }
                 if self.active_request_id() == Some(request_id) =>
@@ -1589,32 +1904,87 @@ impl App {
                 if let Some(message) = self.session.messages.last_mut() {
                     message.content.push_str(&text);
                 }
+                Action::None
+            }
+            StreamEvent::ToolCalls { request_id, calls }
+                if self.active_request_id() == Some(request_id) =>
+            {
+                if let Some(message) = self.session.messages.last_mut() {
+                    if message.role == Role::Assistant {
+                        message.tool_calls = Some(calls.clone());
+                    }
+                }
+                self.tool_rounds = self.tool_rounds.saturating_add(1);
+                self.pending_tools.extend(calls);
+                self.follow_tail = true;
+                self.save_session();
+                Action::None
             }
             StreamEvent::Done { request_id } if self.active_request_id() == Some(request_id) => {
                 self.active = None;
-                self.remove_empty_response();
-                self.save_session();
+                if self.pending_tools.is_empty() {
+                    self.tool_rounds = 0;
+                    self.remove_empty_response();
+                    self.save_session();
+                    Action::None
+                } else {
+                    self.save_session();
+                    self.advance_tools()
+                }
             }
             StreamEvent::Error {
                 request_id,
                 message,
             } if self.active_request_id() == Some(request_id) => {
                 self.active = None;
+                self.discard_pending_tools("The response failed before this tool call could run.");
+                self.tool_rounds = 0;
                 self.remove_empty_response();
                 self.error(message);
                 self.save_session();
+                Action::None
             }
-            _ => {}
+            _ => Action::None,
         }
     }
 
-    fn remove_empty_response(&mut self) {
-        if self
-            .session
-            .messages
-            .last()
-            .is_some_and(|message| message.role == Role::Assistant && message.content.is_empty())
+    pub fn on_tool_result(&mut self, event: ToolEvent) -> Action {
+        if !self
+            .running_tool
+            .as_ref()
+            .is_some_and(|running| running.call.id == event.call.id)
         {
+            return Action::None;
+        }
+        self.running_tool = None;
+        let content = match event.result {
+            Ok(output) => output,
+            Err(error) => format!("Error: {error}"),
+        };
+        self.record_tool_result(event.call.id, content);
+        self.save_session();
+        self.advance_tools()
+    }
+
+    fn record_tool_result(&mut self, call_id: impl Into<String>, content: impl Into<String>) {
+        self.session
+            .messages
+            .push(Message::tool_result(call_id, content));
+    }
+
+    fn discard_pending_tools(&mut self, reason: &str) {
+        while let Some(call) = self.pending_tools.pop_front() {
+            self.record_tool_result(call.id, reason);
+        }
+        self.approval = None;
+    }
+
+    fn remove_empty_response(&mut self) {
+        if self.session.messages.last().is_some_and(|message| {
+            message.role == Role::Assistant
+                && message.content.is_empty()
+                && message.tool_calls.is_none()
+        }) {
             self.session.messages.pop();
         }
     }
@@ -1705,10 +2075,11 @@ mod tests {
     fn palette_matches_command_prefixes() {
         assert_eq!(
             command_names("/"),
-            vec!["/help", "/new", "/connect", "/model", "/quit"]
+            vec!["/help", "/new", "/connect", "/model", "/tools", "/quit"]
         );
         assert_eq!(command_names("/c"), vec!["/connect"]);
         assert_eq!(command_names("/m"), vec!["/model"]);
+        assert_eq!(command_names("/t"), vec!["/tools"]);
         assert_eq!(command_names("/MO"), vec!["/model"]);
         assert!(command_names("/model gpt").is_empty());
         assert!(command_names("hello").is_empty());
