@@ -176,10 +176,22 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let paragraph = Paragraph::new(Text::from(lines))
+    let text = Text::from(lines);
+    let total_lines = text
+        .lines
+        .iter()
+        .map(|line| {
+            let content = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            wrapped_line_count(&content, inner.width)
+        })
+        .sum::<usize>();
+    let paragraph = Paragraph::new(text)
         .style(Style::default().bg(BACKGROUND))
         .wrap(Wrap { trim: false });
-    let total_lines = paragraph.line_count(inner.width);
     let maximum = total_lines.saturating_sub(usize::from(inner.height));
     if app.follow_tail {
         app.scroll = maximum;
@@ -231,11 +243,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn wrapped_line_count(text: &str, width: u16) -> usize {
+    let options = textwrap::Options::new(usize::from(width).max(1));
+    text.split('\n')
+        .map(|line| textwrap::wrap(line, &options).len().max(1))
+        .sum()
+}
+
 fn composer_height(app: &App, width: u16) -> u16 {
     let inner_width = width.saturating_sub(4).max(1);
-    let lines = Paragraph::new(app.input.with_cursor())
-        .wrap(Wrap { trim: false })
-        .line_count(inner_width);
+    let lines = wrapped_line_count(&app.input.with_cursor(), inner_width);
     (lines as u16).saturating_add(2).clamp(5, 10)
 }
 
@@ -252,10 +269,8 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let before = Paragraph::new(app.input.before_cursor())
-        .wrap(Wrap { trim: false })
-        .line_count(inner.width.max(1))
-        .saturating_sub(1);
+    let before =
+        wrapped_line_count(app.input.before_cursor(), inner.width.max(1)).saturating_sub(1);
     let height = usize::from(inner.height);
     if before < app.input_scroll {
         app.input_scroll = before;
@@ -344,4 +359,16 @@ fn help_row(key: &'static str, description: &'static str) -> Line<'static> {
         Span::styled(format!("{key:<20}"), Style::default().fg(ACCENT)),
         Span::styled(description, Style::default().fg(TEXT)),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrapped_line_count;
+
+    #[test]
+    fn wrapped_counts_include_words_and_explicit_newlines() {
+        assert_eq!(wrapped_line_count("", 10), 1);
+        assert_eq!(wrapped_line_count("one\ntwo", 10), 2);
+        assert_eq!(wrapped_line_count("aaaaaa aaaaaa aaaaaa", 10), 3);
+    }
 }

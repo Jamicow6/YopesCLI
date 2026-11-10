@@ -33,7 +33,7 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let config = Config::from_args()?;
-    let session = load_session(config.session_path.as_ref())?;
+    let session = load_session(config.session_path.as_deref())?;
     let backend = Backend::new(&config)?;
     let mut app = App::new(session, backend, config.session_path);
     let mut terminal = TerminalGuard::new()?;
