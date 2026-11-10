@@ -305,7 +305,10 @@ fn stop_other_yopes() -> usize {
             .env("YOPES_SELF", std::process::id().to_string())
             .output();
         match output {
-            Ok(out) => out.stdout().to_string().trim().parse().unwrap_or(0),
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0),
             Err(_) => 0,
         }
     }
@@ -340,7 +343,7 @@ fn other_yopes_pids() -> Vec<u32> {
         let Ok(comm) = fs::read(format!("/proc/{pid}/comm")) else {
             continue;
         };
-        if comm.trim() == "yopes" {
+        if String::from_utf8_lossy(&comm).trim() == "yopes" {
             pids.push(pid);
         }
     }

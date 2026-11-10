@@ -21,12 +21,9 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::{
-    signal::unix::{SignalKind, signal},
-    sync::mpsc,
-    task::JoinHandle,
-    time::Duration,
-};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::{sync::mpsc, task::JoinHandle, time::Duration};
 
 use crate::{
     app::{Action, App, ToolEvent},
@@ -60,8 +57,9 @@ async fn run() -> Result<()> {
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    #[cfg(unix)]
     let mut term_signal =
-        signal(SignalKind::termination()).context("installing the termination signal handler")?;
+        signal(SignalKind::terminate()).context("installing the termination signal handler")?;
     let mut active_task: Option<(u64, JoinHandle<()>)> = None;
 
     loop {
@@ -134,6 +132,7 @@ async fn run() -> Result<()> {
                     app.on_catalog(result);
                 }
             }
+            #[cfg(unix)]
             _ = term_signal.recv() => break,
             _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
         }
