@@ -7,9 +7,12 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, COMMANDS, CommandSpec, ConnectStage, ConnectState, NoticeKind, ToolApproval},
+    app::{
+        App, COMMANDS, CommandSpec, ConnectStage, ConnectState, NoticeKind, ToolApproval,
+        format_bytes, format_tokens,
+    },
     diff::{ChangeKind, DiffLine, FileDiff},
-    session::Role,
+    session::{Message, Role},
     tools,
 };
 
@@ -183,7 +186,10 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
-        if message.content.is_empty() && streaming && !has_calls {
+        if let Some(reasoning) = reasoning_line(message, streaming) {
+            lines.push(reasoning);
+        }
+        if message.content.is_empty() && streaming && !has_calls && message.reasoning.is_empty() {
             lines.push(Line::styled("▌", Style::default().fg(ACCENT)));
             continue;
         }
@@ -379,13 +385,33 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ACCENT,
         )
     } else if let Some(elapsed) = app.elapsed_seconds() {
-        (
-            format!(
-                "{} thinking · {elapsed:.1}s · esc stop",
-                SPINNER[app.spinner % SPINNER.len()]
-            ),
-            ACCENT,
-        )
+        let progress = match app.stream_tool_progress() {
+            Some((name, detail, bytes)) => {
+                let size = format_bytes(bytes);
+                if detail.is_empty() {
+                    format!("{name} · {size}")
+                } else {
+                    format!("{name} {detail} · {size}")
+                }
+            }
+            None => "thinking".to_owned(),
+        };
+        let mut text = format!(
+            "{} {progress} · {elapsed:.1}s",
+            SPINNER[app.spinner % SPINNER.len()]
+        );
+        if let Some((in_tokens, out_tokens)) = app.stream_tokens() {
+            text.push_str(&format!(" · in {}", format_tokens(in_tokens)));
+            if out_tokens > 0 {
+                let rate = out_tokens as f64 / elapsed.max(0.2);
+                text.push_str(&format!(
+                    " · out {} · {rate:.0} t/s",
+                    format_tokens(out_tokens)
+                ));
+            }
+        }
+        text.push_str(" · esc stop");
+        (text, ACCENT)
     } else if let Some(notice) = &app.notice {
         (
             notice.message.clone(),
@@ -922,6 +948,30 @@ fn truncate(text: &str, width: usize) -> String {
         result.push('…');
     }
     result
+}
+
+/// Reasoning shows live while streaming and collapsed afterwards, always dim.
+fn reasoning_line(message: &Message, streaming: bool) -> Option<Line<'static>> {
+    let lines: Vec<&str> = message
+        .reasoning
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let text = if streaming {
+        lines.last().copied().unwrap_or_default().to_owned()
+    } else if lines.len() > 2 {
+        format!("{} … {} lines of thinking", lines[0], lines.len())
+    } else {
+        lines.join(" ")
+    };
+    Some(Line::from(vec![
+        Span::styled(if streaming { "│ " } else { "▸ " }, Style::default().fg(MUTED)),
+        Span::styled(text, Style::default().fg(MUTED).add_modifier(Modifier::DIM)),
+    ]))
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {

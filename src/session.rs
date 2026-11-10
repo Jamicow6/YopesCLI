@@ -53,6 +53,8 @@ impl ToolCall {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +66,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            reasoning: String::new(),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -73,6 +76,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: content.into(),
+            reasoning: String::new(),
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
         }
@@ -252,6 +256,21 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&result).unwrap(),
             r#"{"role":"tool","content":"Wrote 12 bytes.","tool_call_id":"call_1"}"#
+        );
+    }
+
+    #[test]
+    fn reasoning_round_trips_but_empty_is_skipped() {
+        let message = Message::new(Role::User, "hello");
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"role":"user","content":"hello"}"#
+        );
+        let mut thinking = Message::new(Role::Assistant, "answer");
+        thinking.reasoning = "let me think".to_owned();
+        assert_eq!(
+            serde_json::to_string(&thinking).unwrap(),
+            r#"{"role":"assistant","content":"answer","reasoning":"let me think"}"#
         );
     }
 

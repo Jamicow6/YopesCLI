@@ -54,7 +54,14 @@ async fn run() -> Result<()> {
     let config_path = config.config_path.clone();
     let session = load_session(session_path.as_deref())?;
     let backend = Backend::new(&config)?;
-    let mut app = App::new(session, backend, session_path, config_path);
+    let custom_providers = config.custom_providers.clone();
+    let mut app = App::new(
+        session,
+        backend,
+        session_path,
+        config_path,
+        custom_providers,
+    );
     let mut terminal = TerminalGuard::new()?;
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let (tool_sender, mut tool_receiver) = mpsc::unbounded_channel::<ToolEvent>();
@@ -112,6 +119,9 @@ async fn run() -> Result<()> {
                 let Some(event) = event else { break; };
                 let request_id = match &event {
                     StreamEvent::Delta { request_id, .. }
+                    | StreamEvent::Reasoning { request_id, .. }
+                    | StreamEvent::ToolProgress { request_id, .. }
+                    | StreamEvent::Usage { request_id, .. }
                     | StreamEvent::ToolCalls { request_id, .. }
                     | StreamEvent::Done { request_id }
                     | StreamEvent::Error { request_id, .. } => *request_id,
