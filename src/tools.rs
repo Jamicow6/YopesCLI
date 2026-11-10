@@ -23,6 +23,7 @@ const MAX_OUTPUT_CHARS: usize = 16_000;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
+#[cfg(test)]
 pub const TOOL_NAMES: [&str; 5] = [
     "list_dir",
     "read_file",
