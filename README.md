@@ -12,6 +12,10 @@ A better coding CLI, Built with Rust, Ratatui, and Tokio.
 - Responsive editing, scrollback, cancellation, slash commands, and a help overlay.
 - Bounded redraws, no per-token disk writes, and no blocking network work on the UI thread.
 
+## Install
+
+Download the latest build for your platform from [Releases](https://github.com/Jamicow6/YopesCLI/releases). To build or run from a checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Keys
 
 | Key | Action |
@@ -75,15 +79,6 @@ CLI flags override environment variables.
 Provider authentication uses the provider's environment variable (for example `OPENAI_API_KEY` or `OPENROUTER_API_KEY`), or a key saved with `/connect`. Saved connections are applied immediately and restored on the next launch; keys are never written to the session file.
 
 Use `--no-save` for an ephemeral session. Session writes happen after submitted prompts and completed, stopped, or failed responses—not for every streamed token.
-
-## Tests
-
-```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
-```
-
-GitHub Actions uses the **On-the-line** workflow as a compile-only gate on Linux and Windows before the **Production** workflow publishes release builds.
 
 ## License
 
