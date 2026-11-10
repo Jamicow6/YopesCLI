@@ -1,0 +1,94 @@
+name: Production
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Package Unix release
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf "dist/yopes-${{ runner.os }}-${{ runner.arch }}.tar.gz" yopes
+      - name: Package Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path target/release/yopes.exe -DestinationPath "dist/yopes-${{ runner.os }}-${{ runner.arch }}.zip"
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+      - name: Select next tag
+        id: tag
+        run: |
+          latest=""
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              latest="$tag"
+              break
+            fi
+          done < <(git tag --list "v*" --sort=-version:refname)
+
+          if [[ -z "$latest" ]]; then
+            next="v0.1.0"
+          else
+            [[ "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]
+            next="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((10#${BASH_REMATCH[3]} + 1))"
+          fi
+
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+      - name: Publish GitHub release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --target "$GITHUB_SHA"
