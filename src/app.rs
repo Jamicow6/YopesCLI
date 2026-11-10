@@ -19,6 +19,54 @@ pub struct Notice {
     pub message: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub takes_argument: bool,
+}
+
+impl CommandSpec {
+    pub fn display_name(self) -> String {
+        if self.takes_argument {
+            format!("{} [name]", self.name)
+        } else {
+            self.name.to_owned()
+        }
+    }
+
+    fn completion(self) -> String {
+        if self.takes_argument {
+            format!("{} ", self.name)
+        } else {
+            self.name.to_owned()
+        }
+    }
+}
+
+pub const COMMANDS: [CommandSpec; 4] = [
+    CommandSpec {
+        name: "/help",
+        description: "Show keys and commands",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/new",
+        description: "Start a fresh session",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/model",
+        description: "Show or change the active model",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/quit",
+        description: "Save and exit",
+        takes_argument: false,
+    },
+];
+
 struct ActiveRequest {
     id: u64,
     started: Instant,
@@ -54,6 +102,11 @@ impl Input {
     fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
+    }
+
+    fn set(&mut self, value: impl Into<String>) {
+        self.value = value.into();
+        self.cursor = self.value.len();
     }
 
     fn take(&mut self) -> String {
@@ -134,6 +187,8 @@ pub struct App {
     active: Option<ActiveRequest>,
     next_request_id: u64,
     session_path: Option<PathBuf>,
+    palette_index: usize,
+    palette_hidden: bool,
 }
 
 impl App {
@@ -153,6 +208,8 @@ impl App {
             active: None,
             next_request_id: 0,
             session_path,
+            palette_index: 0,
+            palette_hidden: false,
         }
     }
 
@@ -170,6 +227,62 @@ impl App {
             .map(|active| active.started.elapsed().as_secs_f64())
     }
 
+    pub fn palette_matches(&self) -> Vec<&'static CommandSpec> {
+        if self.palette_hidden {
+            return Vec::new();
+        }
+        matching_commands(&self.input.value)
+    }
+
+    pub fn palette_selected(&self) -> usize {
+        let count = self.palette_matches().len();
+        if count == 0 {
+            0
+        } else {
+            self.palette_index.min(count - 1)
+        }
+    }
+
+    fn palette_open(&self) -> bool {
+        !self.palette_matches().is_empty()
+    }
+
+    fn reset_palette(&mut self) {
+        self.palette_index = 0;
+        self.palette_hidden = false;
+    }
+
+    fn palette_move(&mut self, forward: bool) {
+        let count = self.palette_matches().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.palette_index.min(count - 1);
+        self.palette_index = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+    }
+
+    fn palette_complete(&mut self) -> Option<CommandSpec> {
+        let matches = self.palette_matches();
+        let index = self.palette_index.min(matches.len().saturating_sub(1));
+        let command = *matches.get(index).copied()?;
+        self.input.set(command.completion());
+        self.palette_index = 0;
+        self.palette_hidden = true;
+        Some(command)
+    }
+
+    fn palette_accept(&mut self) -> Action {
+        if self.palette_complete().is_some() {
+            self.submit()
+        } else {
+            Action::None
+        }
+    }
+
     pub fn tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
     }
@@ -177,6 +290,7 @@ impl App {
     pub fn handle_paste(&mut self, value: &str) {
         if !self.show_help {
             self.input.insert_str(value);
+            self.reset_palette();
         }
     }
 
@@ -211,8 +325,14 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('n') => self.new_session(),
-                KeyCode::Char('u') => self.input.clear(),
-                KeyCode::Char('w') => self.input.delete_word(),
+                KeyCode::Char('u') => {
+                    self.input.clear();
+                    self.reset_palette();
+                }
+                KeyCode::Char('w') => {
+                    self.input.delete_word();
+                    self.reset_palette();
+                }
                 KeyCode::Char('a') => self.input.cursor = 0,
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 _ => {}
@@ -227,17 +347,29 @@ impl App {
                     .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 self.input.insert('\n');
+                self.reset_palette();
                 Action::None
             }
+            KeyCode::Enter if self.palette_open() => self.palette_accept(),
             KeyCode::Enter => self.submit(),
+            KeyCode::Esc if self.palette_open() => {
+                self.palette_hidden = true;
+                Action::None
+            }
             KeyCode::Esc if self.is_streaming() => self.stop_streaming(),
             KeyCode::Esc => Action::None,
+            KeyCode::Tab if self.palette_open() => {
+                self.palette_complete();
+                Action::None
+            }
             KeyCode::Backspace => {
                 self.input.backspace();
+                self.reset_palette();
                 Action::None
             }
             KeyCode::Delete => {
                 self.input.delete();
+                self.reset_palette();
                 Action::None
             }
             KeyCode::Left => {
@@ -254,6 +386,14 @@ impl App {
             }
             KeyCode::End => {
                 self.follow_tail = true;
+                Action::None
+            }
+            KeyCode::Up if self.palette_open() => {
+                self.palette_move(false);
+                Action::None
+            }
+            KeyCode::Down if self.palette_open() => {
+                self.palette_move(true);
                 Action::None
             }
             KeyCode::Up => {
@@ -278,6 +418,7 @@ impl App {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.input.insert(character);
+                self.reset_palette();
                 Action::None
             }
             _ => Action::None,
@@ -299,6 +440,7 @@ impl App {
             return Action::None;
         }
         let value = self.input.take();
+        self.reset_palette();
         let prompt = value.trim();
         if prompt.is_empty() {
             return Action::None;
@@ -346,7 +488,9 @@ impl App {
                 self.should_quit = true;
                 return Action::Quit;
             }
-            unknown => self.error(format!("Unknown command `{unknown}`. Try /help.")),
+            unknown => self.error(format!(
+                "Unknown command `{unknown}`. Type / to see commands."
+            )),
         }
         Action::None
     }
@@ -442,9 +586,27 @@ impl App {
     }
 }
 
+fn matching_commands(value: &str) -> Vec<&'static CommandSpec> {
+    if !value.starts_with('/') || value.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = value[1..].to_ascii_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|command| command.name[1..].starts_with(query.as_str()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Input;
+    use super::{COMMANDS, Input, matching_commands};
+
+    fn command_names(value: &str) -> Vec<&'static str> {
+        matching_commands(value)
+            .iter()
+            .map(|command| command.name)
+            .collect()
+    }
 
     #[test]
     fn editing_respects_utf8_boundaries() {
@@ -467,5 +629,28 @@ mod tests {
         assert_eq!(input.value, "hello ");
         input.delete_word();
         assert_eq!(input.value, "");
+    }
+
+    #[test]
+    fn palette_matches_command_prefixes() {
+        assert_eq!(command_names("/"), vec!["/help", "/new", "/model", "/quit"]);
+        assert_eq!(command_names("/m"), vec!["/model"]);
+        assert_eq!(command_names("/MO"), vec!["/model"]);
+        assert!(command_names("/model gpt").is_empty());
+        assert!(command_names("hello").is_empty());
+    }
+
+    #[test]
+    fn completion_adds_a_space_only_when_arguments_are_expected() {
+        let model = COMMANDS
+            .iter()
+            .find(|command| command.name == "/model")
+            .unwrap();
+        assert_eq!(model.completion(), "/model ");
+        let help = COMMANDS
+            .iter()
+            .find(|command| command.name == "/help")
+            .unwrap();
+        assert_eq!(help.completion(), "/help");
     }
 }

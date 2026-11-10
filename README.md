@@ -6,6 +6,7 @@ A fast, session-first AI harness for the terminal. Built with Rust, Ratatui, and
 
 - Streaming OpenAI-compatible and Ollama chat APIs.
 - Zero-configuration demo mode with deterministic simulated streaming.
+- A quiet, minimal interface with a popout command palette.
 - One focused session, restored automatically between runs.
 - Responsive editing, scrollback, cancellation, slash commands, and a help overlay.
 - Bounded redraws, no per-token disk writes, and no blocking network work on the UI thread.
@@ -67,20 +68,22 @@ cargo run --release -- --provider ollama --model llama3.2
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Send the current message |
+| `Enter` | Send the current message, or run the selected palette command |
 | `Alt+Enter` / `Shift+Enter` | Insert a newline |
-| `Esc` | Stop streaming, or close help |
+| `/` | Open the command palette below the conversation |
+| `Tab` | Complete the selected palette command |
+| `Esc` | Close the palette, stop streaming, or close help |
 | `Ctrl+C` / `Ctrl+Q` | Quit |
 | `Ctrl+N` | Start a new session |
 | `Ctrl+U` | Clear the composer |
 | `Ctrl+W` | Delete the previous word |
 | `Ctrl+A` / `Ctrl+E` | Move to start / end |
-| `Up` / `Down` | Scroll conversation |
+| `Up` / `Down` | Move through the palette, or scroll the conversation |
 | `PageUp` / `PageDown` | Scroll one page |
 | `End` | Jump to the latest message |
 | `F1` | Toggle help |
 
-Mouse wheel scrolling is supported.
+Mouse wheel scrolling is supported. Type `/` to see the available commands in a compact popout box; keep typing to filter them, use `Up` / `Down` to choose, `Tab` to complete, or `Enter` to run.
 
 ## Commands
 
@@ -112,7 +115,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions runs formatting, Clippy, tests, and a locked release build on Linux and Windows through the **On-the-line** workflow. Successful runs provide downloadable `yopes-*` binaries for seven days, so installation can use CI artifacts instead of local compilation.
+GitHub Actions uses the **On-the-line** workflow as a compile-only gate on Linux and Windows before the **Production** workflow publishes release builds.
 
 ## Scope
 
