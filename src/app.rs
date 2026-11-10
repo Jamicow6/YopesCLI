@@ -41,10 +41,6 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
     pub fn before_cursor(&self) -> &str {
         &self.value[..self.cursor]
     }
@@ -457,10 +453,10 @@ mod tests {
         input.insert('🦀');
         input.left();
         input.backspace();
-        assert_eq!(input.value(), "🦀");
+        assert_eq!(input.value, "🦀");
         input.right();
         input.insert_str("\r\nhello");
-        assert_eq!(input.value(), "🦀\nhello");
+        assert_eq!(input.value, "🦀\nhello");
     }
 
     #[test]
@@ -468,8 +464,8 @@ mod tests {
         let mut input = Input::default();
         input.insert_str("hello world  ");
         input.delete_word();
-        assert_eq!(input.value(), "hello ");
+        assert_eq!(input.value, "hello ");
         input.delete_word();
-        assert_eq!(input.value(), "");
+        assert_eq!(input.value, "");
     }
 }

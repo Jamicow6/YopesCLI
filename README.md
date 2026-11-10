@@ -112,7 +112,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions runs formatting, Clippy, tests, and a locked release build on Linux, Windows, and macOS through the **On-the-line** workflow. Successful runs provide downloadable `yopes-*` binaries for seven days, so installation can use CI artifacts instead of local compilation.
+GitHub Actions runs formatting, Clippy, tests, and a locked release build on Linux and Windows through the **On-the-line** workflow. Successful runs provide downloadable `yopes-*` binaries for seven days, so installation can use CI artifacts instead of local compilation.
 
 ## Scope
 
