@@ -66,6 +66,13 @@ pub async fn run() -> Result<()> {
     match result {
         Ok(()) => {
             print!("\rInstalling ... done\n");
+            let stopped = stop_other_yopes();
+            if stopped > 0 {
+                println!(
+                    "Stopped {stopped} older yopes instance{}.",
+                    if stopped == 1 { "" } else { "s" }
+                );
+            }
             println!("Finished. Starting yopes...");
             restart()
         }
@@ -287,6 +294,57 @@ fn restart() -> Result<()> {
         .spawn()
         .context("starting the updated yopes")?;
     Ok(())
+}
+
+fn stop_other_yopes() -> usize {
+    #[cfg(windows)]
+    {
+        let script = "(Get-Process -Name yopes -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne [int]$env:YOPES_SELF } | Stop-Process -Force).Count";
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("YOPES_SELF", std::process::id().to_string())
+            .output();
+        match output {
+            Ok(out) => out.stdout().to_string().trim().parse().unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let pids = other_yopes_pids();
+        if pids.is_empty() {
+            return 0;
+        }
+        let args: Vec<String> = pids.iter().map(|pid| pid.to_string()).collect();
+        match Command::new("kill").args(args).status() {
+            Ok(_) => pids.len(),
+            Err(_) => 0,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn other_yopes_pids() -> Vec<u32> {
+    let self_pid = std::process::id();
+    let mut pids = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        let Ok(comm) = fs::read(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        if comm.trim() == "yopes" {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 #[cfg(test)]
