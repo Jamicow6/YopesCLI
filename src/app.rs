@@ -89,6 +89,9 @@ pub const COMMANDS: [CommandSpec; 6] = [
 struct ActiveRequest {
     id: u64,
     started: Instant,
+    prompt_tokens: u64,
+    usage: Option<(u64, u64)>,
+    tool_progress: Option<(String, String, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -663,6 +666,23 @@ impl App {
         self.active
             .as_ref()
             .map(|active| active.started.elapsed().as_secs_f64())
+    }
+
+    pub fn stream_tool_progress(&self) -> Option<(String, String, u64)> {
+        self.active
+            .as_ref()
+            .and_then(|active| active.tool_progress.clone())
+    }
+
+    /// (in, out) tokens for the active request: server-reported usage, else chars/4 estimates.
+    pub fn stream_tokens(&self) -> Option<(u64, u64)> {
+        let active = self.active.as_ref()?;
+        match active.usage {
+            Some((prompt, completion)) => {
+                Some((prompt.max(active.prompt_tokens), completion))
+            }
+            None => Some((active.prompt_tokens, estimated_output_tokens(&self.session))),
+        }
     }
 
     pub fn palette_matches(&self) -> Vec<&'static CommandSpec> {
@@ -1785,16 +1805,36 @@ impl App {
             .push(Message::new(Role::Assistant, ""));
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id;
+        let tools_enabled = self.tools_mode.advertised();
+        let prompt_chars = tools::system_prompt(tools_enabled).chars().count()
+            + messages
+                .iter()
+                .map(|message| {
+                    message.content.chars().count()
+                        + message.tool_calls.as_ref().map_or(0, |calls| {
+                            calls
+                                .iter()
+                                .map(|call| {
+                                    call.function.name.chars().count()
+                                        + call.function.arguments.chars().count()
+                                })
+                                .sum::<usize>()
+                        })
+                })
+                .sum::<usize>();
         self.active = Some(ActiveRequest {
             id: request_id,
             started: Instant::now(),
+            prompt_tokens: prompt_chars as u64 / 4,
+            usage: None,
+            tool_progress: None,
         });
         self.follow_tail = true;
         self.save_session();
         Action::Start {
             request_id,
             messages,
-            tools_enabled: self.tools_mode.advertised(),
+            tools_enabled,
         }
     }
 
@@ -1903,6 +1943,37 @@ impl App {
             {
                 if let Some(message) = self.session.messages.last_mut() {
                     message.content.push_str(&text);
+                }
+                Action::None
+            }
+            StreamEvent::Reasoning { request_id, text }
+                if self.active_request_id() == Some(request_id) =>
+            {
+                if let Some(message) = self.session.messages.last_mut() {
+                    message.reasoning.push_str(&text);
+                }
+                Action::None
+            }
+            StreamEvent::ToolProgress {
+                request_id,
+                name,
+                detail,
+                bytes,
+            } if self.active_request_id() == Some(request_id) => {
+                if let Some(active) = self.active.as_mut() {
+                    active.tool_progress = Some((name, detail, bytes));
+                }
+                Action::None
+            }
+            StreamEvent::Usage {
+                request_id,
+                prompt_tokens,
+                completion_tokens,
+            } if self.active_request_id() == Some(request_id) => {
+                if let Some(active) = self.active.as_mut() {
+                    let usage = active.usage.get_or_insert((0, 0));
+                    usage.0 = usage.0.max(prompt_tokens);
+                    usage.1 = usage.1.max(completion_tokens);
                 }
                 Action::None
             }
@@ -2037,9 +2108,34 @@ fn matching_commands(value: &str) -> Vec<&'static CommandSpec> {
         .collect()
 }
 
+fn estimated_output_tokens(session: &Session) -> u64 {
+    match session.messages.last() {
+        Some(message) if message.role == Role::Assistant => {
+            (message.content.chars().count() + message.reasoning.chars().count()) as u64 / 4
+        }
+        _ => 0,
+    }
+}
+
+pub fn format_tokens(tokens: u64) -> String {
+    if tokens < 1000 {
+        tokens.to_string()
+    } else {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    }
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS, Input, matching_commands};
+    use super::{COMMANDS, Input, format_bytes, format_tokens, matching_commands};
 
     fn command_names(value: &str) -> Vec<&'static str> {
         matching_commands(value)
@@ -2097,5 +2193,13 @@ mod tests {
             .find(|command| command.name == "/help")
             .unwrap();
         assert_eq!(help.completion(), "/help");
+    }
+
+    #[test]
+    fn formats_keep_tokens_and_bytes_compact() {
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1200), "1.2k");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2150), "2.1 KB");
     }
 }
