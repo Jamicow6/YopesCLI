@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, COMMANDS, CommandSpec, NoticeKind},
+    app::{App, COMMANDS, CommandSpec, ConnectStage, ConnectState, NoticeKind},
     session::Role,
 };
 
@@ -30,7 +30,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let palette = if app.show_help {
+    let palette = if app.show_help || app.connect_open() {
         Vec::new()
     } else {
         app.palette_matches()
@@ -70,16 +70,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.show_help {
         draw_help(frame, area);
+    } else if let Some(connect) = app.connect_state() {
+        draw_connect(frame, connect, app.spinner, area);
     }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = padded(area, 2);
-    let right = format!(
-        "{} · {}",
-        app.backend.provider().as_str(),
-        app.backend.model()
-    );
+    let right = format!("{} · {}", app.backend.provider_label(), app.backend.model());
     let right_width = (right.chars().count() as u16).min(inner.width / 2);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -345,9 +343,204 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_connect(frame: &mut Frame, connect: &ConnectState, spinner: usize, area: Rect) {
+    let width = area.width.saturating_sub(6).min(78);
+    let height = area.height.saturating_sub(4).min(24);
+    if width < 34 || height < 10 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title_top(Line::from(vec![
+            Span::styled(
+                " connect ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("· {} ", connect.stage.label()),
+                Style::default().fg(MUTED),
+            ),
+        ]))
+        .title_bottom(Line::styled(
+            " models.dev · stored locally ",
+            Style::default().fg(MUTED),
+        ))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width == 0 || inner.height < 4 {
+        return;
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let line = Line::from(vec![
+        Span::styled(
+            format!("{}  ", connect.input_label()),
+            Style::default().fg(MUTED),
+        ),
+        Span::styled(connect.input(), Style::default().fg(TEXT)),
+        Span::styled("▌", Style::default().fg(ACCENT)),
+    ]);
+    frame.render_widget(Paragraph::new(line), rows[0]);
+
+    draw_connect_list(frame, connect, spinner, rows[2]);
+    draw_connect_hint(frame, connect, rows[3]);
+}
+
+fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, area: Rect) {
+    if connect.loading {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    SPINNER[spinner % SPINNER.len()],
+                    Style::default().fg(ACCENT),
+                ),
+                Span::styled(
+                    "  loading providers from models.dev",
+                    Style::default().fg(MUTED),
+                ),
+            ])),
+            area,
+        );
+        return;
+    }
+    if let Some(error) = &connect.error {
+        frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(Style::default().fg(ERROR))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+    if !matches!(
+        connect.stage,
+        ConnectStage::Providers | ConnectStage::Models
+    ) {
+        return;
+    }
+
+    let items = connect.items();
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matches.").style(Style::default().fg(MUTED)),
+            area,
+        );
+        return;
+    }
+    let height = usize::from(area.height);
+    if height == 0 {
+        return;
+    }
+    let selected = connect.selected.min(items.len() - 1);
+    let start = selected.saturating_sub(height.saturating_sub(1));
+    let title_width = usize::from(area.width).saturating_sub(30).max(10);
+
+    for (offset, item) in items.iter().skip(start).take(height).enumerate() {
+        let index = start + offset;
+        let chosen = index == selected;
+        let marker = if chosen { "› " } else { "  " };
+        let badge_style = if chosen {
+            Style::default()
+                .fg(Color::Black)
+                .bg(ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(ACCENT).bg(Color::DarkGray)
+        };
+        let title_style = if chosen {
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        let detail_style = if chosen {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(MUTED)
+        };
+        let mut spans = vec![
+            Span::styled(marker, Style::default().fg(ACCENT)),
+            Span::styled(format!(" {:<2} ", monogram(&item.title)), badge_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                format!("{:<title_width$}", truncate(&item.title, title_width)),
+                title_style,
+            ),
+        ];
+        if connect.stage == ConnectStage::Providers {
+            spans.push(Span::styled("→", Style::default().fg(MUTED)));
+            spans.push(Span::styled("  ", Style::default()));
+        } else {
+            spans.push(Span::styled("  ", Style::default()));
+        }
+        spans.push(Span::styled(item.detail.clone(), detail_style));
+        let row = Rect::new(area.x, area.y + offset as u16, area.width, 1);
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+    }
+}
+
+fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
+    let text = match connect.stage {
+        ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
+        ConnectStage::Models => "↑↓ move · type to filter · enter choose · esc back".to_owned(),
+        ConnectStage::ApiKey => connect.required_env().map_or_else(
+            || "enter continue · esc back · empty skips the key".to_owned(),
+            |name| format!("enter continue · esc back · empty uses ${name}"),
+        ),
+        ConnectStage::Password => {
+            "enter save · esc back · empty stores without encryption".to_owned()
+        }
+    };
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(MUTED)), area);
+}
+
+fn monogram(name: &str) -> String {
+    let letters = name
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .take(2)
+        .collect::<String>();
+    if letters.is_empty() {
+        "·".to_owned()
+    } else {
+        letters.to_uppercase()
+    }
+}
+
+fn truncate(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut characters = text.chars();
+    let mut result = characters.by_ref().take(width).collect::<String>();
+    if characters.next().is_some() {
+        result.pop();
+        result.push('…');
+    }
+    result
+}
+
 fn draw_help(frame: &mut Frame, area: Rect) {
     let width = area.width.min(62);
-    let height = area.height.min(21);
+    let height = area.height.min(24);
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,

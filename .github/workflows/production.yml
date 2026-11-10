@@ -14,8 +14,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Select version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select next tag
+        id: tag
+        run: |
+          latest=""
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              latest="$tag"
+              break
+            fi
+          done < <(git tag --list "v*" --sort=-version:refname)
+
+          if [[ -z "$latest" ]]; then
+            next="v0.1.0"
+          else
+            [[ "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]
+            next="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((10#${BASH_REMATCH[3]} + 1))"
+          fi
+
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.os }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,6 +60,8 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
       - name: Build release
+        env:
+          YOPES_BUILD_VERSION: ${{ needs.prepare.outputs.tag }}
         run: cargo build --release --locked
       - name: Package Unix release
         if: runner.os != 'Windows'
@@ -50,7 +83,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -67,28 +100,9 @@ jobs:
           merge-multiple: true
       - name: Create checksums
         working-directory: dist
-        run: sha256sum * > SHA256SUMS
-      - name: Select next tag
-        id: tag
-        run: |
-          latest=""
-          while IFS= read -r tag; do
-            if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              latest="$tag"
-              break
-            fi
-          done < <(git tag --list "v*" --sort=-version:refname)
-
-          if [[ -z "$latest" ]]; then
-            next="v0.1.0"
-          else
-            [[ "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]
-            next="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((10#${BASH_REMATCH[3]} + 1))"
-          fi
-
-          echo "tag=$next" >> "$GITHUB_OUTPUT"
+        run: sha256sum yopes-* > SHA256SUMS
       - name: Publish GitHub release and tag
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --target "$GITHUB_SHA"

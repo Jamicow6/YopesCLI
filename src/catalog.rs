@@ -1,0 +1,169 @@
+use std::{collections::BTreeMap, time::Duration};
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+
+pub const CATALOG_URL: &str = "https://models.dev/api.json";
+const OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
+pub type FetchResult = std::result::Result<Catalog, String>;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Catalog {
+    #[serde(flatten)]
+    pub providers: BTreeMap<String, Provider>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Provider {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub api: Option<String>,
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub models: BTreeMap<String, Model>,
+}
+
+impl Provider {
+    pub fn base_url(&self, id: &str) -> String {
+        self.api
+            .as_deref()
+            .map(str::trim)
+            .filter(|api| !api.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| (id == "openai").then(|| OPENAI_BASE_URL.to_owned()))
+            .unwrap_or_default()
+    }
+
+    fn is_connectable(&self, id: &str) -> bool {
+        if id == "openai" {
+            return true;
+        }
+        self.npm.as_deref() == Some(OPENAI_COMPATIBLE)
+            && self
+                .api
+                .as_deref()
+                .is_some_and(|api| !api.trim().is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Model {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub limit: Option<Limit>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Limit {
+    #[serde(default)]
+    pub context: Option<u64>,
+}
+
+pub async fn fetch() -> Result<Catalog> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .user_agent(concat!("yopes/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("creating the catalog client")?;
+    let response = client
+        .get(CATALOG_URL)
+        .send()
+        .await
+        .context("contacting models.dev")?
+        .error_for_status()
+        .context("fetching models.dev")?;
+    response
+        .json()
+        .await
+        .context("reading the models.dev catalog")
+}
+
+pub fn connectable_providers(catalog: &Catalog) -> Vec<(&str, &Provider)> {
+    let mut providers = catalog
+        .providers
+        .iter()
+        .filter(|(id, provider)| provider.is_connectable(id))
+        .map(|(id, provider)| (id.as_str(), provider))
+        .collect::<Vec<_>>();
+    providers.sort_by_key(|(_, provider)| provider.name.to_ascii_lowercase());
+    providers
+}
+
+pub fn provider_models(provider: &Provider) -> Vec<(&str, &Model)> {
+    let mut models = provider
+        .models
+        .iter()
+        .map(|(id, model)| (id.as_str(), model))
+        .collect::<Vec<_>>();
+    models.sort_by_key(|(_, model)| model.name.to_ascii_lowercase());
+    models
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Catalog, connectable_providers, provider_models};
+
+    const SAMPLE: &str = r#"{
+        "openai": {
+            "name": "OpenAI",
+            "npm": "@ai-sdk/openai",
+            "env": ["OPENAI_API_KEY"],
+            "models": {"gpt-4o": {"name": "GPT-4o", "limit": {"context": 128000}}}
+        },
+        "openrouter": {
+            "name": "OpenRouter",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": "https://openrouter.ai/api/v1",
+            "env": ["OPENROUTER_API_KEY"],
+            "models": {
+                "z-model": {"name": "Zed"},
+                "a-model": {"name": "Alpha", "limit": {"context": 32000}}
+            }
+        },
+        "anthropic": {
+            "name": "Anthropic",
+            "npm": "@ai-sdk/anthropic",
+            "api": "https://api.anthropic.com/v1",
+            "models": {"claude": {"name": "Claude"}}
+        }
+    }"#;
+
+    #[test]
+    fn only_openai_compatible_providers_are_listed() {
+        let catalog: Catalog = serde_json::from_str(SAMPLE).unwrap();
+        let ids = connectable_providers(&catalog)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["openai", "openrouter"]);
+    }
+
+    #[test]
+    fn openai_gets_a_default_base_url() {
+        let catalog: Catalog = serde_json::from_str(SAMPLE).unwrap();
+        let (_, provider) = connectable_providers(&catalog)
+            .into_iter()
+            .find(|(id, _)| *id == "openai")
+            .unwrap();
+        assert_eq!(provider.base_url("openai"), "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn models_are_sorted_for_display() {
+        let catalog: Catalog = serde_json::from_str(SAMPLE).unwrap();
+        let provider = &catalog.providers["openrouter"];
+        let ids = provider_models(provider)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["a-model", "z-model"]);
+    }
+}
