@@ -37,3 +37,12 @@ jobs:
         run: cargo test --all-targets
       - name: Build release
         run: cargo build --release --locked
+      - name: Upload CLI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yopes-${{ matrix.os }}
+          path: |
+            target/release/yopes
+            target/release/yopes.exe
+          if-no-files-found: error
+          retention-days: 7
