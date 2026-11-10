@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,8 +12,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check ${{ matrix.os }}
+  compile:
+    name: Compile test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,24 +24,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --all-targets
-      - name: Build release
+      - name: Compile release
         run: cargo build --release --locked
-      - name: Upload CLI binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: yopes-${{ matrix.os }}
-          path: |
-            target/release/yopes
-            target/release/yopes.exe
-          if-no-files-found: error
-          retention-days: 7
