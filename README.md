@@ -1,11 +1,10 @@
 # YopesCLI
 
-A fast, session-first AI harness for the terminal. Built with Rust, Ratatui, and Tokio.
+A better coding CLI, Built with Rust, Ratatui, and Tokio.
 
 ## Highlights
 
-- Streaming OpenAI-compatible and Ollama chat APIs.
-- Zero-configuration demo mode with deterministic simulated streaming.
+- Streaming OpenAI-compatible
 - A quiet, minimal interface with a popout command palette.
 - One focused session, restored automatically between runs.
 - Responsive editing, scrollback, cancellation, slash commands, and a help overlay.
@@ -27,8 +26,6 @@ Cargo installs the executable as `yopes` (`yopes.exe` on Windows) in `$HOME/.car
 ```sh
 cargo run --release
 ```
-
-Demo mode starts when no provider is configured. If `OPENAI_API_KEY` exists, OpenAI-compatible mode is selected automatically.
 
 ### OpenAI-compatible
 
@@ -116,10 +113,6 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 GitHub Actions uses the **On-the-line** workflow as a compile-only gate on Linux and Windows before the **Production** workflow publishes release builds.
-
-## Scope
-
-V1 is deliberately session-first: no tool execution, agents, retrieval, eval runner, or session picker. It supports text chat completions only; reasoning fields, images, and tool calls are not rendered yet.
 
 ## License
 
