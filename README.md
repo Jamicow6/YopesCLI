@@ -91,7 +91,7 @@ Encrypted secrets prompt for the password when yopes starts. The saved connectio
 yopes update
 ```
 
-The updater checks the latest GitHub release, compares it with the running build, downloads the matching archive and `SHA256SUMS`, verifies the checksum, replaces the executable, and restarts yopes.
+The updater checks the latest GitHub release, compares it with the running build, downloads the matching archive and `SHA256SUMS`, verifies the checksum, replaces the executable, stops older yopes instances, and starts the new one.
 
 ## Configuration
 
