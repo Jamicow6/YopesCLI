@@ -133,6 +133,36 @@ pub enum Command {
     Update,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomProvider {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub auth: AuthKind,
+    pub models: Vec<SavedModel>,
+    /// Plaintext token when stored without encryption; `None` when encrypted or absent.
+    pub token: Option<String>,
+    pub encrypted: bool,
+}
+
+impl CustomProvider {
+    fn from_saved(saved: &SavedCustomProvider) -> Self {
+        Self {
+            id: saved.id.clone(),
+            name: saved.name.clone(),
+            base_url: saved.base_url.clone(),
+            auth: saved.auth,
+            models: saved.models.clone(),
+            token: if saved.secret.encrypted {
+                None
+            } else {
+                saved.secret.api_key.clone()
+            },
+            encrypted: saved.secret.encrypted,
+        }
+    }
+}
+
 pub struct Config {
     pub provider: ProviderKind,
     pub provider_label: String,
@@ -141,6 +171,7 @@ pub struct Config {
     pub api_key: Option<String>,
     pub auth: AuthKind,
     pub models: Vec<SavedModel>,
+    pub custom_providers: Vec<CustomProvider>,
     pub session_path: Option<PathBuf>,
     pub config_path: PathBuf,
 }
@@ -154,6 +185,8 @@ pub struct Connection {
     pub api_key_env: Option<String>,
     pub auth: AuthKind,
     pub models: Vec<SavedModel>,
+    /// Id of the saved custom provider to update; `None` creates a new entry.
+    pub custom_provider_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -174,10 +207,24 @@ struct SavedConfig {
     #[serde(default)]
     models: Vec<SavedModel>,
     #[serde(default)]
+    custom_providers: Vec<SavedCustomProvider>,
+    #[serde(default)]
     secret: StoredSecret,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedCustomProvider {
+    id: String,
+    name: String,
+    base_url: String,
+    auth: AuthKind,
+    #[serde(default)]
+    models: Vec<SavedModel>,
+    #[serde(default)]
+    secret: StoredSecret,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct StoredSecret {
     #[serde(default)]
     encrypted: bool,
@@ -256,6 +303,7 @@ impl Config {
                 api_key: None,
                 auth: AuthKind::Bearer,
                 models: Vec::new(),
+                custom_providers: custom_providers(saved.as_ref()),
                 session_path,
                 config_path,
             });
@@ -315,10 +363,74 @@ impl Config {
             api_key,
             auth,
             models,
+            custom_providers: custom_providers(saved.as_ref()),
             session_path,
             config_path,
         })
     }
+}
+
+/// Saved custom endpoints, with a legacy active custom connection folded in once.
+fn custom_providers(saved: Option<&SavedConfig>) -> Vec<CustomProvider> {
+    let Some(saved) = saved else {
+        return Vec::new();
+    };
+    let mut providers: Vec<CustomProvider> = saved
+        .custom_providers
+        .iter()
+        .map(CustomProvider::from_saved)
+        .collect();
+    let legacy = saved.provider == ProviderKind::Custom
+        && !saved.base_url.trim().is_empty()
+        && providers.is_empty();
+    if legacy {
+        let id =
+            slug_provider_name(&saved.provider_name, &[]).unwrap_or_else(|| "custom".to_owned());
+        providers.push(CustomProvider {
+            id,
+            name: if saved.provider_name.trim().is_empty() {
+                "Custom".to_owned()
+            } else {
+                saved.provider_name.clone()
+            },
+            base_url: saved.base_url.trim_end_matches('/').to_owned(),
+            auth: saved.auth,
+            models: saved.models.clone(),
+            token: if saved.secret.encrypted {
+                None
+            } else {
+                saved.secret.api_key.clone()
+            },
+            encrypted: saved.secret.encrypted,
+        });
+    }
+    providers
+}
+
+fn slug_provider_name(name: &str, existing_ids: &[String]) -> Option<String> {
+    let base: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = base.trim_matches('-');
+    if base.is_empty() {
+        return None;
+    }
+    let mut candidate = base.to_owned();
+    let mut suffix = 2;
+    while existing_ids.iter().any(|id| *id == candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    Some(candidate)
 }
 
 fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Result<Option<String>> {
@@ -359,6 +471,11 @@ fn default_base_url(provider: ProviderKind) -> &'static str {
     }
 }
 
+/// Saved custom endpoints from disk, for in-session list refreshes.
+pub fn load_custom_providers(path: &Path) -> Vec<CustomProvider> {
+    custom_providers(load_saved(path).ok().flatten().as_ref())
+}
+
 pub fn save_connection(path: &Path, connection: &Connection, password: Option<&str>) -> Result<()> {
     let api_key = if connection.auth.requires_token() {
         connection
@@ -396,17 +513,60 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
             name: model.name.trim().to_owned(),
         });
     }
-    let saved = SavedConfig {
+    let mut saved = load_saved(path)?.unwrap_or(SavedConfig {
         version: CONFIG_VERSION,
-        provider: connection.provider,
-        provider_name: connection.provider_name.clone(),
-        model: connection.model.clone(),
-        base_url: connection.base_url.clone(),
-        api_key_env: connection.api_key_env.clone(),
-        auth: connection.auth,
-        models,
-        secret,
-    };
+        provider: ProviderKind::Unconfigured,
+        provider_name: String::new(),
+        model: String::new(),
+        base_url: String::new(),
+        api_key_env: None,
+        auth: AuthKind::Bearer,
+        models: Vec::new(),
+        custom_providers: Vec::new(),
+        secret: StoredSecret::default(),
+    });
+    saved.provider = connection.provider;
+    saved.provider_name = connection.provider_name.clone();
+    saved.model = connection.model.clone();
+    saved.base_url = connection.base_url.trim_end_matches('/').to_owned();
+    saved.api_key_env = connection.api_key_env.clone();
+    saved.auth = connection.auth;
+    saved.models = models.clone();
+    saved.secret = secret;
+    if connection.provider == ProviderKind::Custom {
+        let display_name = if connection.provider_name.trim().is_empty() {
+            "Custom".to_owned()
+        } else {
+            connection.provider_name.clone()
+        };
+        let existing_ids: Vec<String> = saved
+            .custom_providers
+            .iter()
+            .map(|stored| stored.id.clone())
+            .collect();
+        let id = match &connection.custom_provider_id {
+            Some(id) if !id.trim().is_empty() => id.trim().to_owned(),
+            _ => slug_provider_name(&display_name, &existing_ids)
+                .unwrap_or_else(|| "custom".to_owned()),
+        };
+        let entry = SavedCustomProvider {
+            id: id.clone(),
+            name: display_name,
+            base_url: saved.base_url.clone(),
+            auth: connection.auth,
+            models: models.clone(),
+            secret: saved.secret.clone(),
+        };
+        if let Some(existing) = saved
+            .custom_providers
+            .iter_mut()
+            .find(|stored| stored.id == id)
+        {
+            *existing = entry;
+        } else {
+            saved.custom_providers.push(entry);
+        }
+    }
     save_saved(path, &saved)
 }
 
@@ -508,5 +668,27 @@ mod tests {
     fn the_update_subcommand_parses() {
         let cli = Cli::try_parse_from(["yopes", "update"]).unwrap();
         assert!(matches!(cli.command, Some(super::Command::Update)));
+    }
+
+    #[test]
+    fn provider_slugs_dedupe_against_existing_ids() {
+        use super::slug_provider_name;
+        assert_eq!(
+            slug_provider_name("My Provider", &[]).as_deref(),
+            Some("my-provider")
+        );
+        assert_eq!(
+            slug_provider_name("My Provider", &["my-provider".to_owned()]).as_deref(),
+            Some("my-provider-2")
+        );
+        assert_eq!(
+            slug_provider_name(
+                "My Provider",
+                &["my-provider".to_owned(), "my-provider-2".to_owned()]
+            )
+            .as_deref(),
+            Some("my-provider-3")
+        );
+        assert_eq!(slug_provider_name("  !!  ", &[]), None);
     }
 }

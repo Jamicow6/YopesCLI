@@ -8,8 +8,8 @@ use ratatui::{
 
 use crate::{
     app::{
-        App, COMMANDS, CommandSpec, ConnectStage, ConnectState, NoticeKind, ToolApproval,
-        format_bytes, format_tokens,
+        App, COMMANDS, CUSTOM_PROVIDER_ID, CommandSpec, ConnectStage, ConnectState, NoticeKind,
+        ToolApproval, format_bytes, format_tokens,
     },
     diff::{ChangeKind, DiffLine, FileDiff},
     session::{Message, Role},
@@ -822,16 +822,26 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
         return;
     }
     let selected = connect.selected.min(items.len() - 1);
-    let divider = connect.stage == ConnectStage::Providers && items.len() > 1;
+    let custom_count = items
+        .iter()
+        .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
+        .count();
+    let divider =
+        connect.stage == ConnectStage::Providers && custom_count > 0 && custom_count < items.len();
     let divider_rows = if divider { 1 } else { 0 };
     let mut rows = Vec::with_capacity(items.len() + divider_rows);
     for index in 0..items.len() {
-        if divider && index == 1 {
+        if divider && index == custom_count {
             rows.push(None);
         }
         rows.push(Some(index));
     }
-    let selected_row = selected + if divider && selected > 0 { 1 } else { 0 };
+    let selected_row = selected
+        + if divider && selected >= custom_count {
+            1
+        } else {
+            0
+        };
     let start_row = selected_row.saturating_sub(height.saturating_sub(1));
     let start = start_row.min(rows.len().saturating_sub(height));
     let title_width = usize::from(area.width).saturating_sub(30).max(10);
@@ -855,13 +865,10 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
         let item = &items[index];
         let chosen = index == selected;
         let marker = if chosen { "› " } else { "  " };
-        let badge_style = if chosen {
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD)
+        let logo_style = if chosen {
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(ACCENT).bg(Color::DarkGray)
+            Style::default().fg(ACCENT)
         };
         let title_style = if chosen {
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
@@ -875,8 +882,8 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
         };
         let mut spans = vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(format!(" {:<2} ", monogram(&item.title)), badge_style),
-            Span::styled(" ", Style::default()),
+            Span::styled(item.logo.to_string(), logo_style),
+            Span::styled("  ", Style::default()),
             Span::styled(
                 format!("{:<title_width$}", truncate(&item.title, title_width)),
                 title_style,
@@ -901,7 +908,8 @@ fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
             || "enter continue · esc back · empty skips the key".to_owned(),
             |name| format!("enter continue · esc back · empty uses ${name}"),
         ),
-        ConnectStage::Endpoint => "enter continue · esc close".to_owned(),
+        ConnectStage::Endpoint => "enter continue · esc back".to_owned(),
+        ConnectStage::ProviderName => "enter continue · esc close".to_owned(),
         ConnectStage::Auth => "↑↓ choose · enter continue · esc back".to_owned(),
         ConnectStage::CustomToken => "enter continue · esc back".to_owned(),
         ConnectStage::ModelId => {
@@ -915,26 +923,13 @@ fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
             "enter add model · empty uses the model id · esc back".to_owned()
         }
         ConnectStage::CustomModels => {
-            "↑↓ choose · enter use · a add model · esc endpoint".to_owned()
+            "↑↓ choose · enter use · add new model row appends · esc back".to_owned()
         }
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }
     };
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(MUTED)), area);
-}
-
-fn monogram(name: &str) -> String {
-    let letters = name
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .take(2)
-        .collect::<String>();
-    if letters.is_empty() {
-        "·".to_owned()
-    } else {
-        letters.to_uppercase()
-    }
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -969,7 +964,10 @@ fn reasoning_line(message: &Message, streaming: bool) -> Option<Line<'static>> {
         lines.join(" ")
     };
     Some(Line::from(vec![
-        Span::styled(if streaming { "│ " } else { "▸ " }, Style::default().fg(MUTED)),
+        Span::styled(
+            if streaming { "│ " } else { "▸ " },
+            Style::default().fg(MUTED),
+        ),
         Span::styled(text, Style::default().fg(MUTED).add_modifier(Modifier::DIM)),
     ]))
 }
