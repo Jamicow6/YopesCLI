@@ -9,7 +9,11 @@ mod tools;
 mod ui;
 mod update;
 
-use std::io::{self, Stdout};
+use std::{
+    future::Future,
+    io::{self, Stdout},
+    pin::Pin,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -57,9 +61,18 @@ async fn run() -> Result<()> {
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
-    #[cfg(unix)]
-    let mut term_signal =
-        signal(SignalKind::terminate()).context("installing the termination signal handler")?;
+    let mut term_signal: Pin<Box<dyn Future<Output = ()> + Send>> = {
+        #[cfg(unix)]
+        {
+            let mut term = signal(SignalKind::terminate())
+                .context("installing the termination signal handler")?;
+            Box::pin(async move { term.recv().await })
+        }
+        #[cfg(not(unix))]
+        {
+            Box::pin(std::future::pending::<()>())
+        }
+    };
     let mut active_task: Option<(u64, JoinHandle<()>)> = None;
 
     loop {
@@ -132,10 +145,7 @@ async fn run() -> Result<()> {
                     app.on_catalog(result);
                 }
             }
-            #[cfg(unix)]
-            _ = term_signal.recv() => {
-                break;
-            }
+            _ = term_signal.as_mut() => break,
             _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
         }
     }
