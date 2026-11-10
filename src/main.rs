@@ -66,7 +66,9 @@ async fn run() -> Result<()> {
         {
             let mut term = signal(SignalKind::terminate())
                 .context("installing the termination signal handler")?;
-            Box::pin(async move { term.recv().await })
+            Box::pin(async move {
+                let _ = term.recv().await;
+            })
         }
         #[cfg(not(unix))]
         {
