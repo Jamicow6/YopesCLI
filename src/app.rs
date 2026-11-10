@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent
 use crate::{
     backend::{Backend, StreamEvent},
     catalog::{self, Catalog},
-    config::{self, Connection, ProviderKind},
+    config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     session::{Message, Role, Session},
 };
 
@@ -79,11 +79,19 @@ struct ActiveRequest {
     started: Instant,
 }
 
+const CUSTOM_PROVIDER_ID: &str = "custom";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
     Providers,
     Models,
     ApiKey,
+    Endpoint,
+    Auth,
+    CustomToken,
+    ModelId,
+    ModelName,
+    CustomModels,
     Password,
 }
 
@@ -93,6 +101,12 @@ impl ConnectStage {
             Self::Providers => "provider",
             Self::Models => "model",
             Self::ApiKey => "api key",
+            Self::Endpoint => "endpoint",
+            Self::Auth => "authorization",
+            Self::CustomToken => "token",
+            Self::ModelId => "model id",
+            Self::ModelName => "model name",
+            Self::CustomModels => "models",
             Self::Password => "password",
         }
     }
@@ -116,6 +130,13 @@ pub struct ConnectState {
     model_id: Option<String>,
     api_key: String,
     password: String,
+    custom_flow: bool,
+    custom_endpoint: String,
+    custom_auth: AuthKind,
+    custom_token: String,
+    custom_models: Vec<SavedModel>,
+    custom_model_id: String,
+    custom_model_name: String,
 }
 
 impl ConnectState {
@@ -131,28 +152,47 @@ impl ConnectState {
             model_id: None,
             api_key: String::new(),
             password: String::new(),
+            custom_flow: false,
+            custom_endpoint: String::new(),
+            custom_auth: AuthKind::Bearer,
+            custom_token: String::new(),
+            custom_models: Vec::new(),
+            custom_model_id: String::new(),
+            custom_model_name: String::new(),
         }
     }
 
     pub fn items(&self) -> Vec<ConnectItem> {
-        let Some(catalog) = &self.catalog else {
-            return Vec::new();
-        };
         let filter = self.filter.to_ascii_lowercase();
         match self.stage {
-            ConnectStage::Providers => catalog::connectable_providers(catalog)
-                .into_iter()
-                .filter(|(id, provider)| {
-                    filter.is_empty()
-                        || provider.name.to_ascii_lowercase().contains(filter.as_str())
-                        || id.to_ascii_lowercase().contains(filter.as_str())
-                })
-                .map(|(id, provider)| ConnectItem {
-                    id: id.to_owned(),
-                    title: provider.name.clone(),
-                    detail: format!("{} models", provider.models.len()),
-                })
-                .collect(),
+            ConnectStage::Providers => {
+                let mut items = Vec::new();
+                if filter.is_empty() || "custom".contains(filter.as_str()) {
+                    items.push(ConnectItem {
+                        id: CUSTOM_PROVIDER_ID.to_owned(),
+                        title: "Custom".to_owned(),
+                        detail: "OpenAI-compatible endpoint".to_owned(),
+                    });
+                }
+                if let Some(catalog) = &self.catalog {
+                    items.extend(
+                        catalog::connectable_providers(catalog)
+                            .into_iter()
+                            .filter(|(id, _)| *id != CUSTOM_PROVIDER_ID)
+                            .filter(|(id, provider)| {
+                                filter.is_empty()
+                                    || provider.name.to_ascii_lowercase().contains(filter.as_str())
+                                    || id.to_ascii_lowercase().contains(filter.as_str())
+                            })
+                            .map(|(id, provider)| ConnectItem {
+                                id: id.to_owned(),
+                                title: provider.name.clone(),
+                                detail: format!("{} models", provider.models.len()),
+                            }),
+                    );
+                }
+                items
+            }
             ConnectStage::Models => {
                 let Some(provider) = self.provider() else {
                     return Vec::new();
@@ -186,17 +226,64 @@ impl ConnectState {
                     })
                     .collect()
             }
-            ConnectStage::ApiKey | ConnectStage::Password => Vec::new(),
+            ConnectStage::Auth => AuthKind::choices()
+                .into_iter()
+                .map(|auth| ConnectItem {
+                    id: auth.id().to_owned(),
+                    title: auth.label().to_owned(),
+                    detail: auth.detail().to_owned(),
+                })
+                .collect(),
+            ConnectStage::CustomModels => self
+                .custom_models
+                .iter()
+                .map(|model| ConnectItem {
+                    id: model.id.clone(),
+                    title: if model.name.trim().is_empty() {
+                        model.id.clone()
+                    } else {
+                        model.name.clone()
+                    },
+                    detail: if model.name.trim().is_empty() {
+                        "model id".to_owned()
+                    } else {
+                        model.id.clone()
+                    },
+                })
+                .collect(),
+            ConnectStage::ApiKey
+            | ConnectStage::Endpoint
+            | ConnectStage::CustomToken
+            | ConnectStage::ModelId
+            | ConnectStage::ModelName
+            | ConnectStage::Password => Vec::new(),
         }
     }
 
     pub fn input(&self) -> String {
+        if self.stage == ConnectStage::Auth {
+            return self.auth_at_selection().label().to_owned();
+        }
+        if self.stage == ConnectStage::CustomModels {
+            let items = self.items();
+            return items
+                .get(self.selected.min(items.len().saturating_sub(1)))
+                .map_or_else(|| "none".to_owned(), |item| item.title.clone());
+        }
         let value = match self.stage {
             ConnectStage::ApiKey => &self.api_key,
             ConnectStage::Password => &self.password,
+            ConnectStage::Endpoint => &self.custom_endpoint,
+            ConnectStage::CustomToken => &self.custom_token,
+            ConnectStage::ModelId => &self.custom_model_id,
+            ConnectStage::ModelName => &self.custom_model_name,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
+            ConnectStage::Auth | ConnectStage::CustomModels => unreachable!(),
         };
-        if matches!(self.stage, ConnectStage::ApiKey | ConnectStage::Password) && !value.is_empty()
+        if matches!(
+            self.stage,
+            ConnectStage::ApiKey | ConnectStage::Password | ConnectStage::CustomToken
+        ) && !value.is_empty()
         {
             "•".repeat(value.chars().count().min(64))
         } else {
@@ -208,8 +295,34 @@ impl ConnectState {
         match self.stage {
             ConnectStage::Providers | ConnectStage::Models => "search",
             ConnectStage::ApiKey => "api key",
+            ConnectStage::Endpoint => "completion endpoint",
+            ConnectStage::Auth => "authorization",
+            ConnectStage::CustomToken => "token",
+            ConnectStage::ModelId => "model id",
+            ConnectStage::ModelName => "model name",
+            ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
         }
+    }
+
+    pub const fn uses_cursor(&self) -> bool {
+        !matches!(self.stage, ConnectStage::Auth | ConnectStage::CustomModels)
+    }
+
+    pub fn has_custom_models(&self) -> bool {
+        !self.custom_models.is_empty()
+    }
+
+    fn auth_at_selection(&self) -> AuthKind {
+        let choices = AuthKind::choices();
+        choices[self.selected.min(choices.len() - 1)]
+    }
+
+    fn auth_index(&self) -> usize {
+        AuthKind::choices()
+            .iter()
+            .position(|auth| *auth == self.custom_auth)
+            .unwrap_or(0)
     }
 
     pub fn required_env(&self) -> Option<&str> {
@@ -251,6 +364,19 @@ impl ConnectState {
         }
         let current = self.selected.min(len - 1) as isize;
         self.selected = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+}
+
+fn custom_field_mut<'a>(
+    connect: &'a mut ConnectState,
+    stage: ConnectStage,
+) -> Option<&'a mut String> {
+    match stage {
+        ConnectStage::Endpoint => Some(&mut connect.custom_endpoint),
+        ConnectStage::CustomToken => Some(&mut connect.custom_token),
+        ConnectStage::ModelId => Some(&mut connect.custom_model_id),
+        ConnectStage::ModelName => Some(&mut connect.custom_model_name),
+        _ => None,
     }
 }
 
@@ -496,10 +622,15 @@ impl App {
             match connect.stage {
                 ConnectStage::ApiKey => connect.api_key.push_str(&clean),
                 ConnectStage::Password => connect.password.push_str(&clean),
+                ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
+                ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
+                ConnectStage::ModelId => connect.custom_model_id.push_str(&clean),
+                ConnectStage::ModelName => connect.custom_model_name.push_str(&clean),
                 ConnectStage::Providers | ConnectStage::Models => {
                     connect.filter.push_str(&clean);
                     connect.selected = 0;
                 }
+                ConnectStage::Auth | ConnectStage::CustomModels => {}
             }
             return;
         }
@@ -664,6 +795,11 @@ impl App {
         match stage {
             ConnectStage::Providers | ConnectStage::Models => self.handle_connect_list_key(key),
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
+            ConnectStage::Endpoint
+            | ConnectStage::CustomToken
+            | ConnectStage::ModelId
+            | ConnectStage::ModelName => self.handle_connect_custom_text(key),
+            ConnectStage::Auth | ConnectStage::CustomModels => self.handle_connect_choice_key(key),
             ConnectStage::Password => self.handle_connect_password(key),
         }
     }
@@ -744,6 +880,257 @@ impl App {
         Action::None
     }
 
+    fn handle_connect_choice_key(&mut self, key: KeyEvent) -> Action {
+        let Some(stage) = self.connect.as_ref().map(|connect| connect.stage) else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.stage = ConnectStage::Endpoint;
+                    connect.selected = 0;
+                    connect.filter.clear();
+                    connect.error = None;
+                }
+            }
+            KeyCode::Enter => return self.select_connect_item(),
+            KeyCode::Up => self.connect_move(false),
+            KeyCode::Down => self.connect_move(true),
+            KeyCode::PageUp => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.move_selection_by(-10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.move_selection_by(10);
+                }
+            }
+            KeyCode::Home => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.selected = 0;
+                }
+            }
+            KeyCode::End => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.selected = usize::MAX;
+                }
+            }
+            KeyCode::Char('a' | 'A')
+                if stage == ConnectStage::CustomModels
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.custom_model_id.clear();
+                    connect.custom_model_name.clear();
+                    connect.stage = ConnectStage::ModelId;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn handle_connect_custom_text(&mut self, key: KeyEvent) -> Action {
+        let Some(stage) = self.connect.as_ref().map(|connect| connect.stage) else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => self.back_from_custom_text(stage),
+            KeyCode::Enter => return self.advance_custom_text(stage),
+            KeyCode::Backspace => {
+                if let Some(field) = self
+                    .connect
+                    .as_mut()
+                    .and_then(|connect| custom_field_mut(connect, stage))
+                {
+                    field.pop();
+                }
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(field) = self
+                    .connect
+                    .as_mut()
+                    .and_then(|connect| custom_field_mut(connect, stage))
+                {
+                    field.push(character);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn back_from_custom_text(&mut self, stage: ConnectStage) {
+        if stage == ConnectStage::Endpoint {
+            self.connect = None;
+            return;
+        }
+        let Some(connect) = self.connect.as_mut() else {
+            return;
+        };
+        connect.error = None;
+        match stage {
+            ConnectStage::CustomToken => {
+                let selected = connect.auth_index();
+                connect.stage = ConnectStage::Auth;
+                connect.selected = selected;
+            }
+            ConnectStage::ModelId => {
+                let stage = if connect.custom_auth.requires_token() {
+                    ConnectStage::CustomToken
+                } else {
+                    ConnectStage::Auth
+                };
+                let selected = if stage == ConnectStage::Auth {
+                    connect.auth_index()
+                } else {
+                    0
+                };
+                connect.stage = stage;
+                connect.selected = selected;
+            }
+            ConnectStage::ModelName => {
+                connect.stage = ConnectStage::ModelId;
+                connect.selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn advance_custom_text(&mut self, stage: ConnectStage) -> Action {
+        match stage {
+            ConnectStage::Endpoint => {
+                let endpoint = self
+                    .connect
+                    .as_ref()
+                    .map(|connect| connect.custom_endpoint.trim().to_owned())
+                    .unwrap_or_default();
+                if endpoint.is_empty() {
+                    self.connect_error("Enter the completion endpoint.");
+                    return Action::None;
+                }
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    self.connect_error("Endpoint must start with http:// or https://.");
+                    return Action::None;
+                }
+                let auth_index = self
+                    .connect
+                    .as_ref()
+                    .map(ConnectState::auth_index)
+                    .unwrap_or(0);
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.custom_endpoint = endpoint;
+                    connect.stage = ConnectStage::Auth;
+                    connect.selected = auth_index;
+                    connect.error = None;
+                }
+            }
+            ConnectStage::CustomToken => {
+                let (token, auth) = {
+                    let Some(connect) = self.connect.as_ref() else {
+                        return Action::None;
+                    };
+                    (connect.custom_token.trim().to_owned(), connect.custom_auth)
+                };
+                if token.is_empty() && auth.requires_token() {
+                    self.connect_error(format!("Enter a token for {}.", auth.label()));
+                    return Action::None;
+                }
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.custom_token = token;
+                    connect.stage = ConnectStage::ModelId;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            ConnectStage::ModelId => {
+                let (id, has_models) = {
+                    let Some(connect) = self.connect.as_ref() else {
+                        return Action::None;
+                    };
+                    (
+                        connect.custom_model_id.trim().to_owned(),
+                        !connect.custom_models.is_empty(),
+                    )
+                };
+                if id.is_empty() {
+                    if has_models {
+                        if let Some(connect) = self.connect.as_mut() {
+                            connect.stage = ConnectStage::CustomModels;
+                            connect.selected = 0;
+                            connect.error = None;
+                        }
+                    } else {
+                        self.connect_error("Enter a model ID.");
+                    }
+                    return Action::None;
+                }
+                let existing_name = self.connect.as_ref().and_then(|connect| {
+                    connect
+                        .custom_models
+                        .iter()
+                        .find(|model| model.id == id)
+                        .map(|model| model.name.clone())
+                });
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.custom_model_id = id;
+                    connect.custom_model_name = existing_name.unwrap_or_default();
+                    connect.stage = ConnectStage::ModelName;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            ConnectStage::ModelName => {
+                let (id, name) = {
+                    let Some(connect) = self.connect.as_ref() else {
+                        return Action::None;
+                    };
+                    (
+                        connect.custom_model_id.trim().to_owned(),
+                        connect.custom_model_name.trim().to_owned(),
+                    )
+                };
+                if id.is_empty() {
+                    if let Some(connect) = self.connect.as_mut() {
+                        connect.stage = ConnectStage::ModelId;
+                        connect.error = Some("Enter a model ID first.".to_owned());
+                    }
+                    return Action::None;
+                }
+                if let Some(connect) = self.connect.as_mut() {
+                    let existing = connect
+                        .custom_models
+                        .iter()
+                        .position(|model| model.id == id);
+                    if let Some(index) = existing {
+                        connect.custom_models[index].name = name;
+                    } else {
+                        connect.custom_models.push(SavedModel {
+                            id: id.clone(),
+                            name,
+                        });
+                    }
+                    connect.selected = existing.unwrap_or(connect.custom_models.len() - 1);
+                    connect.custom_model_id.clear();
+                    connect.custom_model_name.clear();
+                    connect.stage = ConnectStage::CustomModels;
+                    connect.error = None;
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     fn handle_connect_api_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => {
@@ -792,24 +1179,37 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if let Some(connect) = self.connect.as_mut() {
-                    connect.stage = ConnectStage::ApiKey;
+                    connect.stage = if connect.custom_flow {
+                        ConnectStage::CustomModels
+                    } else {
+                        ConnectStage::ApiKey
+                    };
                     connect.password.clear();
+                    connect.selected = 0;
                     connect.error = None;
                 }
             }
             KeyCode::Enter => {
-                let (api_key, password) = match self.connect.as_ref() {
-                    Some(connect) => (connect.api_key.trim().to_owned(), connect.password.clone()),
-                    None => return Action::None,
+                let (password, custom_flow, api_key) = {
+                    let Some(connect) = self.connect.as_ref() else {
+                        return Action::None;
+                    };
+                    (
+                        if connect.password.is_empty() {
+                            None
+                        } else {
+                            Some(connect.password.clone())
+                        },
+                        connect.custom_flow,
+                        connect.api_key.trim().to_owned(),
+                    )
                 };
+                if custom_flow {
+                    return self.finish_custom_connect(password);
+                }
                 if api_key.is_empty() {
                     return self.finish_connect(None, None);
                 }
-                let password = if password.is_empty() {
-                    None
-                } else {
-                    Some(password)
-                };
                 return self.finish_connect(Some(api_key), password);
             }
             KeyCode::Backspace => {
@@ -840,11 +1240,22 @@ impl App {
         };
         match connect.stage {
             ConnectStage::Providers => {
-                connect.provider_id = Some(item.id);
                 connect.model_id = None;
-                connect.stage = ConnectStage::Models;
                 connect.filter.clear();
                 connect.selected = 0;
+                connect.error = None;
+                if item.id == CUSTOM_PROVIDER_ID {
+                    connect.provider_id = None;
+                    connect.custom_flow = true;
+                    connect.custom_token.clear();
+                    connect.custom_model_id.clear();
+                    connect.custom_model_name.clear();
+                    connect.stage = ConnectStage::Endpoint;
+                } else {
+                    connect.provider_id = Some(item.id);
+                    connect.custom_flow = false;
+                    connect.stage = ConnectStage::Models;
+                }
             }
             ConnectStage::Models => {
                 connect.model_id = Some(item.id);
@@ -855,7 +1266,34 @@ impl App {
                 connect.selected = 0;
                 connect.error = None;
             }
-            ConnectStage::ApiKey | ConnectStage::Password => {}
+            ConnectStage::Auth => {
+                let Some(auth) = AuthKind::parse(&item.id) else {
+                    return Action::None;
+                };
+                connect.custom_auth = auth;
+                connect.model_id = None;
+                connect.selected = 0;
+                connect.error = None;
+                if auth.requires_token() {
+                    connect.stage = ConnectStage::CustomToken;
+                } else {
+                    connect.custom_token.clear();
+                    connect.stage = ConnectStage::ModelId;
+                }
+            }
+            ConnectStage::CustomModels => {
+                connect.model_id = Some(item.id);
+                connect.password.clear();
+                connect.stage = ConnectStage::Password;
+                connect.selected = 0;
+                connect.error = None;
+            }
+            ConnectStage::ApiKey
+            | ConnectStage::Endpoint
+            | ConnectStage::CustomToken
+            | ConnectStage::ModelId
+            | ConnectStage::ModelName
+            | ConnectStage::Password => {}
         }
         Action::None
     }
@@ -907,6 +1345,8 @@ impl App {
             base_url: base_url.clone(),
             api_key: entered_key,
             api_key_env,
+            auth: AuthKind::Bearer,
+            models: Vec::new(),
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
         self.backend.configure(
@@ -915,6 +1355,8 @@ impl App {
             model_id.clone(),
             base_url,
             effective_key,
+            AuthKind::Bearer,
+            Vec::new(),
         );
         self.connect = None;
         if let Err(error) = saved {
@@ -925,11 +1367,84 @@ impl App {
         Action::None
     }
 
+    fn finish_custom_connect(&mut self, password: Option<String>) -> Action {
+        let plan = {
+            let Some(connect) = self.connect.as_ref() else {
+                return Action::None;
+            };
+            if !connect.custom_flow {
+                return Action::None;
+            }
+            (
+                connect.custom_endpoint.trim().to_owned(),
+                connect.model_id.clone(),
+                connect.custom_auth,
+                connect.custom_token.trim().to_owned(),
+                connect.custom_models.clone(),
+            )
+        };
+        let (endpoint, model_id, auth, token, models) = plan;
+        let Some(model_id) = model_id else {
+            self.connect_error("Choose a model.");
+            return Action::None;
+        };
+        if endpoint.is_empty() {
+            self.connect_error("Enter the completion endpoint.");
+            return Action::None;
+        }
+        if !models.iter().any(|model| model.id == model_id) {
+            self.connect_error("Choose a model.");
+            return Action::None;
+        }
+        if auth.requires_token() && token.is_empty() {
+            if let Some(connect) = self.connect.as_mut() {
+                connect.stage = ConnectStage::CustomToken;
+                connect.error = Some(format!("Enter a token for {}.", auth.label()));
+            }
+            return Action::None;
+        }
+        let api_key = if auth.requires_token() {
+            Some(token)
+        } else {
+            None
+        };
+        let connection = Connection {
+            provider: ProviderKind::Custom,
+            provider_name: "Custom".to_owned(),
+            model: model_id.clone(),
+            base_url: endpoint.clone(),
+            api_key: api_key.clone(),
+            api_key_env: None,
+            auth,
+            models: models.clone(),
+        };
+        let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
+        self.backend.configure(
+            ProviderKind::Custom,
+            "Custom".to_owned(),
+            model_id.clone(),
+            endpoint,
+            api_key,
+            auth,
+            models,
+        );
+        self.connect = None;
+        if let Err(error) = saved {
+            self.error(format!("Connected, but could not save: {error:#}"));
+        } else {
+            self.info(format!("Connected to Custom · {model_id}"));
+        }
+        Action::None
+    }
+
     fn connect_move(&mut self, forward: bool) {
         if let Some(connect) = self.connect.as_mut() {
             if matches!(
                 connect.stage,
-                ConnectStage::Providers | ConnectStage::Models
+                ConnectStage::Providers
+                    | ConnectStage::Models
+                    | ConnectStage::Auth
+                    | ConnectStage::CustomModels
             ) {
                 connect.move_selection(forward);
             }
@@ -975,6 +1490,10 @@ impl App {
         }
         if prompt.starts_with('/') {
             return self.command(prompt);
+        }
+        if !self.backend.is_configured() {
+            self.error("No provider connected. Run /connect to get started.");
+            return Action::None;
         }
 
         self.notice = None;
@@ -1030,7 +1549,13 @@ impl App {
             return Action::None;
         }
         self.palette_hidden = true;
-        self.connect = Some(ConnectState::loading());
+        let mut connect = ConnectState::loading();
+        if self.backend.provider_kind() == ProviderKind::Custom {
+            connect.custom_endpoint = self.backend.base_url().to_owned();
+            connect.custom_auth = self.backend.auth();
+            connect.custom_models = self.backend.saved_models().to_vec();
+        }
+        self.connect = Some(connect);
         Action::LoadCatalog
     }
 
@@ -1091,6 +1616,12 @@ impl App {
             .is_some_and(|message| message.role == Role::Assistant && message.content.is_empty())
         {
             self.session.messages.pop();
+        }
+    }
+
+    fn connect_error(&mut self, message: impl Into<String>) {
+        if let Some(connect) = self.connect.as_mut() {
+            connect.error = Some(message.into());
         }
     }
 

@@ -1,13 +1,13 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::{
-    config::{Config, ProviderKind},
+    config::{AuthKind, Config, ProviderKind, SavedModel},
     session::Message,
 };
 
@@ -25,6 +25,8 @@ pub struct Backend {
     model: String,
     base_url: String,
     api_key: Option<String>,
+    auth: AuthKind,
+    models: Vec<SavedModel>,
     client: Client,
 }
 
@@ -41,8 +43,18 @@ impl Backend {
             model: config.model.clone(),
             base_url: config.base_url.trim_end_matches('/').to_owned(),
             api_key: config.api_key.clone(),
+            auth: config.auth,
+            models: config.models.clone(),
             client,
         })
+    }
+
+    pub const fn is_configured(&self) -> bool {
+        !matches!(self.provider, ProviderKind::Unconfigured)
+    }
+
+    pub const fn provider_kind(&self) -> ProviderKind {
+        self.provider
     }
 
     pub fn provider_label(&self) -> &str {
@@ -51,6 +63,18 @@ impl Backend {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub const fn auth(&self) -> AuthKind {
+        self.auth
+    }
+
+    pub fn saved_models(&self) -> &[SavedModel] {
+        &self.models
     }
 
     pub fn set_model(&mut self, model: String) {
@@ -64,12 +88,16 @@ impl Backend {
         model: String,
         base_url: String,
         api_key: Option<String>,
+        auth: AuthKind,
+        models: Vec<SavedModel>,
     ) {
         self.provider = provider;
         self.provider_label = provider_label;
         self.model = model;
         self.base_url = base_url.trim_end_matches('/').to_owned();
         self.api_key = api_key;
+        self.auth = auth;
+        self.models = models;
     }
 
     pub async fn stream(
@@ -79,8 +107,12 @@ impl Backend {
         events: mpsc::UnboundedSender<StreamEvent>,
     ) {
         let result = match self.provider {
-            ProviderKind::Demo => stream_demo(request_id, &messages, &events).await,
-            ProviderKind::OpenAi => self.stream_openai(request_id, &messages, &events).await,
+            ProviderKind::Unconfigured => Err(anyhow!(
+                "no provider connected; run /connect to get started"
+            )),
+            ProviderKind::OpenAi | ProviderKind::Custom => {
+                self.stream_openai(request_id, &messages, &events).await
+            }
             ProviderKind::Ollama => self.stream_ollama(request_id, &messages, &events).await,
         };
         match result {
@@ -109,10 +141,14 @@ impl Backend {
         });
         let mut builder = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(completion_url(&self.base_url))
             .json(&request);
         if let Some(api_key) = &self.api_key {
-            builder = builder.bearer_auth(api_key);
+            builder = match self.auth {
+                AuthKind::Bearer => builder.bearer_auth(api_key),
+                AuthKind::XApiKey => builder.header("x-api-key", api_key.as_str()),
+                AuthKind::None => builder,
+            };
         }
         let response = builder
             .send()
@@ -150,6 +186,15 @@ impl Backend {
             send_parsed(request_id, event, events)
         })
         .await
+    }
+}
+
+fn completion_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/chat/completions") {
+        base_url.to_owned()
+    } else {
+        format!("{base_url}/chat/completions")
     }
 }
 
@@ -225,33 +270,6 @@ fn send_parsed(
         }
         ParsedLine::Done => Ok(false),
     }
-}
-
-async fn stream_demo(
-    request_id: u64,
-    messages: &[Message],
-    events: &mpsc::UnboundedSender<StreamEvent>,
-) -> Result<()> {
-    let prompt = messages
-        .last()
-        .map_or("Hello", |message| message.content.as_str());
-    let prompt = prompt.chars().take(800).collect::<String>();
-    let response = format!(
-        "Demo stream connected.\n\nYour prompt: {prompt}\n\nThis is a local simulated response. Run `yopes --provider openai` with OPENAI_API_KEY, or `yopes --provider ollama` for real model output."
-    );
-    for chunk in response.split_inclusive(char::is_whitespace) {
-        if events
-            .send(StreamEvent::Delta {
-                request_id,
-                text: chunk.to_owned(),
-            })
-            .is_err()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(12)).await;
-    }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -334,7 +352,21 @@ fn parse_ollama_line(line: &str) -> Result<ParsedLine> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParsedLine, parse_ollama_line, parse_openai_line, response_error_detail};
+    use super::{
+        ParsedLine, completion_url, parse_ollama_line, parse_openai_line, response_error_detail,
+    };
+
+    #[test]
+    fn completion_url_accepts_a_base_or_full_endpoint() {
+        assert_eq!(
+            completion_url("https://api.example.com/v1"),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            completion_url("https://api.example.com/v1/chat/completions/"),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
 
     #[test]
     fn parses_openai_deltas_and_done() {

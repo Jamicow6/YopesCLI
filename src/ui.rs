@@ -77,7 +77,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = padded(area, 2);
-    let right = format!("{} · {}", app.backend.provider_label(), app.backend.model());
+    let right = if app.backend.model().is_empty() {
+        app.backend.provider_label().to_owned()
+    } else {
+        format!("{} · {}", app.backend.provider_label(), app.backend.model())
+    };
     let right_width = (right.chars().count() as u16).min(inner.width / 2);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -114,7 +118,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.session.messages.is_empty() {
-        let welcome = vec![
+        let mut welcome = vec![
             Line::styled(
                 "yopes",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -125,9 +129,26 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(TEXT),
             ),
             Line::raw(""),
-            Line::styled("Type a message to begin.", Style::default().fg(MUTED)),
-            Line::styled("Type / to see commands.", Style::default().fg(MUTED)),
         ];
+        if app.backend.is_configured() {
+            welcome.push(Line::styled(
+                "Type a message to begin.",
+                Style::default().fg(MUTED),
+            ));
+        } else {
+            welcome.push(Line::styled(
+                "No provider connected.",
+                Style::default().fg(MUTED),
+            ));
+            welcome.push(Line::styled(
+                "Run /connect to add a provider or a custom endpoint.",
+                Style::default().fg(MUTED),
+            ));
+        }
+        welcome.push(Line::styled(
+            "Type / to see commands.",
+            Style::default().fg(MUTED),
+        ));
         frame.render_widget(Paragraph::new(welcome), inner);
         return;
     }
@@ -371,7 +392,7 @@ fn draw_connect(frame: &mut Frame, connect: &ConnectState, spinner: usize, area:
             ),
         ]))
         .title_bottom(Line::styled(
-            " models.dev · stored locally ",
+            " providers + custom · stored locally ",
             Style::default().fg(MUTED),
         ))
         .padding(Padding::new(2, 2, 1, 1));
@@ -391,15 +412,17 @@ fn draw_connect(frame: &mut Frame, connect: &ConnectState, spinner: usize, area:
         ])
         .split(inner);
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!("{}  ", connect.input_label()),
             Style::default().fg(MUTED),
         ),
         Span::styled(connect.input(), Style::default().fg(TEXT)),
-        Span::styled("▌", Style::default().fg(ACCENT)),
-    ]);
-    frame.render_widget(Paragraph::new(line), rows[0]);
+    ];
+    if connect.uses_cursor() {
+        spans.push(Span::styled("▌", Style::default().fg(ACCENT)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
     draw_connect_list(frame, connect, spinner, rows[2]);
     draw_connect_hint(frame, connect, rows[3]);
@@ -422,28 +445,41 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
         );
         return;
     }
+    let mut area = area;
     if let Some(error) = &connect.error {
+        if area.height == 0 {
+            return;
+        }
+        let line = Rect::new(area.x, area.y, area.width, 1);
         frame.render_widget(
-            Paragraph::new(error.as_str())
-                .style(Style::default().fg(ERROR))
-                .wrap(Wrap { trim: true }),
-            area,
+            Paragraph::new(truncate(error, usize::from(area.width)))
+                .style(Style::default().fg(ERROR)),
+            line,
         );
-        return;
+        area = Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        };
     }
     if !matches!(
         connect.stage,
-        ConnectStage::Providers | ConnectStage::Models
+        ConnectStage::Providers
+            | ConnectStage::Models
+            | ConnectStage::Auth
+            | ConnectStage::CustomModels
     ) {
         return;
     }
 
     let items = connect.items();
     if items.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No matches.").style(Style::default().fg(MUTED)),
-            area,
-        );
+        if connect.error.is_none() {
+            frame.render_widget(
+                Paragraph::new("No matches.").style(Style::default().fg(MUTED)),
+                area,
+            );
+        }
         return;
     }
     let height = usize::from(area.height);
@@ -451,11 +487,37 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
         return;
     }
     let selected = connect.selected.min(items.len() - 1);
-    let start = selected.saturating_sub(height.saturating_sub(1));
+    let divider = connect.stage == ConnectStage::Providers && items.len() > 1;
+    let divider_rows = if divider { 1 } else { 0 };
+    let mut rows = Vec::with_capacity(items.len() + divider_rows);
+    for index in 0..items.len() {
+        if divider && index == 1 {
+            rows.push(None);
+        }
+        rows.push(Some(index));
+    }
+    let selected_row = selected + if divider && selected > 0 { 1 } else { 0 };
+    let start_row = selected_row.saturating_sub(height.saturating_sub(1));
+    let start = start_row.min(rows.len().saturating_sub(height));
     let title_width = usize::from(area.width).saturating_sub(30).max(10);
 
-    for (offset, item) in items.iter().skip(start).take(height).enumerate() {
-        let index = start + offset;
+    for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
+        let rect = Rect::new(area.x, area.y + offset as u16, area.width, 1);
+        let Some(index) = *row else {
+            let label = " models.dev ";
+            let remaining = usize::from(area.width)
+                .saturating_sub(label.chars().count())
+                .saturating_sub(3);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    format!("  ─{label}{}", "─".repeat(remaining)),
+                    Style::default().fg(MUTED),
+                )),
+                rect,
+            );
+            continue;
+        };
+        let item = &items[index];
         let chosen = index == selected;
         let marker = if chosen { "› " } else { "  " };
         let badge_style = if chosen {
@@ -492,8 +554,7 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
             spans.push(Span::styled("  ", Style::default()));
         }
         spans.push(Span::styled(item.detail.clone(), detail_style));
-        let row = Rect::new(area.x, area.y + offset as u16, area.width, 1);
-        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+        frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     }
 }
 
@@ -505,6 +566,22 @@ fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
             || "enter continue · esc back · empty skips the key".to_owned(),
             |name| format!("enter continue · esc back · empty uses ${name}"),
         ),
+        ConnectStage::Endpoint => "enter continue · esc close".to_owned(),
+        ConnectStage::Auth => "↑↓ choose · enter continue · esc back".to_owned(),
+        ConnectStage::CustomToken => "enter continue · esc back".to_owned(),
+        ConnectStage::ModelId => {
+            if connect.has_custom_models() {
+                "enter continue · empty keeps saved models · esc back".to_owned()
+            } else {
+                "enter continue · esc back".to_owned()
+            }
+        }
+        ConnectStage::ModelName => {
+            "enter add model · empty uses the model id · esc back".to_owned()
+        }
+        ConnectStage::CustomModels => {
+            "↑↓ choose · enter use · a add model · esc endpoint".to_owned()
+        }
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }
