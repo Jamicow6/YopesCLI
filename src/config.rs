@@ -16,29 +16,88 @@ const CONFIG_VERSION: u32 = 1;
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     #[default]
-    Demo,
+    #[value(skip)]
+    Unconfigured,
     #[value(name = "openai")]
     OpenAi,
     Ollama,
+    #[value(skip)]
+    Custom,
 }
 
 impl ProviderKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Demo => "demo",
+            Self::Unconfigured => "unconfigured",
             Self::OpenAi => "openai",
             Self::Ollama => "ollama",
+            Self::Custom => "custom",
         }
     }
 
     fn parse_env(value: &str) -> Result<Self> {
         match value.to_ascii_lowercase().as_str() {
-            "demo" => Ok(Self::Demo),
+            "none" | "unconfigured" => Ok(Self::Unconfigured),
             "openai" | "openai-compatible" => Ok(Self::OpenAi),
             "ollama" => Ok(Self::Ollama),
-            _ => bail!("invalid YOPES_PROVIDER `{value}`; expected demo, openai, or ollama"),
+            _ => bail!("invalid YOPES_PROVIDER `{value}`; expected openai or ollama"),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthKind {
+    #[default]
+    Bearer,
+    XApiKey,
+    None,
+}
+
+impl AuthKind {
+    pub const fn choices() -> [Self; 3] {
+        [Self::Bearer, Self::XApiKey, Self::None]
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Bearer => "bearer",
+            Self::XApiKey => "x-api-key",
+            Self::None => "none",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bearer => "Bearer token",
+            Self::XApiKey => "x-api-key",
+            Self::None => "No auth",
+        }
+    }
+
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::Bearer => "Authorization: Bearer <token>",
+            Self::XApiKey => "x-api-key: <token>",
+            Self::None => "send no authorization header",
+        }
+    }
+
+    pub const fn requires_token(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::choices().into_iter().find(|auth| auth.id() == value)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SavedModel {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Parser)]
@@ -47,7 +106,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Model backend: demo, openai, or ollama.
+    /// Model backend: openai or ollama.
     #[arg(long, value_enum)]
     provider: Option<ProviderKind>,
 
@@ -80,6 +139,8 @@ pub struct Config {
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    pub auth: AuthKind,
+    pub models: Vec<SavedModel>,
     pub session_path: Option<PathBuf>,
     pub config_path: PathBuf,
 }
@@ -91,6 +152,8 @@ pub struct Connection {
     pub base_url: String,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
+    pub auth: AuthKind,
+    pub models: Vec<SavedModel>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +169,10 @@ struct SavedConfig {
     base_url: String,
     #[serde(default)]
     api_key_env: Option<String>,
+    #[serde(default)]
+    auth: AuthKind,
+    #[serde(default)]
+    models: Vec<SavedModel>,
     #[serde(default)]
     secret: StoredSecret,
 }
@@ -167,8 +234,32 @@ impl Config {
             .or(env_provider)
             .or_else(|| saved.as_ref().map(|saved| saved.provider))
             .or_else(|| env_key.as_ref().map(|_| ProviderKind::OpenAi))
-            .unwrap_or(ProviderKind::Demo);
+            .unwrap_or(ProviderKind::Unconfigured);
         let saved_for_provider = saved.as_ref().filter(|saved| saved.provider == provider);
+
+        let session_path = if cli.no_save {
+            None
+        } else {
+            Some(
+                cli.session
+                    .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from))
+                    .unwrap_or_else(default_session_path),
+            )
+        };
+
+        if provider == ProviderKind::Unconfigured {
+            return Ok(Self {
+                provider,
+                provider_label: "not connected".to_owned(),
+                model: String::new(),
+                base_url: String::new(),
+                api_key: None,
+                auth: AuthKind::Bearer,
+                models: Vec::new(),
+                session_path,
+                config_path,
+            });
+        }
 
         let provider_label = saved_for_provider
             .map(|saved| saved.provider_name.trim())
@@ -186,13 +277,13 @@ impl Config {
             })
             .unwrap_or_else(|| default_model(provider));
         if model.trim().is_empty() {
-            bail!("model name cannot be empty");
+            bail!("model name cannot be empty; run /connect");
         }
 
         let provider_base_var = match provider {
             ProviderKind::OpenAi => Some("OPENAI_BASE_URL"),
             ProviderKind::Ollama => Some("OLLAMA_BASE_URL"),
-            ProviderKind::Demo => None,
+            ProviderKind::Unconfigured | ProviderKind::Custom => None,
         };
         let base_url = cli
             .base_url
@@ -205,6 +296,10 @@ impl Config {
             })
             .unwrap_or_else(|| default_base_url(provider).to_owned());
 
+        let auth = saved_for_provider.map_or(AuthKind::Bearer, |saved| saved.auth);
+        let models = saved_for_provider
+            .map(|saved| saved.models.clone())
+            .unwrap_or_default();
         let api_key = resolve_api_key(saved_for_provider, env_key)?;
         if provider == ProviderKind::OpenAi && api_key.is_none() && saved_for_provider.is_none() {
             bail!(
@@ -212,22 +307,14 @@ impl Config {
             );
         }
 
-        let session_path = if cli.no_save {
-            None
-        } else {
-            Some(
-                cli.session
-                    .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from))
-                    .unwrap_or_else(default_session_path),
-            )
-        };
-
         Ok(Self {
             provider,
             provider_label,
             model,
             base_url,
             api_key,
+            auth,
+            models,
             session_path,
             config_path,
         })
@@ -236,6 +323,9 @@ impl Config {
 
 fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Result<Option<String>> {
     if let Some(saved) = saved {
+        if saved.auth == AuthKind::None {
+            return Ok(None);
+        }
         if let Some(name) = saved.api_key_env.as_deref() {
             if let Some(api_key) = env::var(name)
                 .ok()
@@ -254,7 +344,7 @@ fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Resu
 
 fn default_model(provider: ProviderKind) -> String {
     match provider {
-        ProviderKind::Demo => "demo",
+        ProviderKind::Unconfigured | ProviderKind::Custom => "",
         ProviderKind::OpenAi => "gpt-4o-mini",
         ProviderKind::Ollama => "llama3.2",
     }
@@ -263,17 +353,21 @@ fn default_model(provider: ProviderKind) -> String {
 
 fn default_base_url(provider: ProviderKind) -> &'static str {
     match provider {
-        ProviderKind::Demo => "",
+        ProviderKind::Unconfigured | ProviderKind::Custom => "",
         ProviderKind::OpenAi => "https://api.openai.com/v1",
         ProviderKind::Ollama => "http://localhost:11434",
     }
 }
 
 pub fn save_connection(path: &Path, connection: &Connection, password: Option<&str>) -> Result<()> {
-    let api_key = connection
-        .api_key
-        .as_deref()
-        .filter(|api_key| !api_key.trim().is_empty());
+    let api_key = if connection.auth.requires_token() {
+        connection
+            .api_key
+            .as_deref()
+            .filter(|api_key| !api_key.trim().is_empty())
+    } else {
+        None
+    };
     let secret = match (api_key, password.filter(|password| !password.is_empty())) {
         (Some(api_key), Some(password)) => {
             let sealed = credentials::seal(password, api_key)?;
@@ -291,6 +385,17 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
         },
         _ => StoredSecret::default(),
     };
+    let mut models = Vec::new();
+    for model in &connection.models {
+        let id = model.id.trim();
+        if id.is_empty() || models.iter().any(|model: &SavedModel| model.id == id) {
+            continue;
+        }
+        models.push(SavedModel {
+            id: id.to_owned(),
+            name: model.name.trim().to_owned(),
+        });
+    }
     let saved = SavedConfig {
         version: CONFIG_VERSION,
         provider: connection.provider,
@@ -298,6 +403,8 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
         model: connection.model.clone(),
         base_url: connection.base_url.clone(),
         api_key_env: connection.api_key_env.clone(),
+        auth: connection.auth,
+        models,
         secret,
     };
     save_saved(path, &saved)
@@ -373,7 +480,7 @@ pub fn load_session(path: Option<&Path>) -> Result<crate::session::Session> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, ProviderKind};
+    use super::{AuthKind, Cli, ProviderKind};
     use clap::Parser;
 
     #[test]
@@ -381,6 +488,20 @@ mod tests {
         let cli = Cli::try_parse_from(["yopes", "--provider", "openai"]).unwrap();
         assert_eq!(cli.provider, Some(ProviderKind::OpenAi));
         assert!(Cli::try_parse_from(["yopes", "--provider", "invalid"]).is_err());
+        assert!(Cli::try_parse_from(["yopes", "--provider", "custom"]).is_err());
+        assert!(Cli::try_parse_from(["yopes", "--provider", "demo"]).is_err());
+    }
+
+    #[test]
+    fn custom_auth_names_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&AuthKind::XApiKey).unwrap(),
+            "\"x-api-key\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AuthKind>("\"none\"").unwrap(),
+            AuthKind::None
+        );
     }
 
     #[test]
