@@ -1,12 +1,16 @@
 mod app;
 mod backend;
+mod catalog;
 mod config;
+mod credentials;
 mod session;
 mod ui;
+mod update;
 
 use std::io::{self, Stdout};
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use crossterm::{
     cursor::Show,
     event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream},
@@ -20,7 +24,8 @@ use tokio::{sync::mpsc, task::JoinHandle, time::Duration};
 use crate::{
     app::{Action, App},
     backend::{Backend, StreamEvent},
-    config::{Config, load_session},
+    catalog::FetchResult,
+    config::{Cli, Command, Config, load_session},
 };
 
 #[tokio::main]
@@ -32,12 +37,19 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let config = Config::from_args()?;
-    let session = load_session(config.session_path.as_deref())?;
+    let cli = Cli::parse();
+    if matches!(cli.command, Some(Command::Update)) {
+        return update::run().await;
+    }
+    let config = Config::from_cli(cli)?;
+    let session_path = config.session_path.clone();
+    let config_path = config.config_path.clone();
+    let session = load_session(session_path.as_deref())?;
     let backend = Backend::new(&config)?;
-    let mut app = App::new(session, backend, config.session_path);
+    let mut app = App::new(session, backend, session_path, config_path);
     let mut terminal = TerminalGuard::new()?;
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
+    let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     let mut active_task: Option<(u64, JoinHandle<()>)> = None;
@@ -69,6 +81,15 @@ async fn run() -> Result<()> {
                                 cancel_task(&mut active_task, request_id);
                             }
                             Action::Quit => {}
+                            Action::LoadCatalog => {
+                                let sender = catalog_sender.clone();
+                                tokio::spawn(async move {
+                                    let result = catalog::fetch()
+                                        .await
+                                        .map_err(|error| format!("{error:#}"));
+                                    let _ = sender.send(result);
+                                });
+                            }
                         }
                     }
                     Some(Ok(Event::Paste(value))) => app.handle_paste(&value),
@@ -92,7 +113,12 @@ async fn run() -> Result<()> {
                     active_task = None;
                 }
             }
-            _ = ticker.tick(), if app.is_streaming() => app.tick(),
+            result = catalog_receiver.recv() => {
+                if let Some(result) = result {
+                    app.on_catalog(result);
+                }
+            }
+            _ = ticker.tick(), if app.is_streaming() || app.connect_open() => app.tick(),
         }
     }
 

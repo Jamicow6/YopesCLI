@@ -1,14 +1,21 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+use crate::credentials;
+
+const CONFIG_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
+    #[default]
     Demo,
     #[value(name = "openai")]
     OpenAi,
@@ -35,8 +42,11 @@ impl ProviderKind {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "yopes", version, about = "A fast, session-first AI harness")]
-struct Cli {
+#[command(name = "yopes", version = crate::update::current_version(), about = "A fast, session-first AI harness")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Model backend: demo, openai, or ollama.
     #[arg(long, value_enum)]
     provider: Option<ProviderKind>,
@@ -58,42 +68,123 @@ struct Cli {
     no_save: bool,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Check for updates, install the latest release, and restart.
+    Update,
+}
+
 pub struct Config {
     pub provider: ProviderKind,
+    pub provider_label: String,
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
     pub session_path: Option<PathBuf>,
+    pub config_path: PathBuf,
+}
+
+pub struct Connection {
+    pub provider: ProviderKind,
+    pub provider_name: String,
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedConfig {
+    version: u32,
+    #[serde(default)]
+    provider: ProviderKind,
+    #[serde(default)]
+    provider_name: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    secret: StoredSecret,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StoredSecret {
+    #[serde(default)]
+    encrypted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    salt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ciphertext: Option<String>,
+}
+
+impl StoredSecret {
+    fn resolve(&self) -> Result<Option<String>> {
+        if !self.encrypted {
+            return Ok(self
+                .api_key
+                .clone()
+                .filter(|api_key| !api_key.trim().is_empty()));
+        }
+        let (Some(salt), Some(nonce), Some(ciphertext)) =
+            (&self.salt, &self.nonce, &self.ciphertext)
+        else {
+            bail!("the stored API key is missing its encryption data");
+        };
+        let password = credentials::prompt_password("API key password: ")?;
+        if password.is_empty() {
+            bail!("an encryption password is required to unlock the stored API key");
+        }
+        let api_key = credentials::open(&password, salt, nonce, ciphertext)?;
+        Ok(Some(api_key))
+    }
 }
 
 impl Config {
-    pub fn from_args() -> Result<Self> {
-        Self::resolve(Cli::parse())
+    pub fn from_cli(cli: Cli) -> Result<Self> {
+        Self::resolve(cli)
     }
 
     fn resolve(cli: Cli) -> Result<Self> {
+        let config_path = default_config_path();
+        let saved = load_saved(&config_path)?;
+
         let env_provider = env::var("YOPES_PROVIDER")
             .ok()
             .map(|value| ProviderKind::parse_env(&value))
             .transpose()?;
-        let api_key = env::var("OPENAI_API_KEY").ok();
+        let env_key = env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|api_key| !api_key.trim().is_empty());
         let provider = cli
             .provider
             .or(env_provider)
-            .or_else(|| api_key.as_ref().map(|_| ProviderKind::OpenAi))
+            .or_else(|| saved.as_ref().map(|saved| saved.provider))
+            .or_else(|| env_key.as_ref().map(|_| ProviderKind::OpenAi))
             .unwrap_or(ProviderKind::Demo);
+        let saved_for_provider = saved.as_ref().filter(|saved| saved.provider == provider);
+
+        let provider_label = saved_for_provider
+            .map(|saved| saved.provider_name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(provider.as_str())
+            .to_owned();
 
         let model = cli
             .model
             .or_else(|| env::var("YOPES_MODEL").ok())
-            .unwrap_or_else(|| {
-                match provider {
-                    ProviderKind::Demo => "demo",
-                    ProviderKind::OpenAi => "gpt-4o-mini",
-                    ProviderKind::Ollama => "llama3.2",
-                }
-                .to_owned()
-            });
+            .or_else(|| {
+                saved_for_provider
+                    .map(|saved| saved.model.clone())
+                    .filter(|model| !model.trim().is_empty())
+            })
+            .unwrap_or_else(|| default_model(provider));
         if model.trim().is_empty() {
             bail!("model name cannot be empty");
         }
@@ -107,14 +198,18 @@ impl Config {
             .base_url
             .or_else(|| env::var("YOPES_BASE_URL").ok())
             .or_else(|| provider_base_var.and_then(|name| env::var(name).ok()))
-            .unwrap_or_else(|| match provider {
-                ProviderKind::Demo => String::new(),
-                ProviderKind::OpenAi => "https://api.openai.com/v1".to_owned(),
-                ProviderKind::Ollama => "http://localhost:11434".to_owned(),
-            });
+            .or_else(|| {
+                saved_for_provider
+                    .map(|saved| saved.base_url.clone())
+                    .filter(|base_url| !base_url.trim().is_empty())
+            })
+            .unwrap_or_else(|| default_base_url(provider).to_owned());
 
-        if provider == ProviderKind::OpenAi && api_key.as_deref().is_none_or(str::is_empty) {
-            bail!("OPENAI_API_KEY is required for the OpenAI-compatible provider");
+        let api_key = resolve_api_key(saved_for_provider, env_key)?;
+        if provider == ProviderKind::OpenAi && api_key.is_none() && saved_for_provider.is_none() {
+            bail!(
+                "no API key for the OpenAI-compatible provider; set OPENAI_API_KEY or run /connect"
+            );
         }
 
         let session_path = if cli.no_save {
@@ -129,12 +224,134 @@ impl Config {
 
         Ok(Self {
             provider,
+            provider_label,
             model,
             base_url,
             api_key,
             session_path,
+            config_path,
         })
     }
+}
+
+fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Result<Option<String>> {
+    if let Some(saved) = saved {
+        if let Some(name) = saved.api_key_env.as_deref() {
+            if let Some(api_key) = env::var(name)
+                .ok()
+                .filter(|api_key| !api_key.trim().is_empty())
+            {
+                return Ok(Some(api_key));
+            }
+        }
+        if let Some(api_key) = saved.secret.resolve()? {
+            return Ok(Some(api_key));
+        }
+        return Ok(None);
+    }
+    Ok(env_key)
+}
+
+fn default_model(provider: ProviderKind) -> String {
+    match provider {
+        ProviderKind::Demo => "demo",
+        ProviderKind::OpenAi => "gpt-4o-mini",
+        ProviderKind::Ollama => "llama3.2",
+    }
+    .to_owned()
+}
+
+fn default_base_url(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Demo => "",
+        ProviderKind::OpenAi => "https://api.openai.com/v1",
+        ProviderKind::Ollama => "http://localhost:11434",
+    }
+}
+
+pub fn save_connection(path: &Path, connection: &Connection, password: Option<&str>) -> Result<()> {
+    let api_key = connection
+        .api_key
+        .as_deref()
+        .filter(|api_key| !api_key.trim().is_empty());
+    let secret = match (api_key, password.filter(|password| !password.is_empty())) {
+        (Some(api_key), Some(password)) => {
+            let sealed = credentials::seal(password, api_key)?;
+            StoredSecret {
+                encrypted: true,
+                salt: Some(sealed.salt),
+                nonce: Some(sealed.nonce),
+                ciphertext: Some(sealed.ciphertext),
+                ..StoredSecret::default()
+            }
+        }
+        (Some(api_key), None) => StoredSecret {
+            api_key: Some(api_key.to_owned()),
+            ..StoredSecret::default()
+        },
+        _ => StoredSecret::default(),
+    };
+    let saved = SavedConfig {
+        version: CONFIG_VERSION,
+        provider: connection.provider,
+        provider_name: connection.provider_name.clone(),
+        model: connection.model.clone(),
+        base_url: connection.base_url.clone(),
+        api_key_env: connection.api_key_env.clone(),
+        secret,
+    };
+    save_saved(path, &saved)
+}
+
+fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let saved: SavedConfig =
+        serde_json::from_str(&source).with_context(|| format!("parsing {}", path.display()))?;
+    if saved.version != CONFIG_VERSION {
+        bail!(
+            "unsupported config version {}; expected {}",
+            saved.version,
+            CONFIG_VERSION
+        );
+    }
+    Ok(Some(saved))
+}
+
+fn save_saved(path: &Path, saved: &SavedConfig) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(saved)?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, json).with_context(|| format!("writing {}", temporary.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(windows))]
+    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path).with_context(|| format!("removing old {}", path.display()))?;
+        }
+        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn default_config_path() -> PathBuf {
+    ProjectDirs::from("dev", "Yopes", "Yopes").map_or_else(
+        || PathBuf::from(".yopes-config.json"),
+        |dirs| dirs.config_dir().join("config.json"),
+    )
 }
 
 fn default_session_path() -> PathBuf {
@@ -164,5 +381,11 @@ mod tests {
         let cli = Cli::try_parse_from(["yopes", "--provider", "openai"]).unwrap();
         assert_eq!(cli.provider, Some(ProviderKind::OpenAi));
         assert!(Cli::try_parse_from(["yopes", "--provider", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn the_update_subcommand_parses() {
+        let cli = Cli::try_parse_from(["yopes", "update"]).unwrap();
+        assert!(matches!(cli.command, Some(super::Command::Update)));
     }
 }

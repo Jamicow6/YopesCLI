@@ -21,6 +21,7 @@ pub enum StreamEvent {
 #[derive(Clone)]
 pub struct Backend {
     provider: ProviderKind,
+    provider_label: String,
     model: String,
     base_url: String,
     api_key: Option<String>,
@@ -36,6 +37,7 @@ impl Backend {
             .context("creating HTTP client")?;
         Ok(Self {
             provider: config.provider,
+            provider_label: config.provider_label.clone(),
             model: config.model.clone(),
             base_url: config.base_url.trim_end_matches('/').to_owned(),
             api_key: config.api_key.clone(),
@@ -43,8 +45,8 @@ impl Backend {
         })
     }
 
-    pub const fn provider(&self) -> ProviderKind {
-        self.provider
+    pub fn provider_label(&self) -> &str {
+        &self.provider_label
     }
 
     pub fn model(&self) -> &str {
@@ -53,6 +55,21 @@ impl Backend {
 
     pub fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    pub fn configure(
+        &mut self,
+        provider: ProviderKind,
+        provider_label: String,
+        model: String,
+        base_url: String,
+        api_key: Option<String>,
+    ) {
+        self.provider = provider;
+        self.provider_label = provider_label;
+        self.model = model;
+        self.base_url = base_url.trim_end_matches('/').to_owned();
+        self.api_key = api_key;
     }
 
     pub async fn stream(
