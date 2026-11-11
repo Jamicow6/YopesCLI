@@ -319,8 +319,8 @@ impl ConnectState {
                 if filter.is_empty() || "custom".contains(filter.as_str()) {
                     items.push(ConnectItem {
                         id: CUSTOM_PROVIDER_ID.to_owned(),
-                        title: "Custom".to_owned(),
-                        detail: "New OpenAI-compatible endpoint".to_owned(),
+                        title: "Add custom provider".to_owned(),
+                        detail: "new OpenAI-compatible endpoint".to_owned(),
                         logo: provider_logo(CUSTOM_PROVIDER_ID),
                         custom_id: None,
                         active: false,
@@ -1386,7 +1386,13 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if let Some(connect) = self.connect.as_mut() {
-                    connect.stage = ConnectStage::Endpoint;
+                    // A saved endpoint's manager backs out to the provider list;
+                    // the create flow backs out to the endpoint field.
+                    connect.stage = if connect.custom_provider_id.is_some() {
+                        ConnectStage::Providers
+                    } else {
+                        ConnectStage::Endpoint
+                    };
                     connect.selected = 0;
                     connect.filter.clear();
                     connect.error = None;
@@ -1786,18 +1792,9 @@ impl App {
                 connect.filter.clear();
                 connect.selected = 0;
                 connect.error = None;
-                if item.id == CUSTOM_PROVIDER_ID {
-                    connect.provider_id = None;
-                    connect.custom_flow = true;
-                    connect.custom_provider_id = None;
-                    connect.custom_name.clear();
-                    connect.custom_endpoint.clear();
-                    connect.custom_token.clear();
-                    connect.custom_models.clear();
-                    connect.custom_model_id.clear();
-                    connect.custom_model_name.clear();
-                    connect.stage = ConnectStage::ProviderName;
-                } else if let Some(saved_id) = &item.custom_id {
+                // A saved endpoint is identified by `custom_id`; its row id can
+                // legitimately equal the reserved `custom` id used above.
+                if let Some(saved_id) = &item.custom_id {
                     let Some(saved) = connect
                         .saved_custom
                         .iter()
@@ -1815,13 +1812,20 @@ impl App {
                     connect.custom_token = saved.token.clone().unwrap_or_default();
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
-                    connect.stage = if saved.auth.requires_token() {
-                        ConnectStage::CustomToken
-                    } else if !saved.models.is_empty() {
-                        ConnectStage::CustomModels
-                    } else {
-                        ConnectStage::ModelId
-                    };
+                    // Land on the manager so the endpoint, key and models can be
+                    // edited; the token is one of its rows.
+                    connect.stage = ConnectStage::CustomModels;
+                } else if item.id == CUSTOM_PROVIDER_ID {
+                    connect.provider_id = None;
+                    connect.custom_flow = true;
+                    connect.custom_provider_id = None;
+                    connect.custom_name.clear();
+                    connect.custom_endpoint.clear();
+                    connect.custom_token.clear();
+                    connect.custom_models.clear();
+                    connect.custom_model_id.clear();
+                    connect.custom_model_name.clear();
+                    connect.stage = ConnectStage::ProviderName;
                 } else {
                     connect.provider_id = Some(item.id);
                     connect.custom_flow = false;
@@ -2590,6 +2594,30 @@ mod tests {
             .find(|command| command.name == "/help")
             .unwrap();
         assert_eq!(help.completion(), "/help");
+    }
+
+    #[test]
+    fn saved_provider_row_is_identified_by_custom_id() {
+        use super::{CUSTOM_PROVIDER_ID, ConnectStage, ConnectState};
+        use crate::config::{AuthKind, CustomProvider};
+
+        // A legacy config with no custom_providers list is folded in with the
+        // slug of its name, which can equal the reserved new-provider id.
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::Providers;
+        connect.saved_custom.push(CustomProvider {
+            id: CUSTOM_PROVIDER_ID.to_owned(),
+            name: "Custom".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            auth: AuthKind::Bearer,
+            models: Vec::new(),
+            token: None,
+            encrypted: false,
+        });
+        let items = connect.items_using("https://example.test/v1", "model");
+        assert_eq!(items[0].custom_id, None, "first row adds a provider");
+        assert_eq!(items[1].custom_id.as_deref(), Some(CUSTOM_PROVIDER_ID));
+        assert!(items[1].active);
     }
 
     #[test]
