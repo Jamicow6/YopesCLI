@@ -209,8 +209,10 @@ fn dispatch(
             let web_key = app.tavily_key().map(str::to_owned);
             tokio::spawn(async move {
                 let task_call = call.clone();
-                let joined =
-                    tokio::task::spawn_blocking(move || tools::execute(&task_call, web_key)).await;
+                let joined = tokio::task::spawn_blocking(move || {
+                    tools::execute(&task_call, web_key.as_deref())
+                })
+                .await;
                 let result = match joined {
                     Ok(Ok(output)) => Ok(output),
                     Ok(Err(error)) => Err(format!("{error:#}")),
