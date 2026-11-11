@@ -24,7 +24,7 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 8] = [
     "list_dir",
     "read_file",
     "write_file",
@@ -32,6 +32,7 @@ pub const TOOL_NAMES: [&str; 7] = [
     "run_command",
     "web_search",
     "todo_write",
+    "delegate",
 ];
 
 #[derive(Debug)]
@@ -46,6 +47,10 @@ pub struct ChangePreview {
 /// File writes and edits never ask: their diff is shown in the transcript and
 /// they are easy to undo. Only a command the model marks as risky asks.
 pub fn requires_approval(call: &ToolCall) -> bool {
+    if call.function.name == "delegate" {
+        // A subagent request spends extra tokens on the user's account.
+        return true;
+    }
     call.function.name == "run_command" && command_risk(&call.function.arguments)
 }
 
@@ -73,6 +78,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              facts, and cite the URL you used. \
              For multi-step work or when the user asks for a todo list, maintain the \
              checklist with todo_write: send the whole list each call, marking done items. \
+             For an independent subtask use delegate: hand the subagent one self-contained \
+             task with all the context it needs — it has no tools and returns a final answer. \
              Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
@@ -255,6 +262,23 @@ pub fn definitions() -> Value {
                 }
             }
         }
+        {
+            "type": "function",
+            "function": {
+                "name": "delegate",
+                "description": "Hand one self-contained subtask to a subagent running on the same provider and model, and receive its final answer. The subagent has no tools: it cannot read files, run commands, or search the web, so the task must include every file excerpt, code snippet, and fact it needs. Use it for focused drafts, second opinions, or research recaps, and split large work into several delegate calls.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "Complete instructions for the subagent, including all context it needs."
+                        }
+                    },
+                    "required": ["task"]
+                }
+            }
+        }
     ])
 }
 
@@ -269,6 +293,7 @@ pub fn preview(call: &ToolCall) -> String {
             .to_owned()
     };
     match call.function.name.as_str() {
+        "delegate" => format!("subagent · {}", string("task")),
         "list_dir" => {
             let path = string("path");
             if path.is_empty() {
@@ -473,8 +498,23 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
         "run_command" => run_command(&call.function.arguments),
         "web_search" => web_search(&call.function.arguments, web_key),
         "todo_write" => todo_write(&call.function.arguments),
+        // Handled by the session loop: the subagent needs the backend.
+        "delegate" => bail!("delegate cannot run outside the session loop"),
         other => bail!("unknown tool `{other}`"),
     }
+}
+
+/// The `task` argument of a `delegate` call, when it is a non-empty string.
+pub fn delegate_task(call: &ToolCall) -> Option<String> {
+    serde_json::from_str::<Value>(&call.function.arguments)
+        .ok()
+        .and_then(|arguments| {
+            arguments
+                .get("task")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .filter(|task| !task.trim().is_empty())
+        })
 }
 
 #[derive(Deserialize)]

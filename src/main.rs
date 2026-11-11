@@ -34,6 +34,7 @@ use crate::{
     backend::{Backend, StreamEvent},
     catalog::FetchResult,
     config::{Cli, Command, Config, load_session},
+    tools,
 };
 
 #[tokio::main]
@@ -236,6 +237,29 @@ fn dispatch(
         }
         Action::RunTool { call } => {
             let sender = tool_events.clone();
+            if call.function.name == "delegate" {
+                // The subagent is a plain request on the same endpoint: run it
+                // with an empty conversation and return its answer as the
+                // tool result.
+                let backend = app.backend.clone();
+                tokio::spawn(async move {
+                    let result = match tools::delegate_task(&call) {
+                        Some(task) => {
+                            let brief = "You are a subagent inside yopes, a terminal coding \
+                                        assistant. Answer the task given below with only the \
+                                        useful result, no preamble, no offers to help further. \
+                                        You have no tools; rely only on the context in the task.";
+                            backend
+                                .complete_once(brief, &task)
+                                .await
+                                .map_err(|error| format!("{error:#}"))
+                        }
+                        None => Err("delegate needs a task argument".to_owned()),
+                    };
+                    let _ = sender.send(ToolEvent { call, result });
+                });
+                return;
+            }
             let web_key = app.tavily_key().map(str::to_owned);
             tokio::spawn(async move {
                 let task_call = call.clone();

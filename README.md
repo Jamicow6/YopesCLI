@@ -54,7 +54,7 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 
 ### Tools
 
-Yopes offers tools to OpenAI-compatible providers (`openai` and `custom`): `list_dir`, `read_file`, `write_file`, `edit_file`, and `run_command`. Ollama sessions remain text-only for now.
+Yopes offers tools to OpenAI-compatible providers (`openai` and `custom`): `list_dir`, `read_file`, `write_file`, `edit_file`, `run_command`, `web_search`, `todo_write`, and `delegate` — the last one hands a self-contained subtask to a subagent on the same provider and model; it has no tools and returns its final answer as the tool result, with an approval prompt before it runs. Ollama sessions remain text-only for now.
 
 Tool modes:
 
