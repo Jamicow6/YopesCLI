@@ -132,6 +132,31 @@ impl Backend {
         self.models = models;
     }
 
+    /// One helper request for the `delegate` tool: empty conversation, no
+    /// tools, and the answer text as the result. Uses `mode_note` as the
+    /// subagent brief appended to the system prompt.
+    pub async fn complete_once(self, brief: &'static str, task: &str) -> Result<String> {
+        // The request id never reaches the app: this channel is task-local.
+        let request_id = u64::MAX;
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let messages = vec![Message::new(Role::User, task)];
+        self.stream(request_id, messages, false, Some(brief), events)
+            .await;
+        let mut text = String::new();
+        while let Ok(event) = receiver.recv().await {
+            match event {
+                StreamEvent::Delta { text: delta, .. } => text.push_str(&delta),
+                StreamEvent::Error { message, .. } => bail!("{message}"),
+                StreamEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        if text.is_empty() {
+            bail!("the subagent returned no content");
+        }
+        Ok(text.trim().to_owned())
+    }
+
     pub async fn stream(
         self,
         request_id: u64,
