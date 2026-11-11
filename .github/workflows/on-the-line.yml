@@ -41,4 +41,4 @@ jobs:
       - name: Dispatch Production
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run production.yml --ref main
+        run: gh workflow run production.yml --ref main -R "$GITHUB_REPOSITORY"
