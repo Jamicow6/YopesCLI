@@ -8,8 +8,8 @@ use ratatui::{
 
 use crate::{
     app::{
-        App, COMMANDS, CUSTOM_PROVIDER_ID, CommandSpec, ConnectStage, ConnectState, NoticeKind,
-        ToolApproval, format_bytes, format_tokens,
+        App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
+        NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
     diff::{ChangeKind, DiffLine, FileDiff},
     session::{Message, Role},
@@ -196,6 +196,11 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         if !message.content.is_empty() {
             for content_line in message.content.split('\n') {
                 lines.push(Line::styled(content_line, Style::default().fg(TEXT)));
+            }
+        }
+        if let Some(call_id) = message.tool_call_id.as_deref() {
+            if let Some(report) = app.changes.get(call_id) {
+                lines.extend(change_lines(report, inner.width));
             }
         }
         if let Some(calls) = &message.tool_calls {
@@ -494,6 +499,43 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
         Paragraph::new(lines).scroll((approval.scroll.min(u16::MAX as usize) as u16, 0)),
         inner,
     );
+}
+
+/// The diff under a tool result: a file header, then the change itself.
+fn change_lines(report: &ChangeReport, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width).max(1);
+    let diff = &report.diff;
+    let mut lines = vec![Line::raw("")];
+    let mut spans = vec![Span::styled(
+        truncate(&diff.path, width.saturating_sub(22)),
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+    )];
+    if diff.created {
+        spans.push(Span::styled("  new file", Style::default().fg(MUTED)));
+    }
+    spans.push(Span::styled(
+        format!("  +{}", diff.additions),
+        Style::default().fg(ADDED),
+    ));
+    spans.push(Span::styled(
+        format!("  −{}", diff.deletions),
+        Style::default().fg(REMOVED),
+    ));
+    lines.push(Line::from(spans));
+    if diff.is_empty() {
+        let note = diff.note.as_deref().unwrap_or("No line changes.");
+        lines.push(Line::styled(
+            truncate(note, width),
+            Style::default().fg(MUTED),
+        ));
+        return lines;
+    }
+    if report.side_by_side {
+        lines.extend(side_by_side_lines(diff, width));
+    } else {
+        lines.extend(unified_lines(diff, width));
+    }
+    lines
 }
 
 fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
@@ -1005,7 +1047,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("esc", "stop streaming / deny tool / close"),
         help_row("enter", "run the pending tool"),
         help_row("a", "always allow that tool this session"),
-        help_row("v", "toggle unified / side-by-side diff"),
+        help_row("v", "toggle unified / side-by-side diffs"),
         help_row("ctrl+n", "new session"),
         help_row("ctrl+u", "clear input"),
         help_row("ctrl+w", "delete previous word"),

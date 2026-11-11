@@ -28,7 +28,7 @@ Download the latest build for your platform from [Releases](https://github.com/J
 | `Esc` | Close the palette, stop streaming, deny a pending tool, or close help |
 | `Enter` | Run the pending tool when the approval dialog is open |
 | `a` | Always allow the pending tool for this session |
-| `v` | Toggle unified / side-by-side diff in the approval dialog |
+| `v` | Toggle unified / side-by-side diffs (approval dialog, or an empty composer) |
 | `Ctrl+C` / `Ctrl+Q` | Quit |
 | `Ctrl+N` | Start a new session |
 | `Ctrl+U` | Clear the composer |
