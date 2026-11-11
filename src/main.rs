@@ -190,15 +190,17 @@ fn dispatch(
             request_id,
             messages,
             tools_enabled,
+            mode_note,
         } => {
             if let Some((_, previous)) = active_task.take() {
                 previous.abort();
             }
             let backend = app.backend.clone();
             let sender = events.clone();
+            let mode_note = app.mode.instruction();
             let task = tokio::spawn(async move {
                 backend
-                    .stream(request_id, messages, tools_enabled, sender)
+                    .stream(request_id, messages, tools_enabled, mode_note, sender)
                     .await;
             });
             *active_task = Some((request_id, task));
