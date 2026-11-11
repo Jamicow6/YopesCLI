@@ -12,7 +12,7 @@ use crate::{
         NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
     diff::{ChangeKind, DiffLine, FileDiff},
-    session::{Message, Role},
+    session::{Message, Role, Usage},
     tools,
 };
 
@@ -25,6 +25,15 @@ const TEXT: Color = Color::Reset;
 
 /// Rows of command text shown in the approval prompt before it stops.
 const MAX_APPROVAL_LINES: usize = 4;
+/// The startup mascot: a small cat, drawn only on the welcome screen.
+const CAT_ART: [&str; 6] = [
+    "  /\\_/\\  ",
+    "+ ( o.o ) +",
+    "  #> ^ <#  ",
+    "  /| . |\\  ",
+    " (_|   |_) ",
+    "   \"   \"   ",
+];
 /// Tool output rows shown before the rest is collapsed.
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -94,9 +103,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = padded(area, 2);
     let right = if app.backend.model().is_empty() {
-        app.backend.provider_label().to_owned()
+        format!("{} · {}", app.backend.provider_label(), app.spent_cost())
     } else {
-        format!("{} · {}", app.backend.provider_label(), app.backend.model())
+        format!(
+            "{} · {} · {}",
+            app.backend.provider_label(),
+            app.backend.model(),
+            app.spent_cost()
+        )
     };
     let right_width = (right.chars().count() as u16).min(inner.width / 2);
     let columns = Layout::default()
@@ -135,18 +149,31 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.session.messages.is_empty() {
+        // The header already says "yopes", so the welcome names the model
+        // instead of repeating the product name.
+        let model = app.backend.model();
+        let heading = if model.is_empty() {
+            app.backend.provider_label().to_owned()
+        } else {
+            model.to_owned()
+        };
         let mut welcome = vec![
             Line::styled(
-                "yopes",
+                heading,
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Line::raw(""),
-            Line::styled(
-                "A quiet place to think out loud.",
-                Style::default().fg(TEXT),
-            ),
-            Line::raw(""),
         ];
+        // The mascot belongs to the startup screen only, never to a reply.
+        for art in CAT_ART {
+            welcome.push(Line::styled(art, Style::default().fg(ACCENT)));
+        }
+        welcome.push(Line::raw(""));
+        welcome.push(Line::styled(
+            "A quiet place to think out loud.",
+            Style::default().fg(TEXT),
+        ));
+        welcome.push(Line::raw(""));
         if app.backend.is_configured() {
             welcome.push(Line::styled(
                 "Type a message to begin.",
@@ -166,7 +193,10 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             "Type / to see commands.",
             Style::default().fg(MUTED),
         ));
-        frame.render_widget(Paragraph::new(welcome), inner);
+        frame.render_widget(
+            Paragraph::new(welcome).alignment(Alignment::Center),
+            inner,
+        );
         return;
     }
 
@@ -178,7 +208,13 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             .as_ref()
             .is_some_and(|calls| !calls.is_empty());
         let streaming = index + 1 == app.session.messages.len() && app.is_streaming();
-        if message.role == Role::Assistant && message.content.is_empty() && !has_calls && !streaming
+        // A reply that only produced reasoning is still shown: dropping it
+        // would hide long thinking that ended without a final answer.
+        if message.role == Role::Assistant
+            && message.content.is_empty()
+            && message.reasoning.trim().is_empty()
+            && !has_calls
+            && !streaming
         {
             continue;
         }
@@ -215,7 +251,13 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if !message.content.is_empty() {
             for content_line in message.content.split('\n') {
-                lines.push(Line::styled(content_line, Style::default().fg(TEXT)));
+                lines.push(message_line(content_line));
+            }
+        }
+        // Stats belong under a finished answer, not under a tool-call turn.
+        if let Some(usage) = message.usage {
+            if !message.content.is_empty() && !has_calls {
+                lines.push(usage_line(usage));
             }
         }
         if let Some(calls) = &message.tool_calls {
@@ -963,7 +1005,7 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
         return;
     }
 
-    let items = connect.items();
+    let items = connect.items_using(app.backend.base_url(), app.backend.model());
     if items.is_empty() {
         if connect.error.is_none() {
             frame.render_widget(
@@ -1045,6 +1087,11 @@ fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, 
                 title_style,
             ),
         ];
+        // A tick marks the provider and model this session is already using.
+        spans.push(Span::styled(
+            if item.active { "✓ " } else { "  " },
+            Style::default().fg(ADDED).add_modifier(Modifier::BOLD),
+        ));
         if connect.stage == ConnectStage::Providers {
             spans.push(Span::styled("→", Style::default().fg(MUTED)));
             spans.push(Span::styled("  ", Style::default()));
@@ -1079,7 +1126,7 @@ fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
             "enter add model · empty uses the model id · esc back".to_owned()
         }
         ConnectStage::CustomModels => {
-            "↑↓ choose · enter use · add new model row appends · esc back".to_owned()
+            "↑↓ choose · enter use · esc back · rows below edit the endpoint".to_owned()
         }
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
@@ -1102,6 +1149,125 @@ fn truncate(text: &str, width: usize) -> String {
 }
 
 /// Reasoning shows live while streaming and collapsed afterwards, always dim.
+/// One line of assistant text, with light inline markdown: `**bold**`,
+/// `` `code` ``, and `-`/`*`/`1.` bullets rendered with a coloured marker.
+fn message_line(raw: &str) -> Line<'static> {
+    let trimmed = raw.trim_start();
+    let (indent, body) = raw.split_at(raw.len() - trimmed.len());
+    let bullet = bullet_marker(body);
+    let mut spans = vec![Span::styled(
+        if bullet {
+            format!("{indent}• ")
+        } else {
+            indent.to_owned()
+        },
+        Style::default().fg(if bullet { ACCENT } else { TEXT }),
+    )];
+    spans.extend(inline_spans(if bullet {
+        strip_bullet(body)
+    } else {
+        body
+    }));
+    Line::from(spans)
+}
+
+/// Whether a line starts a markdown list item.
+fn bullet_marker(line: &str) -> bool {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        return true;
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    digits > 0
+        && line
+            .chars()
+            .nth(digits)
+            .is_some_and(|next| next == '.' || next == ')')
+        && line.chars().nth(digits + 1).is_some_and(|next| next == ' ')
+}
+
+fn strip_bullet(line: &str) -> &str {
+    if let Some(rest) = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))
+    {
+        return rest;
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if !bullet_marker(line) {
+        return line;
+    }
+    // `1. item` and `2) item`: skip the digits, the separator, and one space.
+    line.char_indices()
+        .nth(digits + 2)
+        .map_or(line, |(offset, _)| &line[offset..])
+}
+
+fn inline_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let bold = rest.match_indices("**").next().map(|(at, _)| (at, "**"));
+        let code = rest.match_indices('`').next().map(|(at, _)| (at, "`"));
+        let next = match (bold, code) {
+            (None, None) => None,
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        };
+        let Some((at, marker)) = next else {
+            spans.push(Span::styled(rest.to_owned(), Style::default().fg(TEXT)));
+            break;
+        };
+        if at > 0 {
+            spans.push(Span::styled(
+                rest[..at].to_owned(),
+                Style::default().fg(TEXT),
+            ));
+        }
+        let after = &rest[at + marker.len()..];
+        let Some(end) = after.find(marker) else {
+            spans.push(Span::styled(rest[at..].to_owned(), Style::default().fg(TEXT)));
+            break;
+        };
+        let inner = &after[..end];
+        if inner.is_empty() {
+            spans.push(Span::styled(rest[at..].to_owned(), Style::default().fg(TEXT)));
+            break;
+        }
+        spans.push(if marker == "**" {
+            Span::styled(
+                inner.to_owned(),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(inner.to_owned(), Style::default().fg(ACCENT))
+        });
+        rest = &after[end + marker.len()..];
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), Style::default().fg(TEXT)));
+    }
+    spans
+}
+
+/// The muted stats line under a finished reply: tokens in and out, then how long.
+fn usage_line(usage: Usage) -> Line<'static> {
+    let mut text = format!(
+        "in {} · out {}",
+        format_tokens(usage.prompt_tokens),
+        format_tokens(usage.completion_tokens)
+    );
+    let seconds = usage.elapsed_ms as f64 / 1000.0;
+    if usage.elapsed_ms > 0 {
+        text.push_str(&format!(" · {seconds:.1}s"));
+    }
+    if let Some(rate) = usage.tokens_per_second() {
+        text.push_str(&format!(" · {rate:.0} t/s"));
+    }
+    Line::styled(text, Style::default().fg(MUTED))
+}
+
 fn reasoning_line(message: &Message, streaming: bool) -> Option<Line<'static>> {
     let lines: Vec<&str> = message
         .reasoning
