@@ -2,7 +2,7 @@ use std::{
     env, fs,
     io::{self, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     time::Duration,
 };
 
@@ -73,8 +73,8 @@ pub async fn run() -> Result<()> {
                     if stopped == 1 { "" } else { "s" }
                 );
             }
-            println!("Finished. Starting yopes...");
-            restart()
+            println!("Finished. The next yopes start runs the new build.");
+            Ok(())
         }
         Err(error) => {
             print!("\rInstalling ... failed\n");
@@ -282,17 +282,6 @@ fn install_binary(new_binary: &Path) -> Result<()> {
         fs::rename(&staged, &current)
             .with_context(|| format!("installing {}", current.display()))?;
     }
-    Ok(())
-}
-
-fn restart() -> Result<()> {
-    let current = env::current_exe().context("locating the updated executable")?;
-    Command::new(current)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("starting the updated yopes")?;
     Ok(())
 }
 
