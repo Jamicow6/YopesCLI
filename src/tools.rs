@@ -24,9 +24,11 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 8] = [
+pub const TOOL_NAMES: [&str; 10] = [
     "list_dir",
     "read_file",
+    "glob",
+    "grep",
     "write_file",
     "edit_file",
     "run_command",
@@ -74,6 +76,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Prefer tools over guessing, read a file before editing it, and never claim \
              that a file changed unless a tool result confirms it. Set run_command risk to \
              true for anything destructive or hard to undo so the user is asked first. \
+             Use glob to find files by pattern and grep to search their contents, so you \
+             do not read whole directories blindly. \
              Use web_search for anything newer than your knowledge or that needs current \
              facts, and cite the URL you used. \
              For multi-step work or when the user asks for a todo list, maintain the \
@@ -132,6 +136,56 @@ pub fn definitions() -> Value {
                         }
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Find files and directories by glob pattern, relative to the working directory. Supports * (any text within one path segment), ? (one character), and ** (any number of segments). Read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern such as src/**/*.rs."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory to search under, relative to the working directory. Defaults to ."
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "Search file contents with a plain substring and return file:line:text matches. Binary files, dependency and cache directories are skipped. Read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Text to search for."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory to search under, relative to the working directory. Defaults to ."
+                        },
+                        "include": {
+                            "type": "string",
+                            "description": "Glob for file types, such as *.rs or src/*/*.ts."
+                        },
+                        "ignore_case": {
+                            "type": "boolean",
+                            "description": "Match without case sensitivity. Defaults to false."
+                        }
+                    },
+                    "required": ["pattern"]
                 }
             }
         },
@@ -303,6 +357,8 @@ pub fn preview(call: &ToolCall) -> String {
             }
         }
         "read_file" => string("path"),
+        "glob" => clip(&string("pattern"), 160),
+        "grep" => clip(&string("pattern"), 160),
         "write_file" => {
             let path = string("path");
             let bytes = arguments
@@ -493,6 +549,8 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
         "list_dir" => list_dir(&call.function.arguments),
         "read_file" => read_file(&call.function.arguments),
+        "glob" => glob(&call.function.arguments),
+        "grep" => grep(&call.function.arguments),
         "write_file" => write_file(&call.function.arguments),
         "edit_file" => edit_file(&call.function.arguments),
         "run_command" => run_command(&call.function.arguments),
@@ -580,9 +638,7 @@ struct ReadFileArgs {
     start_line: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
-}
-
-fn read_file(arguments: &str) -> Result<String> {
+}fn read_file(arguments: &str) -> Result<String> {
     let args: ReadFileArgs = parse(arguments)?;
     let path = resolve(&args.path);
     let metadata = fs::metadata(&path).with_context(|| format!("reading {}", args.path))?;
@@ -627,6 +683,329 @@ fn read_file(arguments: &str) -> Result<String> {
         output.push('\n');
     }
     Ok(truncate_output(output))
+}
+
+#[derive(Deserialize)]
+struct GlobArgs {
+    pattern: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// Directories the walkers never enter, so caches and dependencies stay out.
+const SKIP_DIRS: [&str; 5] = [".git", "target", "node_modules", "__pycache__", ".pytest_cache"];
+const MAX_GLOB_ENTRIES: usize = 500;
+const MAX_WALKED_ENTRIES: usize = 20_000;
+const MAX_WALK_DEPTH: usize = 32;
+
+fn glob(arguments: &str) -> Result<String> {
+    let args: GlobArgs = parse(arguments)?;
+    let pattern = args.pattern.trim().replace('\\', "/");
+    let segments = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        bail!("pattern cannot be empty");
+    }
+    if Path::new(&segments[0]).is_absolute() {
+        bail!("patterns are relative to the working directory");
+    }
+    let requested = args.path.as_deref().unwrap_or(".").trim();
+    let requested = if requested.is_empty() { "." } else { requested };
+    let root = resolve(requested);
+    if !root.is_dir() {
+        bail!("{requested} is not a directory");
+    }
+    let mut matches = Vec::new();
+    let mut walked = 0usize;
+    walk_glob(&root, &String::new(), &segments, &mut matches, &mut walked)?;
+    matches.sort();
+    matches.dedup();
+    let mut output = format!("{pattern} ({} matches)\n", matches.len());
+    if matches.len() > MAX_GLOB_ENTRIES {
+        output.push_str("… truncated\n");
+        matches.truncate(MAX_GLOB_ENTRIES);
+    }
+    output.push_str(&matches.join("\n"));
+    if matches.is_empty() {
+        output.push_str("(no matches)");
+    }
+    Ok(truncate_output(output))
+}
+
+fn walk_glob(
+    directory: &Path,
+    display: &str,
+    segments: &[String],
+    matches: &mut Vec<String>,
+    walked: &mut usize,
+) -> Result<()> {
+    if matches.len() >= MAX_GLOB_ENTRIES || display.matches('/').count() >= MAX_WALK_DEPTH {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        // An unreadable directory never stops the walk.
+        Err(_) => return Ok(()),
+    };
+    let mut names: Vec<(String, bool)> = Vec::new();
+    for entry in entries.flatten() {
+        *walked += 1;
+        if *walked > MAX_WALKED_ENTRIES {
+            bail!("search stopped after {MAX_WALKED_ENTRIES} entries; use a narrower pattern");
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        names.push((name, is_dir));
+    }
+    for (name, is_dir) in names {
+        let path = if display.is_empty() {
+            name.clone()
+        } else {
+            format!("{display}/{name}")
+        };
+        if match_path(&segments, &path) {
+            matches.push(path.clone());
+        }
+        if is_dir && !SKIP_DIRS.contains(&name.as_str()) {
+            walk_glob(&directory.join(&name), &path, segments, matches, walked)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a full relative path matches glob `segments`, joining on `/` with
+/// `*` (one segment, any characters), `?` (one character), and `**`.
+fn match_path(segments: &[String], path: &str) -> bool {
+    let path_segments: Vec<String> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect();
+    glob_matches(segments, &path_segments)
+}
+
+fn glob_matches(segments: &[String], path: &[String]) -> bool {
+    let Some(head) = segments.first() else {
+        return path.is_empty();
+    };
+    if head == "**" {
+        return (0..=path.len()).any(|skip| glob_matches(&segments[1..], &path[skip..]));
+    }
+    match path.split_first() {
+        Some((name, rest)) => {
+            glob_segment(&head.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+                && glob_matches(&segments[1..], rest)
+        }
+        None => false,
+    }
+}
+
+/// One path segment: `*`, `?`, and literals, case-insensitive like paths on
+/// Windows.
+fn glob_segment(pattern: &[char], text: &[char]) -> bool {
+    let Some((&head, rest)) = pattern.split_first() else {
+        return text.is_empty();
+    };
+    if head == '*' {
+        if glob_segment(rest, text) {
+            return true;
+        }
+        return text
+            .iter()
+            .enumerate()
+            .any(|(index, _)| glob_segment(rest, &text[index + 1..]));
+    }
+    if head == '?' {
+        return match text.split_first() {
+            Some((_, rest_text)) => glob_segment(rest, rest_text),
+            None => false,
+        };
+    }
+    match text.split_first() {
+        Some((character, rest_text)) => {
+            character.to_ascii_lowercase() == head.to_ascii_lowercase()
+                && glob_segment(rest, rest_text)
+        }
+        None => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct GrepArgs {
+    pattern: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    include: Option<String>,
+    #[serde(default)]
+    ignore_case: bool,
+}
+
+const MAX_GREP_MATCHES: usize = 80;
+const MAX_GREP_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_GREP_LINE_CHARS: usize = 200;
+
+/// Substring search over text files under a directory, with a glob `include`
+/// filter for file types. Binary files and dependencies are skipped.
+fn grep(arguments: &str) -> Result<String> {
+    let args: GrepArgs = parse(arguments)?;
+    let pattern = args.pattern.trim();
+    if pattern.is_empty() {
+        bail!("pattern cannot be empty");
+    }
+    let requested = args.path.as_deref().unwrap_or(".").trim();
+    let requested = if requested.is_empty() { "." } else { requested };
+    let root = resolve(requested);
+    if !root.is_dir() {
+        bail!("{requested} is not a directory");
+    }
+    let include = args.include.filter(|include| !include.trim().is_empty()).map(|include| {
+        include
+            .trim()
+            .replace('\\', "/")
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<String>>()
+    });
+    let needle = if args.ignore_case {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_owned()
+    };
+    let display = if requested == "." {
+        String::new()
+    } else {
+        requested.trim_end_matches('/').replace('\\', "/")
+    };
+    let mut matches = Vec::new();
+    let mut walked = 0usize;
+    let include_segments = include.as_deref();
+    walk_grep(
+        &root,
+        &display,
+        &needle,
+        args.ignore_case,
+        include_segments,
+        &mut matches,
+        &mut walked,
+    )?;
+    if matches.is_empty() {
+        return Ok(format!("{pattern}\n(no matches)"));
+    }
+    let mut output = format!("{pattern} ({} matches)\n", matches.len().min(MAX_GREP_MATCHES));
+    output.push_str(&matches.join("\n"));
+    if matches.len() >= MAX_GREP_MATCHES {
+        output.push_str("\n… more matches truncated");
+    }
+    Ok(truncate_output(output))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_grep(
+    directory: &Path,
+    display: &str,
+    needle: &str,
+    ignore_case: bool,
+    include: Option<&[String]>,
+    matches: &mut Vec<String>,
+    walked: &mut usize,
+) -> Result<()> {
+    if matches.len() >= MAX_GREP_MATCHES || display.matches('/').count() >= MAX_WALK_DEPTH {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    let mut names: Vec<(String, bool)> = Vec::new();
+    for entry in entries.flatten() {
+        *walked += 1;
+        if *walked > MAX_WALKED_ENTRIES {
+            bail!("search stopped after {MAX_WALKED_ENTRIES} entries; use a narrower path");
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        names.push((name, is_dir));
+    }
+    for (name, is_dir) in names {
+        let path = if display.is_empty() {
+            name.clone()
+        } else {
+            format!("{display}/{name}")
+        };
+        if is_dir {
+            if !SKIP_DIRS.contains(&name.as_str()) {
+                walk_grep(
+                    &directory.join(&name),
+                    &path,
+                    needle,
+                    ignore_case,
+                    include,
+                    matches,
+                    walked,
+                )?;
+            }
+            continue;
+        }
+        if !include_accepts(include, &name, &path) {
+            continue;
+        }
+        let metadata = match fs::metadata(directory.join(&name)) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() > MAX_GREP_FILE_BYTES {
+            continue;
+        }
+        let bytes = match fs::read(directory.join(&name)) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        if bytes.contains(&0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for (line_index, line) in text.lines().enumerate() {
+            let hit = if ignore_case {
+                line.to_ascii_lowercase().contains(needle)
+            } else {
+                line.contains(needle)
+            };
+            if hit {
+                matches.push(format!(
+                    "{path}:{}: {}",
+                    line_index + 1,
+                    clip(line, MAX_GREP_LINE_CHARS)
+                ));
+                if matches.len() >= MAX_GREP_MATCHES {
+                    break;
+                }
+            }
+        }
+        if matches.len() >= MAX_GREP_MATCHES {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the include glob accepts the file: one segment matches the file
+/// name, several match the joined path.
+fn include_accepts(include: Option<&[String]>, file_name: &str, path: &str) -> bool {
+    let Some(segments) = include else {
+        return true;
+    };
+    if segments.len() == 1 {
+        return glob_segment(
+            &segments[0].chars().collect::<Vec<_>>(),
+            &file_name.chars().collect::<Vec<_>>(),
+        );
+    }
+    match_path(segments, path)
 }
 
 #[derive(Deserialize)]
@@ -1031,6 +1410,125 @@ mod tests {
         let empty = ToolCall::new("call_4", "web_search", r#"{"query":"  "}"#);
         let error = execute(&empty, Some("tvly-test")).unwrap_err().to_string();
         assert!(error.contains("query"));
+    }
+
+    #[test]
+    fn glob_segments_match_one_directory_level_only() {
+        use super::{glob_matches, glob_segment};
+        let segment = |pattern: &str, text: &str| {
+            glob_segment(
+                &pattern.chars().collect::<Vec<_>>(),
+                &text.chars().collect::<Vec<_>>(),
+            )
+        };
+        assert!(segment("*", "anything"));
+        assert!(segment("*.rs", "main.rs"));
+        assert!(!segment("*.rs", "sub/main.rs"));
+        assert!(segment("?at", "cat"));
+        assert!(!segment("?at", "chat"));
+        assert!(segment("a*b", "ab"));
+        assert!(segment("a*b", "acb"));
+        assert!(!segment("a*b", "aXc"));
+        assert!(segment("*.RS", "main.rs"), "matching is case-insensitive");
+
+        let path = |pattern: &[&str], text: &[&str]| {
+            glob_matches(
+                &pattern
+                    .iter()
+                    .map(|segment| (*segment).to_owned())
+                    .collect::<Vec<_>>(),
+                &text
+                    .iter()
+                    .map(|segment| (*segment).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(path(&["**"], &[]));
+        assert!(path(&["**"], &["a", "b"]));
+        assert!(path(&["a", "**", "c"], &["a", "b", "c"]));
+        assert!(path(&["src", "*.rs"], &["src", "main.rs"]));
+        assert!(!path(&["src", "*.rs"], &["src", "nested", "main.rs"]));
+        assert!(path(&["src", "**", "*.rs"], &["src", "nested", "main.rs"]));
+    }
+
+    #[test]
+    fn globs_skip_dependency_directories() {
+        use super::execute;
+        let dir = std::env::temp_dir().join(format!("yopes-glob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub").join("deep")).unwrap();
+        std::fs::write(dir.join("README.md"), "# x").unwrap();
+        std::fs::write(dir.join("sub").join("note.md"), "x").unwrap();
+        std::fs::write(dir.join("sub").join("deep").join("last.md"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target").join("stale.md"), "x").unwrap();
+
+        let args = |pattern: &str| {
+            format!(
+                r#"{{"pattern":{:?},"path":{:?}}}"#,
+                pattern,
+                dir.display().to_string()
+            )
+        };
+        let all = ToolCall::new("call_10", "glob", &args("**/*.md"));
+        let output = execute(&all, None).unwrap();
+        assert!(output.contains("README.md"), "{output}");
+        assert!(output.contains("sub/note.md"), "{output}");
+        assert!(output.contains("sub/deep/last.md"), "{output}");
+        assert!(!output.contains("target"), "{output}");
+
+        let shallow = ToolCall::new("call_11", "glob", &args("*.md"));
+        let output = execute(&shallow, None).unwrap();
+        assert!(output.contains("README.md"));
+        assert!(!output.contains("note.md"), "{output}");
+
+        let missing = ToolCall::new("call_12", "glob", &args("*.toml"));
+        let output = execute(&missing, None).unwrap();
+        assert!(output.contains("(no matches)"), "{output}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_matches_lines_and_respects_includes() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-grep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("top.txt"), "needle here\nother\nneedles again").unwrap();
+        fs::write(dir.join("sub").join("code.rs"), "let needle = 1;").unwrap();
+        // A binary file that mentions the pattern must stay silent.
+        fs::write(dir.join("skip.bin"), [0u8, b'n', b'e', b'e', b'd']).unwrap();
+
+        let args = |more: &str| {
+            format!(r#"{{"pattern":"needle","path":{:?}{more}}}"#, dir.display().to_string())
+        };
+        let every = execute(&ToolCall::new("call_13", "grep", &args("")), None).unwrap();
+        assert!(every.contains("top.txt:1:"), "{every}");
+        assert!(every.contains("top.txt:3:"), "{every}");
+        assert!(every.contains("code.rs:1:"), "{every}");
+        assert!(!every.contains("skip.bin"), "{every}");
+
+        let only_rust =
+            execute(&ToolCall::new("call_14", "grep", &args(r#","include":"*.rs""#)), None)
+                .unwrap();
+        assert!(only_rust.contains("code.rs:1:"));
+        assert!(!only_rust.contains("top.txt"), "{only_rust}");
+
+        let insensitive = execute(
+            &ToolCall::new("call_15", "grep", &args(r#","ignore_case":true"#)),
+            None,
+        )
+        .unwrap();
+        assert!(insensitive.contains("top.txt:1:"), "{insensitive}");
+
+        let absent = execute(
+            &ToolCall::new("call_16", "grep", r#"{"pattern":"absent-nowhere"}"#),
+            None,
+        )
+        .unwrap();
+        assert!(absent.contains("(no matches)"), "{absent}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
