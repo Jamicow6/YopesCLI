@@ -54,6 +54,8 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 - `/tools on|off|auto|ask` — change how tool calls are approved.
 - `/system <text>` — set a custom system prompt, appended to the built-in one and sent with every message.
 - `/system` — show the current custom system prompt; `/system off` removes it.
+- `/compact` — summarize older turns in place when the history grows long.
+- `/compact on|off` — turn automatic compaction on or off; `/compact now` compacts without waiting for the context to fill.
 - `/quit` — save and quit.
 
 ### Tools
