@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -173,6 +174,8 @@ pub struct Config {
     pub models: Vec<SavedModel>,
     pub custom_providers: Vec<CustomProvider>,
     pub session_path: Option<PathBuf>,
+    /// Directory holding every saved session file, when saving is on.
+    pub sessions_dir: Option<PathBuf>,
     pub config_path: PathBuf,
     /// Tavily key backing the web_search tool.
     pub tavily_api_key: Option<String>,
@@ -292,12 +295,16 @@ impl Config {
         let session_path = if cli.no_save {
             None
         } else {
-            Some(
-                cli.session
-                    .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from))
-                    .unwrap_or_else(default_session_path),
-            )
+            let explicit = cli
+                .session
+                .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from));
+            Some(explicit.unwrap_or_else(default_session_with_history))
         };
+        let sessions_dir = session_path.as_ref().map(|path| {
+            path.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("sessions")
+        });
 
         if provider == ProviderKind::Unconfigured {
             return Ok(Self {
@@ -310,6 +317,7 @@ impl Config {
                 models: Vec::new(),
                 custom_providers: custom_providers(saved.as_ref()),
                 session_path,
+                sessions_dir,
                 config_path,
                 tavily_api_key: None,
             });
@@ -380,6 +388,7 @@ impl Config {
             models,
             custom_providers: custom_providers(saved.as_ref()),
             session_path,
+            sessions_dir,
             config_path,
             tavily_api_key,
         })
@@ -690,6 +699,46 @@ fn default_session_path() -> PathBuf {
         || PathBuf::from(".yopes-session.json"),
         |dirs| dirs.data_local_dir().join("session.json"),
     )
+}
+
+/// Per-session files live in a `sessions` directory next to the old single
+/// session path; opening resumes the newest one and folds the legacy file in.
+fn default_session_with_history() -> PathBuf {
+    let legacy = default_session_path();
+    let Some(data_dir) = legacy.parent() else {
+        return legacy;
+    };
+    let dir = data_dir.join("sessions");
+    if let Ok(list) = fs::read_dir(&dir) {
+        let mut sessions: Vec<(SystemTime, PathBuf)> = list
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|x| x == "json"))
+            .filter_map(|path| {
+                fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .map(|modified| (modified, path))
+            })
+            .collect();
+        // Ascending sort then pop: the most recently active session is last.
+        sessions.sort();
+        if let Some((_, newest)) = sessions.pop() {
+            return newest;
+        }
+    }
+    let named = |stamp: u128| dir.join(format!("session-{stamp}.json"));
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    if legacy.exists()
+        && fs::metadata(&legacy).map(|metadata| metadata.len() > 0).unwrap_or(false)
+        && fs::rename(&legacy, named(stamp)).is_ok()
+    {
+        // The legacy session becomes the newest entry, so it is what opens.
+        return named(stamp);
+    }
+    named(stamp)
 }
 
 pub fn load_session(path: Option<&Path>) -> Result<crate::session::Session> {

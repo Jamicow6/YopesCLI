@@ -19,7 +19,10 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::{
     cursor::Show,
-    event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -51,6 +54,7 @@ async fn run() -> Result<()> {
     }
     let config = Config::from_cli(cli)?;
     let session_path = config.session_path.clone();
+    let sessions_dir = config.sessions_dir.clone();
     let config_path = config.config_path.clone();
     let session = load_session(session_path.as_deref())?;
     let backend = Backend::new(&config)?;
@@ -60,6 +64,7 @@ async fn run() -> Result<()> {
         session,
         backend,
         session_path,
+        sessions_dir,
         config_path,
         custom_providers,
         tavily_api_key,
@@ -70,6 +75,7 @@ async fn run() -> Result<()> {
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
     let (paste_sender, mut paste_receiver) =
         mpsc::unbounded_channel::<Result<(String, String), String>>();
+    let (title_sender, mut title_receiver) = mpsc::unbounded_channel::<(u64, String)>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     // Ctrl+C is a key in raw mode, but a real interrupt must also work when the
@@ -113,6 +119,7 @@ async fn run() -> Result<()> {
                             &tool_sender,
                             &catalog_sender,
                             &paste_sender,
+                            &title_sender,
                             &mut active_task,
                         );
                     }
@@ -147,6 +154,7 @@ async fn run() -> Result<()> {
                     &tool_sender,
                     &catalog_sender,
                     &paste_sender,
+                    &title_sender,
                     &mut active_task,
                 );
             }
@@ -160,6 +168,7 @@ async fn run() -> Result<()> {
                     &tool_sender,
                     &catalog_sender,
                     &paste_sender,
+                    &title_sender,
                     &mut active_task,
                 );
             }
@@ -171,6 +180,10 @@ async fn run() -> Result<()> {
             result = paste_receiver.recv() => {
                 let Some(result) = result else { break; };
                 app.on_paste_image(result);
+            }
+            title = title_receiver.recv() => {
+                let Some((session_id, title)) = title else { break; };
+                app.on_session_title(session_id, title);
             }
             _ = &mut interrupt => break,
             _ = term_signal.as_mut() => break,
@@ -199,6 +212,7 @@ fn dispatch(
     tool_events: &mpsc::UnboundedSender<ToolEvent>,
     catalog_events: &mpsc::UnboundedSender<FetchResult>,
     paste_sender: &mpsc::UnboundedSender<Result<(String, String), String>>,
+    title_sender: &mpsc::UnboundedSender<(u64, String)>,
     active_task: &mut Option<(u64, JoinHandle<()>)>,
 ) {
     match action {
@@ -290,6 +304,20 @@ fn dispatch(
                 let _ = sender.send(result);
             });
         }
+        Action::NameSession { task } => {
+            let backend = app.backend.clone();
+            let sender = title_sender.clone();
+            let session_id = app.session.id;
+            tokio::spawn(async move {
+                let brief = "You name coding sessions. Answer with only a short title, \
+                             at most five words, capitalized, no quotes, no final \
+                             punctuation. You have no tools.";
+                // Errors stay silent: the session simply keeps a plain title.
+                if let Ok(raw) = backend.complete_once(brief, &task).await {
+                    let _ = sender.send((session_id, raw));
+                }
+            });
+        }
     }
 }
 
@@ -355,8 +383,21 @@ impl TerminalGuard {
     fn new() -> Result<Self> {
         enable_raw_mode().context("enabling terminal raw mode")?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Show) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture,
+            Show
+        ) {
             let _ = disable_raw_mode();
+            let _ = execute!(
+                io::stdout(),
+                DisableMouseCapture,
+                DisableBracketedPaste,
+                LeaveAlternateScreen,
+                Show
+            );
             return Err(error).context("initializing terminal");
         }
         let backend = CrosstermBackend::new(stdout);
@@ -366,6 +407,7 @@ impl TerminalGuard {
                 let _ = disable_raw_mode();
                 let _ = execute!(
                     io::stdout(),
+                    DisableMouseCapture,
                     DisableBracketedPaste,
                     LeaveAlternateScreen,
                     Show
@@ -381,6 +423,7 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen,
             Show
