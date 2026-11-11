@@ -1089,6 +1089,7 @@ fn draw_connect_list(
     if !matches!(
         connect.stage,
         ConnectStage::Providers
+            | ConnectStage::FasfasNotice
             | ConnectStage::Models
             | ConnectStage::Auth
             | ConnectStage::CustomModels
