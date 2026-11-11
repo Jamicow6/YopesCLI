@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::Read,
     path::{Path, PathBuf},
@@ -24,13 +25,14 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 10] = [
+pub const TOOL_NAMES: [&str; 11] = [
     "list_dir",
     "read_file",
     "glob",
     "grep",
     "write_file",
     "edit_file",
+    "multi_edit",
     "run_command",
     "web_search",
     "todo_write",
@@ -39,7 +41,7 @@ pub const TOOL_NAMES: [&str; 10] = [
 
 #[derive(Debug)]
 pub struct ChangePreview {
-    pub diff: Option<FileDiff>,
+    pub diffs: Vec<FileDiff>,
     pub before: Option<String>,
     pub note: Option<String>,
 }
@@ -78,6 +80,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              true for anything destructive or hard to undo so the user is asked first. \
              Use glob to find files by pattern and grep to search their contents, so you \
              do not read whole directories blindly. \
+             For several replacements in one or more files, batch them with multi_edit: \
+             it applies every edit in order, and one failure refuses the whole batch. \
              Use web_search for anything newer than your knowledge or that needs current \
              facts, and cite the URL you used. \
              For multi-step work or when the user asks for a todo list, maintain the \
@@ -242,6 +246,45 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "multi_edit",
+                "description": "Apply several exact-text edits in one call. Every edit follows the edit_file rules against one in-memory state, so a batch either applies fully or refuses without touching any file. Sequential edits to the same file see each other's results.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "edits": {
+                            "type": "array",
+                            "description": "The edits, in order.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "File path relative to the working directory."
+                                    },
+                                    "old_text": {
+                                        "type": "string",
+                                        "description": "Exact text to find."
+                                    },
+                                    "new_text": {
+                                        "type": "string",
+                                        "description": "Replacement text."
+                                    },
+                                    "replace_all": {
+                                        "type": "boolean",
+                                        "description": "Replace every match in that file instead of requiring exactly one."
+                                    }
+                                },
+                                "required": ["path", "old_text", "new_text"]
+                            }
+                        }
+                    },
+                    "required": ["edits"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_command",
                 "description": "Run a shell command in the workspace and return its output. Set risk to true for anything destructive or hard to undo: deleting or overwriting files, git resets or force pushes, installing or uninstalling software, stopping services, or anything reaching outside the working directory. Risky commands ask the user before they run.",
                 "parameters": {
@@ -373,6 +416,14 @@ pub fn preview(call: &ToolCall) -> String {
             }
         }
         "edit_file" => string("path"),
+        "multi_edit" => {
+            let edits = arguments
+                .as_ref()
+                .and_then(|value| value.get("edits"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            format!("{edits} edits")
+        }
         "run_command" => clip(&string("command"), 160),
         "web_search" => clip(&string("query"), 160),
         "todo_write" => {
@@ -445,16 +496,94 @@ pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) ->
     }
 }
 
+/// Every change a finished write, edit or multi_edit made, from `targets` and
+/// what is on disk after the call. Multi-edit diffs reverse the arguments on
+/// the result, matching one file at a time.
+pub fn applied_change_all(
+    call: &ToolCall,
+    before: Option<String>,
+    existed: bool,
+    targets: &[(String, bool)],
+) -> Vec<FileDiff> {
+    if call.function.name == "multi_edit" {
+        let arguments = call.function.arguments.clone();
+        return multi_edit_applied(&arguments, targets);
+    }
+    applied_change(call, before, existed).into_iter().collect()
+}
+
+fn multi_edit_applied(arguments: &str, targets: &[(String, bool)]) -> Vec<FileDiff> {
+    let args: MultiEditArgs = match parse(arguments) {
+        Ok(args) => args,
+        Err(_) => return Vec::new(),
+    };
+    let mut reversed: Vec<&MultiEditItem> = args.edits.iter().rev().collect();
+    let mut diffs = Vec::new();
+    for (path, existed) in targets {
+        let after = match fs::read_to_string(resolve(path)) {
+            Ok(after) => after,
+            Err(_) => continue,
+        };
+        let mut before = after.clone();
+        reversed.retain(|edit| {
+            if edit.path == *path {
+                before = if edit.replace_all {
+                    before.replace(&edit.new_text, &edit.old_text)
+                } else {
+                    before.replacen(&edit.new_text, &edit.old_text, 1)
+                };
+                false
+            } else {
+                true
+            }
+        });
+        if before == after {
+            continue;
+        }
+        diffs.push(FileDiff::new(path.as_str(), &before, &after, !*existed));
+    }
+    diffs
+}
+
 pub fn change_preview(call: &ToolCall) -> ChangePreview {
     match call.function.name.as_str() {
         "write_file" => write_file_preview(&call.function.arguments),
         "edit_file" => edit_file_preview(&call.function.arguments),
+        "multi_edit" => multi_edit_preview(&call.function.arguments),
         _ => ChangePreview {
-            diff: None,
+            diffs: Vec::new(),
             before: None,
             note: None,
         },
     }
+}
+
+/// Every file a write, edit or multi_edit touches, with whether each existed
+/// before the call, so per-file diffs can be recovered after the batch runs.
+pub fn edit_targets(call: &ToolCall) -> Vec<(String, bool)> {
+    let arguments = match serde_json::from_str::<Value>(&call.function.arguments) {
+        Ok(arguments) => arguments,
+        Err(_) => return Vec::new(),
+    };
+    let mut targets: Vec<(String, bool)> = Vec::new();
+    let mut seen = |path: &str, targets: &mut Vec<(String, bool)>| {
+        if path.is_empty() || targets.iter().any(|(tracked, _)| tracked == path) {
+            return;
+        }
+        let existed = resolve(path).exists();
+        targets.push((path.to_owned(), existed));
+    };
+    if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+        seen(path, &mut targets);
+    }
+    if let Some(edits) = arguments.get("edits").and_then(Value::as_array) {
+        for edit in edits {
+            if let Some(path) = edit.get("path").and_then(Value::as_str) {
+                seen(path, &mut targets);
+            }
+        }
+    }
+    targets
 }
 
 fn write_file_preview(arguments: &str) -> ChangePreview {
@@ -470,7 +599,7 @@ fn write_file_preview(arguments: &str) -> ChangePreview {
         Err(error) => return preview_error(error),
     };
     ChangePreview {
-        diff: Some(FileDiff::new(path, &before, &content, !exists)),
+        diffs: vec![FileDiff::new(path, &before, &content, !exists)],
         before: Some(before),
         note: None,
     }
@@ -513,7 +642,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
         before.replacen(&old_text, &new_text, 1)
     };
     ChangePreview {
-        diff: Some(FileDiff::new(path, &before, &after, false)),
+        diffs: vec![FileDiff::new(path, &before, &after, false)],
         before: Some(before),
         note,
     }
@@ -521,7 +650,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
 
 fn preview_error(error: anyhow::Error) -> ChangePreview {
     ChangePreview {
-        diff: None,
+        diffs: vec![],
         before: None,
         note: Some(format!("Could not build a diff: {error:#}")),
     }
@@ -553,6 +682,7 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
         "grep" => grep(&call.function.arguments),
         "write_file" => write_file(&call.function.arguments),
         "edit_file" => edit_file(&call.function.arguments),
+        "multi_edit" => multi_edit(&call.function.arguments),
         "run_command" => run_command(&call.function.arguments),
         "web_search" => web_search(&call.function.arguments, web_key),
         "todo_write" => todo_write(&call.function.arguments),
@@ -1077,6 +1207,119 @@ fn edit_file(arguments: &str) -> Result<String> {
     ))
 }
 
+/// How many `multi_edit` calls may be batched at once.
+const MAX_MULTI_EDITS: usize = 50;
+
+#[derive(Deserialize)]
+struct MultiEditItem {
+    path: String,
+    old_text: String,
+    new_text: String,
+    #[serde(default)]
+    replace_all: bool,
+}
+
+#[derive(Deserialize)]
+struct MultiEditArgs {
+    edits: Vec<MultiEditItem>,
+}
+
+fn multi_edit(arguments: &str) -> Result<String> {
+    let updates = multi_edit_replay(arguments)?;
+    for (path, _, after) in &updates {
+        fs::write(resolve(path), after.as_bytes()).with_context(|| format!("writing {path}"))?;
+    }
+    let edits = updates.len();
+    let files = updates
+        .iter()
+        .map(|(path, ..)| path)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    Ok(format!(
+        "Applied {edits} edit{} across {files} file{}.",
+        if edits == 1 { "" } else { "s" },
+        if files == 1 { "" } else { "s" },
+    ))
+}
+
+/// Validate and replay every edit against in-memory copies of the files: the
+/// whole batch is refused up front, so no file is touched on a failure.
+/// Returns `(path, contents before the batch, contents after)` per file.
+fn multi_edit_replay(arguments: &str) -> Result<Vec<(String, String, String)>> {
+    let args: MultiEditArgs = parse(arguments)?;
+    if args.edits.len() > MAX_MULTI_EDITS {
+        bail!(
+            "too many edits ({}; the limit is {MAX_MULTI_EDITS})",
+            args.edits.len()
+        );
+    }
+    if args.edits.iter().map(|edit| edit.new_text.len()).sum::<usize>() > MAX_WRITE_BYTES {
+        bail!("combined new_text is too large (the limit is {MAX_WRITE_BYTES} bytes)");
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut originals: HashMap<String, String> = HashMap::new();
+    let mut sources: HashMap<String, String> = HashMap::new();
+    for edit in &args.edits {
+        if edit.old_text.is_empty() {
+            bail!("{}: old_text cannot be empty", edit.path);
+        }
+        if !sources.contains_key(&edit.path) {
+            let source = fs::read_to_string(resolve(&edit.path)).with_context(|| {
+                format!("reading {}; multi_edit only edits existing files", edit.path)
+            })?;
+            order.push(edit.path.clone());
+            originals.insert(edit.path.clone(), source.clone());
+            sources.insert(edit.path.clone(), source);
+        }
+        let updated = replace_one(&sources[&edit.path], edit)?;
+        sources.insert(edit.path.clone(), updated);
+    }
+    Ok(order
+        .into_iter()
+        .map(|path| {
+            let before = originals.remove(&path).unwrap_or_default();
+            let after = sources.remove(&path).unwrap_or_default();
+            (path, before, after)
+        })
+        .collect())
+}
+
+/// Apply one edit to a string with the same rules as `edit_file`.
+fn replace_one(source: &str, edit: &MultiEditItem) -> Result<String> {
+    let matches = source.matches(&edit.old_text).count();
+    if matches == 0 {
+        bail!("old_text was not found in {}", edit.path);
+    }
+    if matches > 1 && !edit.replace_all {
+        bail!(
+            "old_text matches {matches} times in {}; add more context or set replace_all",
+            edit.path
+        );
+    }
+    if edit.replace_all {
+        Ok(source.replace(&edit.old_text, &edit.new_text))
+    } else {
+        Ok(source.replacen(&edit.old_text, &edit.new_text, 1))
+    }
+}
+
+fn multi_edit_preview(arguments: &str) -> ChangePreview {
+    let updates = match multi_edit_replay(arguments) {
+        Ok(updates) => updates,
+        Err(error) => return preview_error(error),
+    };
+    ChangePreview {
+        diffs: updates
+            .iter()
+            .map(|(path, before, after)| {
+                FileDiff::new(path.as_str(), before.as_str(), after.as_str(), false)
+            })
+            .collect(),
+        before: None,
+        note: None,
+    }
+}
+
 #[derive(Deserialize)]
 struct RunCommandArgs {
     command: String,
@@ -1397,6 +1640,76 @@ mod tests {
         );
         assert!(applied_change(&call, Some(String::new()), false).unwrap().created);
         assert!(!applied_change(&call, Some("old".to_owned()), true).unwrap().created);
+    }
+
+    #[test]
+    fn multi_edit_applies_or_refuses_whole_batches() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-multi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "alpha\nbeta\nalpha\n").unwrap();
+        fs::write(dir.join("b.txt"), "one\n").unwrap();
+        let a = dir.join("a.txt").display().to_string();
+        let b = dir.join("b.txt").display().to_string();
+        let batch = json!({
+            "edits": [
+                { "path": a, "old_text": "alpha", "new_text": "A" },
+                { "path": a, "old_text": "beta", "new_text": "B", "replace_all": true },
+                { "path": b, "old_text": "one", "new_text": "uno" },
+            ]
+        });
+        let output = execute(&ToolCall::new("call_20", "multi_edit", &batch.to_string()), None).unwrap();
+        assert!(output.contains("Applied 3 edits across 2 files"), "{output}");
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "A\nB\nA\n");
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "uno\n");
+
+        // A bad edit refuses the whole batch and leaves every file untouched.
+        let broken = json!({
+            "edits": [
+                { "path": a, "old_text": "A", "new_text": "X" },
+                { "path": b, "old_text": "absent", "new_text": "?" },
+            ]
+        });
+        let error = execute(&ToolCall::new("call_21", "multi_edit", &broken.to_string()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("was not found"), "{error}");
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "A\nB\nA\n");
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "uno\n");
+        assert!(!requires_approval(&ToolCall::new(
+            "call_22",
+            "multi_edit",
+            r#"{"edits":[{"path":"a.txt","old_text":"x","new_text":"y"}]}"#
+        )));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_edit_preview_reports_every_file_nothing_written() {
+        use super::{change_preview, execute};
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-multi-preview-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("n.txt"), "aa\nbb\n").unwrap();
+        fs::write(dir.join("m.txt"), "cc\n").unwrap();
+        let args = json!({
+            "edits": [
+                { "path": dir.join("n.txt").display().to_string(), "old_text": "aa", "new_text": "xx" },
+                { "path": dir.join("m.txt").display().to_string(), "old_text": "cc", "new_text": "dd" },
+            ]
+        });
+        let call = ToolCall::new("call_23", "multi_edit", &args.to_string());
+        let change = change_preview(&call);
+        assert_eq!(change.diffs.len(), 2);
+        assert!(change.before.is_none());
+        // Only the preview ran; the files are still as they were.
+        assert_eq!(fs::read_to_string(dir.join("n.txt")).unwrap(), "aa\nbb\n");
+        assert_eq!(fs::read_to_string(dir.join("m.txt")).unwrap(), "cc\n");
+        assert!(execute(&call, None).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

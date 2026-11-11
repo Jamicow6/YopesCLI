@@ -214,7 +214,7 @@ impl Mode {
     pub fn denied(self, tool: &str) -> bool {
         match self {
             Self::Build => false,
-            Self::Plan => matches!(tool, "write_file" | "edit_file" | "run_command"),
+            Self::Plan => matches!(tool, "write_file" | "edit_file" | "multi_edit" | "run_command"),
             Self::Chat => true,
         }
     }
@@ -287,8 +287,8 @@ fn pixel_color(pixel: &image::Rgba<u8>) -> Color {
 pub struct ToolApproval {
     pub call: ToolCall,
     pub note: Option<String>,
-    /// Change preview of a write or edit, drawn in the dialog itself.
-    pub diff: Option<FileDiff>,
+    /// Change previews of a write or edit, drawn in the dialog itself.
+    pub diffs: Vec<FileDiff>,
     pub scroll: usize,
     pub page_height: u16,
 }
@@ -300,6 +300,8 @@ pub struct RunningTool {
     pub before: Option<String>,
     /// Whether the write or edit target existed before the call ran.
     pub existed: bool,
+    /// Every file the call may change and whether each existed before.
+    pub targets: Vec<(String, bool)>,
 }
 
 /// Filter state of the `/model` popup.
@@ -370,7 +372,7 @@ pub struct ToolEvent {
 
 /// A diff shown under a tool result in the conversation.
 pub struct ChangeReport {
-    pub diff: FileDiff,
+    pub diffs: Vec<FileDiff>,
     pub side_by_side: bool,
 }
 
@@ -1905,6 +1907,7 @@ impl App {
         self.running_tool = Some(RunningTool {
             existed: tools::target_existed(&call),
             before: preview.before,
+            targets: tools::edit_targets(&call),
             call: call.clone(),
             started: Instant::now(),
         });
@@ -1938,7 +1941,7 @@ impl App {
             self.approval = Some(ToolApproval {
                 call,
                 note: change.note,
-                diff: change.diff,
+                diffs: change.diffs,
                 scroll: 0,
                 page_height: 0,
             });
@@ -3415,11 +3418,17 @@ impl App {
         let existed = running.existed;
         let content = match event.result {
             Ok(output) => {
-                if let Some(diff) = tools::applied_change(&event.call, before, existed) {
+                let diffs = tools::applied_change_all(
+                    &event.call,
+                    before,
+                    existed,
+                    &running.targets,
+                );
+                if !diffs.is_empty() {
                     self.changes.insert(
                         event.call.id.clone(),
                         ChangeReport {
-                            diff,
+                            diffs,
                             side_by_side: self.diff_sides,
                         },
                     );
@@ -3748,6 +3757,7 @@ mod tests {
         assert!(!Mode::Plan.denied("web_search"));
         assert!(Mode::Plan.denied("write_file"));
         assert!(Mode::Plan.denied("edit_file"));
+        assert!(Mode::Plan.denied("multi_edit"));
         assert!(Mode::Plan.denied("run_command"));
         assert!(Mode::Chat.denied("read_file"));
         assert!(
