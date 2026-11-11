@@ -96,7 +96,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.show_help {
         draw_help(frame, area);
     } else if let Some(connect) = app.connect_state() {
-        draw_connect(frame, connect, spinner, area);
+        draw_connect(frame, app, connect, spinner, area);
     }
 }
 
@@ -897,7 +897,7 @@ fn diff_style(line: &DiffLine) -> Style {
     Style::default().fg(color)
 }
 
-fn draw_connect(frame: &mut Frame, connect: &ConnectState, spinner: usize, area: Rect) {
+fn draw_connect(frame: &mut Frame, app: &App, connect: &ConnectState, spinner: usize, area: Rect) {
     let width = area.width.saturating_sub(6).min(78);
     let height = area.height.saturating_sub(4).min(24);
     if width < 34 || height < 10 {
@@ -957,11 +957,17 @@ fn draw_connect(frame: &mut Frame, connect: &ConnectState, spinner: usize, area:
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
-    draw_connect_list(frame, connect, spinner, rows[2]);
+    draw_connect_list(frame, app, connect, spinner, rows[2]);
     draw_connect_hint(frame, connect, rows[3]);
 }
 
-fn draw_connect_list(frame: &mut Frame, connect: &ConnectState, spinner: usize, area: Rect) {
+fn draw_connect_list(
+    frame: &mut Frame,
+    app: &App,
+    connect: &ConnectState,
+    spinner: usize,
+    area: Rect,
+) {
     if connect.loading {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
