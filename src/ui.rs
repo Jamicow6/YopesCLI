@@ -15,6 +15,7 @@ use crate::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
         Mode, NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
+    catalog::FASFAST_ID,
     diff::{ChangeKind, DiffLine, FileDiff},
     session::{Message, Role, Usage},
     tools,
@@ -1060,7 +1061,7 @@ fn draw_connect_list(
                     Style::default().fg(ACCENT),
                 ),
                 Span::styled(
-                    "  loading providers from models.dev",
+                    connect.loading_detail().to_owned(),
                     Style::default().fg(MUTED),
                 ),
             ])),
@@ -1110,34 +1111,45 @@ fn draw_connect_list(
         return;
     }
     let selected = connect.selected.min(items.len() - 1);
-    let custom_count = items
+    // Preferred provider first, then the custom block, then models.dev.
+    // Sections need a divider row each, skipped by the selection.
+    let has_preferred = connect.stage == ConnectStage::Providers
+        && items.first().is_some_and(|item| item.id == FASFAST_ID);
+    let base = usize::from(has_preferred);
+    let tail = &items[base..];
+    let custom_count = tail
         .iter()
         .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
         .count();
-    let divider =
-        connect.stage == ConnectStage::Providers && custom_count > 0 && custom_count < items.len();
-    let divider_rows = if divider { 1 } else { 0 };
-    let mut rows = Vec::with_capacity(items.len() + divider_rows);
+    let preferred_divider = has_preferred && !tail.is_empty();
+    let models_divider = custom_count > 0 && custom_count < tail.len();
+    // Rows: Ok(index) renders item index, Err(label) renders a divider.
+    let mut rows = Vec::with_capacity(items.len() + usize::from(preferred_divider) + usize::from(models_divider));
     for index in 0..items.len() {
-        if divider && index == custom_count {
-            rows.push(None);
+        if preferred_divider && index == base {
+            rows.push(Err(" preferred "));
         }
-        rows.push(Some(index));
+        if models_divider && index == base + custom_count {
+            rows.push(Err(" models.dev "));
+        }
+        rows.push(Ok(index));
     }
-    let selected_row = selected
-        + if divider && selected >= custom_count {
-            1
-        } else {
-            0
-        };
+    let mut extra = 0;
+    if preferred_divider && selected >= base && selected > 0 {
+        extra += 1;
+    }
+    if models_divider && selected >= base + custom_count {
+        extra += 1;
+    }
+    let selected_row = selected + extra;
     let start_row = selected_row.saturating_sub(height.saturating_sub(1));
     let start = start_row.min(rows.len().saturating_sub(height));
     let title_width = usize::from(area.width).saturating_sub(30).max(10);
 
     for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
         let rect = Rect::new(area.x, area.y + offset as u16, area.width, 1);
-        let Some(index) = *row else {
-            let label = " models.dev ";
+        let Ok(index) = *row else {
+            let Err(label) = *row else { unreachable!() };
             let remaining = usize::from(area.width)
                 .saturating_sub(label.chars().count())
                 .saturating_sub(3);
@@ -1196,6 +1208,10 @@ fn draw_connect_list(
 fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
     let text = match connect.stage {
         ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
+        ConnectStage::FasfasNotice => {
+            "enter then paste your key · esc close".to_owned()
+        }
+        ConnectStage::FasfasKey => "enter load models · esc back".to_owned(),
         ConnectStage::Models => "↑↓ move · type to filter · enter choose · esc back".to_owned(),
         ConnectStage::ApiKey => connect.required_env().map_or_else(
             || "enter continue · esc back · empty skips the key".to_owned(),

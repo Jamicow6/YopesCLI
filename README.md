@@ -67,7 +67,9 @@ When a tool needs approval, yopes shows its arguments and, for `write_file` and 
 
 ### Connecting a provider
 
-Run `/connect`. **Custom** sits above the models.dev providers, separated by a divider. Choose it to connect any OpenAI-compatible endpoint:
+Run `/connect`. **Fasfas AI** sits above everything under a `preferred` divider — a temporary promotion that may be removed in a future release. Choosing it shows the notice to get a key: join the [Discord](https://discord.gg/vvndVbBZRe), then press `Enter`, paste your Fasfas key, and yopes fetches the available models from `https://ai.coffeevps.com/v1/models` as OpenAI-compatible bearer auth.
+
+**Custom** sits below it, separated by a divider. Choose it to connect any OpenAI-compatible endpoint:
 
 1. Enter the completion endpoint—a base URL or the full `/chat/completions` URL—for example `https://api.example.com/v1`.
 2. Choose the authorization type: `Bearer token`, `x-api-key`, or `No auth`.
