@@ -34,7 +34,6 @@ use crate::{
     backend::{Backend, StreamEvent},
     catalog::FetchResult,
     config::{Cli, Command, Config, load_session},
-    tools,
 };
 
 #[tokio::main]

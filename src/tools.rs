@@ -261,7 +261,7 @@ pub fn definitions() -> Value {
                     "required": ["items"]
                 }
             }
-        }
+        },
         {
             "type": "function",
             "function": {
