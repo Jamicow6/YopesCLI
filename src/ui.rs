@@ -257,8 +257,21 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
-        if let Some(reasoning) = reasoning_line(message, streaming) {
-            lines.push(reasoning);
+        // Thinking: shown in full while streaming or expanded, otherwise a
+        // one-line summary that a click expands like a tool result.
+        let reason_key = format!("reason-{index}");
+        let think_count = message
+            .reasoning
+            .split('\n')
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        let reasoning = reasoning_lines(message, streaming, app.expanded.contains(&reason_key));
+        if !reasoning.is_empty() {
+            let start = lines.len();
+            if think_count > 2 && !streaming {
+                rows.push((start as u16, reason_key));
+            }
+            lines.extend(reasoning);
         }
         if message.content.is_empty() && streaming && !has_calls && message.reasoning.is_empty() {
             lines.push(Line::styled("▌", Style::default().fg(ACCENT)));
@@ -1306,7 +1319,9 @@ fn usage_line(usage: Usage) -> Line<'static> {
     Line::styled(text, Style::default().fg(MUTED))
 }
 
-fn reasoning_line(message: &Message, streaming: bool) -> Option<Line<'static>> {
+/// Thinking above a reply: every dim line while streaming or expanded, and
+/// after the reply a single summary that the expand set can open back up.
+fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Line<'static>> {
     let lines: Vec<&str> = message
         .reasoning
         .split('\n')
@@ -1314,22 +1329,29 @@ fn reasoning_line(message: &Message, streaming: bool) -> Option<Line<'static>> {
         .filter(|line| !line.is_empty())
         .collect();
     if lines.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let text = if streaming {
-        lines.last().copied().unwrap_or_default().to_owned()
-    } else if lines.len() > 2 {
+    if streaming || expanded {
+        let style = Style::default().fg(MUTED).add_modifier(Modifier::DIM);
+        return lines
+            .into_iter()
+            .map(|line| {
+                Line::from(vec![
+                    Span::styled("│ ", Style::default().fg(MUTED)),
+                    Span::styled(line.to_owned(), style),
+                ])
+            })
+            .collect();
+    }
+    let text = if lines.len() > 2 {
         format!("{} … {} lines of thinking", lines[0], lines.len())
     } else {
         lines.join(" ")
     };
-    Some(Line::from(vec![
-        Span::styled(
-            if streaming { "│ " } else { "▸ " },
-            Style::default().fg(MUTED),
-        ),
+    vec![Line::from(vec![
+        Span::styled("▸ ", Style::default().fg(MUTED)),
         Span::styled(text, Style::default().fg(MUTED).add_modifier(Modifier::DIM)),
-    ]))
+    ])]
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
