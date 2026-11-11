@@ -2336,7 +2336,8 @@ impl App {
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
-            | ConnectStage::Password => {}
+            | ConnectStage::Password
+            | ConnectStage::FasfasKey => {}
         }
         if finish_now {
             return self.finish_custom_connect(None);
