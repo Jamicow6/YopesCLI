@@ -15,7 +15,7 @@ use std::{
     pin::Pin,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::{
     cursor::Show,
