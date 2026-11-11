@@ -21,6 +21,38 @@ use crate::{
     tools,
 };
 
+/// How a `read_file` result surfaces in the transcript: quiet. The header and
+/// range lines render instead of the contents; a click still expands it.
+fn read_result_summary(result: &str) -> Option<(String, Vec<String>)> {
+    let first = result.lines().next()?;
+    let open = first.rfind(" (")?;
+    let path = first[..open].trim();
+    if path.is_empty() {
+        return None;
+    }
+    let count = first.get(open + 2..)?.strip_suffix(" lines)")?;
+    count.trim().parse::<usize>().ok()?;
+    let mut summary = vec![first.trim().to_owned()];
+    if let Some(range) = result.lines().nth(1).filter(|line| line.starts_with("lines ")) {
+        summary.push(range.trim().to_owned());
+    }
+    Some((path.to_owned(), summary))
+}
+
+/// Name of the tool that produced the result at `index`, found by walking
+/// back to the assistant message that requested the call.
+fn tool_call_name(site: &App, index: usize) -> Option<&str> {
+    let id = site.session.messages[index].tool_call_id.as_deref()?;
+    for message in site.session.messages[..index].iter().rev() {
+        if let Some(calls) = &message.tool_calls {
+            if let Some(call) = calls.iter().find(|call| call.id.as_str() == id) {
+                return Some(call.function.name.as_str());
+            }
+        }
+    }
+    None
+}
+
 const MUTED: Color = Color::DarkGray;
 const ACCENT: Color = Color::Cyan;
 const ERROR: Color = Color::Red;
@@ -291,7 +323,8 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         if message.role == Role::Tool {
             let start = lines.len();
-            let framed = tool_result_lines(app, message, inner.width, &mut rows, start);
+            let name = tool_call_name(app, index).map(str::to_owned);
+            let framed = tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
             lines.extend(framed);
             if streaming {
                 if let Some(line) = lines.last_mut() {
@@ -856,6 +889,7 @@ fn tool_result_lines(
     width: u16,
     rows: &mut Vec<(u16, String)>,
     start_row: usize,
+    call_name: Option<&str>,
 ) -> Vec<Line<'static>> {
     let outer = usize::from(width).max(1);
     let inner_width = outer.saturating_sub(4);
@@ -883,11 +917,29 @@ fn tool_result_lines(
         .as_deref()
         .and_then(|call_id| app.changes.get(call_id));
     let mut body: Vec<Line<'static>> = Vec::new();
-    for content_line in &rendered {
-        body.push(Line::styled(
-            truncate(content_line, inner_width),
-            Style::default().fg(color),
-        ));
+    let mut label: Option<String> = None;
+    let mut quiet = false;
+    // A read stays quiet: its header and range replace the contents, and
+    // clicking the frame still reveals everything it returned.
+    if !failed && call_name == Some("read_file") {
+        if let Some((path, summary)) = read_result_summary(&message.content) {
+            quiet = true;
+            label = Some(path);
+            for line in summary {
+                body.push(Line::styled(
+                    truncate(&line, inner_width),
+                    Style::default().fg(TEXT),
+                ));
+            }
+        }
+    }
+    if !quiet {
+        for content_line in &rendered {
+            body.push(Line::styled(
+                truncate(content_line, inner_width),
+                Style::default().fg(color),
+            ));
+        }
     }
     if let Some(report) = report {
         body.extend(change_lines(report, inner_width));
@@ -896,27 +948,55 @@ fn tool_result_lines(
         body.push(Line::styled(" ", Style::default().fg(MUTED)));
     }
     // Long output, diff included, is folded; a click on the frame reveals the rest.
-    let total = body.len();
-    let clickable = total > TOOL_OUTPUT_PREVIEW_LINES;
-    let expanded = clickable && app.expanded.contains(&call_id);
-    if clickable && !expanded {
-        let hidden = total - TOOL_OUTPUT_PREVIEW_LINES;
-        let hint = if inner_width >= 30 {
-            format!(
-                "… {hidden} more line{} · click to expand",
-                if hidden == 1 { "" } else { "s" }
-            )
-        } else {
-            format!("… {hidden} more")
-        };
-        let mut shown: Vec<Line<'static>> = body.drain(..TOOL_OUTPUT_PREVIEW_LINES).collect();
-        shown.push(Line::styled(
-            truncate(&hint, inner_width),
+    let expanded = app.expanded.contains(&call_id);
+    let clickable = if quiet {
+        true
+    } else {
+        body.len() > TOOL_OUTPUT_PREVIEW_LINES
+    };
+    if !expanded {
+        if quiet {
+            body.push(Line::styled(
+                truncate(
+                    &format!(
+                        "… {} more line{} · click to expand",
+                        rendered.len(),
+                        if rendered.len() == 1 { "" } else { "s" }
+                    ),
+                    inner_width,
+                ),
+                Style::default().fg(MUTED),
+            ));
+        } else if body.len() > TOOL_OUTPUT_PREVIEW_LINES {
+            let total = body.len();
+            let hidden = total - TOOL_OUTPUT_PREVIEW_LINES;
+            let hint = if inner_width >= 30 {
+                format!(
+                    "… {hidden} more line{} · click to expand",
+                    if hidden == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("… {hidden} more")
+            };
+            let mut shown: Vec<Line<'static>> = body.drain(..TOOL_OUTPUT_PREVIEW_LINES).collect();
+            shown.push(Line::styled(
+                truncate(&hint, inner_width),
+                Style::default().fg(MUTED),
+            ));
+            body = shown;
+        }
+    } else if quiet {
+        for content_line in &rendered {
+            body.push(Line::styled(
+                truncate(content_line, inner_width),
+                Style::default().fg(TEXT),
+            ));
+        }
+        body.push(Line::styled(
+            truncate("· click to collapse", inner_width),
             Style::default().fg(MUTED),
         ));
-        body = shown;
-    }
-    if expanded {
+    } else {
         body.push(Line::styled(
             truncate("· click to collapse", inner_width),
             Style::default().fg(MUTED),
@@ -924,7 +1004,11 @@ fn tool_result_lines(
     }
 
     let label = truncate(
-        report.map_or("tool", |report| report.diff.path.as_str()),
+        report
+            .map(|report| report.diff.path.clone())
+            .or(label)
+            .unwrap_or_else(|| "tool".to_owned())
+            .as_str(),
         inner_width,
     );
     let framed = frame_lines(label, body, inner_width, border);
@@ -1785,6 +1869,29 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn quiet_read_summaries_skip_the_contents() {
+        use super::read_result_summary;
+        let (path, summary) = read_result_summary(
+            "src/main.rs (1014 lines)\nlines 1-400 of 1014\nfn main() {\n    ...",
+        )
+        .unwrap();
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(summary[0], "src/main.rs (1014 lines)");
+        assert_eq!(summary[1], "lines 1-400 of 1014");
+        assert_eq!(summary.len(), 2);
+
+        // A full read keeps only the header line.
+        let (path, summary) =
+            read_result_summary("todo.md (12 lines)\n- [x] ready\n- [ ] go").unwrap();
+        assert_eq!(path, "todo.md");
+        assert_eq!(summary.len(), 1);
+
+        // Directory listings and unplanned shapes stay visible in full.
+        assert!(read_result_summary("./\nnote.txt  2 B\nnested/\n").is_none());
+        assert!(read_result_summary("src/missing.txt (10 lines) nope").is_none());
     }
 
     #[test]

@@ -114,7 +114,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read a UTF-8 text file, optionally a range of lines.",
+                "description": "Read a UTF-8 text file, optionally a range of lines. A directory path lists its entries.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -527,6 +527,12 @@ fn list_dir(arguments: &str) -> Result<String> {
     let args: ListDirArgs = parse(arguments)?;
     let requested = args.path.as_deref().unwrap_or(".").trim();
     let requested = if requested.is_empty() { "." } else { requested };
+    directory_listing(requested)
+}
+
+/// The listing shared by `list_dir` and `read_file` on a directory: reading
+/// `.` is the fastest way to see the workspace layout.
+fn directory_listing(requested: &str) -> Result<String> {
     let directory = resolve(requested);
     if !directory.is_dir() {
         bail!("{requested} is not a directory");
@@ -580,6 +586,13 @@ fn read_file(arguments: &str) -> Result<String> {
     let args: ReadFileArgs = parse(arguments)?;
     let path = resolve(&args.path);
     let metadata = fs::metadata(&path).with_context(|| format!("reading {}", args.path))?;
+    if metadata.is_dir() {
+        if args.start_line.is_some() || args.limit.is_some() {
+            bail!("{} is a directory; line ranges only apply to files", args.path);
+        }
+        let requested = args.path.trim();
+        return directory_listing(if requested.is_empty() { "." } else { requested });
+    }
     if !metadata.is_file() {
         bail!("{} is not a file", args.path);
     }
@@ -1018,6 +1031,35 @@ mod tests {
         let empty = ToolCall::new("call_4", "web_search", r#"{"query":"  "}"#);
         let error = execute(&empty, Some("tvly-test")).unwrap_err().to_string();
         assert!(error.contains("query"));
+    }
+
+    #[test]
+    fn read_file_lists_a_directory_instead_of_failing() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-read-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("note.txt"), "hi").unwrap();
+        let call = ToolCall::new(
+            "call_7",
+            "read_file",
+            &format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
+        );
+        let output = execute(&call, None).unwrap();
+        assert!(output.contains("note.txt"), "{output}");
+        assert!(output.contains("nested/"), "{output}");
+        // Dot also works, and line ranges stay file-only.
+        let listing = ToolCall::new("call_8", "read_file", r#"{"path":"."}"#);
+        assert!(execute(&listing, None).is_ok());
+        let ranged = ToolCall::new(
+            "call_9",
+            "read_file",
+            r#"{"path":".","start_line":2}"#,
+        );
+        let error = execute(&ranged, None).unwrap_err().to_string();
+        assert!(error.contains("directory"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
