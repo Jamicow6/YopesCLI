@@ -311,6 +311,7 @@ impl Config {
                 custom_providers: custom_providers(saved.as_ref()),
                 session_path,
                 config_path,
+                tavily_api_key: None,
             });
         }
 
