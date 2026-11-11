@@ -35,6 +35,7 @@ pub const TOOL_NAMES: [&str; 5] = [
 #[derive(Debug)]
 pub struct ChangePreview {
     pub diff: Option<FileDiff>,
+    pub before: Option<String>,
     pub note: Option<String>,
 }
 
@@ -221,6 +222,18 @@ pub fn preview(call: &ToolCall) -> String {
     }
 }
 
+/// Whether the file a write or edit targets already exists on disk.
+pub fn target_existed(call: &ToolCall) -> bool {
+    let arguments = match serde_json::from_str::<Value>(&call.function.arguments) {
+        Ok(arguments) => arguments,
+        Err(_) => return false,
+    };
+    arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| resolve(path).exists())
+}
+
 pub fn command_text(call: &ToolCall) -> Option<String> {
     if call.function.name != "run_command" {
         return None;
@@ -232,12 +245,48 @@ pub fn command_text(call: &ToolCall) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The change a successful write or edit made, reconstructed from what is on
+/// disk after the tool ran.
+///
+/// The previous contents come from the approval preview when it is available,
+/// otherwise they are rebuilt by reversing the arguments.
+pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) -> Option<FileDiff> {
+    match call.function.name.as_str() {
+        "write_file" => {
+            let args: WriteFileArgs = parse(&call.function.arguments).ok()?;
+            let created = before.is_none() && !existed;
+            let before = before.unwrap_or_default();
+            Some(FileDiff::new(args.path, &before, &args.content, created))
+        }
+        "edit_file" => {
+            let args: EditFileArgs = parse(&call.function.arguments).ok()?;
+            if args.old_text.is_empty() {
+                return None;
+            }
+            let after = fs::read_to_string(resolve(&args.path)).ok()?;
+            let before = before.or_else(|| {
+                if args.replace_all {
+                    Some(after.replace(&args.new_text, &args.old_text))
+                } else {
+                    Some(after.replacen(&args.new_text, &args.old_text, 1))
+                }
+            })?;
+            if before == after {
+                return None;
+            }
+            Some(FileDiff::new(args.path, &before, &after, false))
+        }
+        _ => None,
+    }
+}
+
 pub fn change_preview(call: &ToolCall) -> ChangePreview {
     match call.function.name.as_str() {
         "write_file" => write_file_preview(&call.function.arguments),
         "edit_file" => edit_file_preview(&call.function.arguments),
         _ => ChangePreview {
             diff: None,
+            before: None,
             note: None,
         },
     }
@@ -257,6 +306,7 @@ fn write_file_preview(arguments: &str) -> ChangePreview {
     };
     ChangePreview {
         diff: Some(FileDiff::new(path, &before, &content, !exists)),
+        before: Some(before),
         note: None,
     }
 }
@@ -299,6 +349,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
     };
     ChangePreview {
         diff: Some(FileDiff::new(path, &before, &after, false)),
+        before: Some(before),
         note,
     }
 }
@@ -306,6 +357,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
 fn preview_error(error: anyhow::Error) -> ChangePreview {
     ChangePreview {
         diff: None,
+        before: None,
         note: Some(format!("Could not build a diff: {error:#}")),
     }
 }

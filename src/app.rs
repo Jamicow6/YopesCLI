@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     time::Instant,
 };
@@ -148,6 +148,8 @@ impl ToolsMode {
 pub struct ToolApproval {
     pub call: ToolCall,
     pub diff: Option<FileDiff>,
+    /// File contents before the change, kept to show the outcome diff.
+    pub before: Option<String>,
     pub note: Option<String>,
     pub scroll: usize,
     pub page_height: u16,
@@ -162,6 +164,12 @@ pub struct RunningTool {
 pub struct ToolEvent {
     pub call: ToolCall,
     pub result: std::result::Result<String, String>,
+}
+
+/// A diff shown under a tool result in the conversation.
+pub struct ChangeReport {
+    pub diff: FileDiff,
+    pub side_by_side: bool,
 }
 
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
@@ -659,6 +667,10 @@ pub struct App {
     pub tools_mode: ToolsMode,
     pub approval: Option<ToolApproval>,
     pub running_tool: Option<RunningTool>,
+    /// Diffs for write and edit calls, shown under their results.
+    pub changes: HashMap<String, ChangeReport>,
+    /// Unified or side-by-side diff view, kept across approvals and results.
+    pub diff_sides: bool,
     active: Option<ActiveRequest>,
     next_request_id: u64,
     pending_tools: VecDeque<ToolCall>,
@@ -695,6 +707,8 @@ impl App {
             tools_mode: ToolsMode::default(),
             approval: None,
             running_tool: None,
+            changes: HashMap::new(),
+            diff_sides: true,
             active: None,
             next_request_id: 0,
             pending_tools: VecDeque::new(),
@@ -924,6 +938,15 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Char('v' | 'V')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && self.input.value.trim().is_empty() =>
+            {
+                self.toggle_diff_view();
+                Action::None
+            }
             KeyCode::Enter
                 if key
                     .modifiers
@@ -1024,8 +1047,8 @@ impl App {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
+                self.toggle_diff_view();
                 if let Some(approval) = self.approval.as_mut() {
-                    approval.side_by_side = !approval.side_by_side;
                     approval.scroll = 0;
                 }
                 Action::None
@@ -1069,6 +1092,17 @@ impl App {
                 Action::None
             }
             _ => Action::None,
+        }
+    }
+
+    /// Switch every visible diff between unified and side-by-side.
+    fn toggle_diff_view(&mut self) {
+        self.diff_sides = !self.diff_sides;
+        if let Some(approval) = self.approval.as_mut() {
+            approval.side_by_side = self.diff_sides;
+        }
+        for report in self.changes.values_mut() {
+            report.side_by_side = self.diff_sides;
         }
     }
 
@@ -1121,10 +1155,11 @@ impl App {
             self.approval = Some(ToolApproval {
                 call,
                 diff: change.diff,
+                before: change.before,
                 note: change.note,
                 scroll: 0,
                 page_height: 0,
-                side_by_side: true,
+                side_by_side: self.diff_sides,
             });
             self.follow_tail = true;
             return Action::None;
@@ -2183,13 +2218,37 @@ impl App {
             return Action::None;
         }
         self.running_tool = None;
+        let before = self.previous_contents(&event.call);
+        let created = tools::target_existed(&event.call);
         let content = match event.result {
-            Ok(output) => output,
+            Ok(output) => {
+                if let Some(diff) = tools::applied_change(&event.call, before, created) {
+                    self.changes.insert(
+                        event.call.id.clone(),
+                        ChangeReport {
+                            diff,
+                            side_by_side: self.diff_sides,
+                        },
+                    );
+                }
+                output
+            }
             Err(error) => format!("Error: {error}"),
         };
         self.record_tool_result(event.call.id, content);
         self.save_session();
         self.advance_tools()
+    }
+
+    /// File contents from before a write or edit, for the outcome diff.
+    ///
+    /// Only available while an approval dialog is open, which is also where the
+    /// tool can be running after the user pressed enter.
+    fn previous_contents(&self, call: &ToolCall) -> Option<String> {
+        self.approval
+            .as_ref()
+            .filter(|approval| approval.call.id == call.id)
+            .and_then(|approval| approval.before.clone())
     }
 
     fn record_tool_result(&mut self, call_id: impl Into<String>, content: impl Into<String>) {
