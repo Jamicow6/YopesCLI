@@ -14,7 +14,7 @@ use crate::{
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
-    session::{Message, Role, Session, ToolCall},
+    session::{self, Message, Role, Session, ToolCall},
     tools,
 };
 
@@ -176,6 +176,9 @@ pub struct ChangeReport {
 
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
 const ADD_MODEL_ID: &str = "add-model";
+/// Rows that edit an existing saved endpoint from the model list.
+const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
+const EDIT_TOKEN_ID: &str = "edit-token";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
@@ -218,6 +221,8 @@ pub struct ConnectItem {
     pub logo: &'static str,
     /// Set when the item is a saved custom endpoint, holding its provider id.
     pub custom_id: Option<String>,
+    /// True for the provider and model the session is currently using.
+    pub active: bool,
 }
 
 /// A single-glyph logo for a models.dev provider or the custom flow.
@@ -294,7 +299,20 @@ impl ConnectState {
     }
 
     pub fn items(&self) -> Vec<ConnectItem> {
+        self.items_using("", "")
+    }
+
+    /// Build the list, marking whatever the session is already using.
+    ///
+    /// The active endpoint is the backend's base URL, which uniquely identifies
+    /// a provider (two saved custom endpoints can share a name but not a URL).
+    pub fn items_using(&self, active_base_url: &str, active_model: &str) -> Vec<ConnectItem> {
         let filter = self.filter.to_ascii_lowercase();
+        let active_base_url = active_base_url.trim_end_matches('/');
+        let is_active = |endpoint: &str| {
+            !active_base_url.is_empty()
+                && endpoint.trim_end_matches('/') == active_base_url
+        };
         match self.stage {
             ConnectStage::Providers => {
                 let mut items = Vec::new();
@@ -305,6 +323,7 @@ impl ConnectState {
                         detail: "New OpenAI-compatible endpoint".to_owned(),
                         logo: provider_logo(CUSTOM_PROVIDER_ID),
                         custom_id: None,
+                        active: false,
                     });
                 }
                 for saved in self.saved_custom.iter().filter(|saved| {
@@ -316,6 +335,7 @@ impl ConnectState {
                         detail: format!("saved · {} models", saved.models.len()),
                         logo: "★",
                         custom_id: Some(saved.id.clone()),
+                        active: is_active(&saved.base_url),
                     });
                 }
                 if let Some(catalog) = &self.catalog {
@@ -334,6 +354,7 @@ impl ConnectState {
                                 detail: format!("{} models", provider.models.len()),
                                 logo: provider_logo(id),
                                 custom_id: None,
+                                active: is_active(provider.api.as_deref().unwrap_or("")),
                             }),
                     );
                 }
@@ -371,6 +392,7 @@ impl ConnectState {
                             detail: context,
                             logo: provider_logo(provider_id),
                             custom_id: None,
+                            active: !active_model.is_empty() && id == active_model,
                         }
                     })
                     .collect()
@@ -383,6 +405,7 @@ impl ConnectState {
                     detail: auth.detail().to_owned(),
                     logo: "•",
                     custom_id: None,
+                    active: false,
                 })
                 .collect(),
             ConnectStage::CustomModels => {
@@ -403,6 +426,7 @@ impl ConnectState {
                         },
                         logo: "▸",
                         custom_id: None,
+                        active: !active_model.is_empty() && model.id == active_model,
                     })
                     .collect();
                 if filter.is_empty() || "add".contains(filter.as_str()) {
@@ -412,7 +436,39 @@ impl ConnectState {
                         detail: "enter a model id".to_owned(),
                         logo: "+",
                         custom_id: None,
+                        active: false,
                     });
+                }
+                // Editing only makes sense for an endpoint that is already saved.
+                if self.custom_provider_id.is_some() {
+                    // Match the same way every other row filters: against the title.
+                    let matches = |title: &str| {
+                        filter.is_empty() || title.to_ascii_lowercase().contains(filter.as_str())
+                    };
+                    if matches("Change endpoint") {
+                        items.push(ConnectItem {
+                            id: EDIT_ENDPOINT_ID.to_owned(),
+                            title: "Change endpoint".to_owned(),
+                            detail: self.custom_endpoint.clone(),
+                            logo: "✎",
+                            custom_id: None,
+                            active: false,
+                        });
+                    }
+                    if matches("Change API key") {
+                        items.push(ConnectItem {
+                            id: EDIT_TOKEN_ID.to_owned(),
+                            title: "Change API key".to_owned(),
+                            detail: if self.custom_token.is_empty() {
+                                "not set".to_owned()
+                            } else {
+                                format!("set · {} chars", self.custom_token.chars().count())
+                            },
+                            logo: "✎",
+                            custom_id: None,
+                            active: false,
+                        });
+                    }
                 }
                 items
             }
@@ -688,6 +744,10 @@ pub struct App {
     palette_index: usize,
     palette_hidden: bool,
     connect: Option<ConnectState>,
+    /// Prompt tokens billed across this session.
+    spent_prompt_tokens: u64,
+    /// Completion tokens billed across this session.
+    spent_completion_tokens: u64,
 }
 
 impl App {
@@ -728,6 +788,8 @@ impl App {
             palette_index: 0,
             palette_hidden: false,
             connect: None,
+            spent_prompt_tokens: 0,
+            spent_completion_tokens: 0,
         }
     }
 
@@ -780,6 +842,15 @@ impl App {
             Some((prompt, completion)) => Some((prompt.max(active.prompt_tokens), completion)),
             None => Some((active.prompt_tokens, estimated_output_tokens(&self.session))),
         }
+    }
+
+    /// Session spend so far, priced from the active model.
+    pub fn spent_cost(&self) -> String {
+        format_cost(
+            self.spent_prompt_tokens,
+            self.spent_completion_tokens,
+            self.backend.model(),
+        )
     }
 
     pub fn palette_matches(&self) -> Vec<&'static CommandSpec> {
@@ -1406,6 +1477,14 @@ impl App {
             return;
         };
         connect.error = None;
+        // While editing a saved endpoint, back returns to its model list.
+        if connect.custom_provider_id.is_some()
+            && matches!(stage, ConnectStage::Endpoint | ConnectStage::CustomToken)
+        {
+            connect.stage = ConnectStage::CustomModels;
+            connect.selected = 0;
+            return;
+        }
         match stage {
             ConnectStage::Endpoint => {
                 connect.stage = ConnectStage::ProviderName;
@@ -1478,6 +1557,14 @@ impl App {
                     .unwrap_or(0);
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_endpoint = endpoint;
+                    // Editing a saved endpoint returns to its model list; the
+                    // create flow continues on to pick an authorization kind.
+                    if connect.custom_provider_id.is_some() {
+                        connect.stage = ConnectStage::CustomModels;
+                        connect.selected = 0;
+                        connect.error = None;
+                        return Action::None;
+                    }
                     connect.stage = ConnectStage::Auth;
                     connect.selected = auth_index;
                     connect.error = None;
@@ -1496,6 +1583,12 @@ impl App {
                 }
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_token = token;
+                    if connect.custom_provider_id.is_some() {
+                        connect.stage = ConnectStage::CustomModels;
+                        connect.selected = 0;
+                        connect.error = None;
+                        return Action::None;
+                    }
                     connect.stage = ConnectStage::ModelId;
                     connect.selected = 0;
                     connect.error = None;
@@ -1764,6 +1857,19 @@ impl App {
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
                     connect.stage = ConnectStage::ModelId;
+                    connect.selected = 0;
+                    connect.error = None;
+                    return Action::None;
+                }
+                if item.id == EDIT_ENDPOINT_ID {
+                    // Keep the current value in the field so it can be amended.
+                    connect.stage = ConnectStage::Endpoint;
+                    connect.selected = 0;
+                    connect.error = None;
+                    return Action::None;
+                }
+                if item.id == EDIT_TOKEN_ID {
+                    connect.stage = ConnectStage::CustomToken;
                     connect.selected = 0;
                     connect.error = None;
                     return Action::None;
@@ -2203,6 +2309,32 @@ impl App {
                 Action::None
             }
             StreamEvent::Done { request_id } if self.active_request_id() == Some(request_id) => {
+                // Fold this request's billed tokens into the session total.
+                if let Some((prompt, completion)) = self.active.as_ref().and_then(|a| a.usage) {
+                    self.spent_prompt_tokens = self.spent_prompt_tokens.saturating_add(prompt);
+                    self.spent_completion_tokens =
+                        self.spent_completion_tokens.saturating_add(completion);
+                }
+                // Record what the reply cost and how long it took, so the
+                // transcript can show it under the finished message.
+                let finished = self.active.as_ref().map(|active| {
+                    let elapsed_ms = u64::try_from(active.started.elapsed().as_millis()).unwrap_or(0);
+                    let (prompt_tokens, completion_tokens) = active
+                        .usage
+                        .unwrap_or((active.prompt_tokens, estimated_output_tokens(&self.session)));
+                    (prompt_tokens, completion_tokens, elapsed_ms)
+                });
+                if let Some((prompt_tokens, completion_tokens, elapsed_ms)) = finished {
+                    if let Some(message) = self.session.messages.last_mut() {
+                        if message.role == Role::Assistant {
+                            message.usage = Some(session::Usage {
+                                prompt_tokens,
+                                completion_tokens,
+                                elapsed_ms,
+                            });
+                        }
+                    }
+                }
                 self.active = None;
                 if self.pending_tools.is_empty() {
                     self.tool_rounds = 0;
@@ -2274,9 +2406,12 @@ impl App {
     }
 
     fn remove_empty_response(&mut self) {
+        // A reply that only produced reasoning is kept: long thinking is real
+        // output the user asked for, so dropping it loses the whole answer.
         if self.session.messages.last().is_some_and(|message| {
             message.role == Role::Assistant
                 && message.content.is_empty()
+                && message.reasoning.trim().is_empty()
                 && message.tool_calls.is_none()
         }) {
             self.session.messages.pop();
@@ -2345,6 +2480,45 @@ pub fn format_tokens(tokens: u64) -> String {
         tokens.to_string()
     } else {
         format!("{:.1}k", tokens as f64 / 1000.0)
+    }
+}
+
+/// Dollars per million tokens, `(input, output)`.
+///
+/// These are list prices and only cover the common models; an unknown model
+/// falls back to the default so the counter still moves instead of lying flat.
+fn model_price(model: &str) -> (f64, f64) {
+    let model = model.to_ascii_lowercase();
+    let table: [(&str, f64, f64); 8] = [
+        ("gpt-4o-mini", 0.15, 0.60),
+        ("gpt-4o", 2.50, 10.0),
+        ("gpt-4.1", 2.00, 8.00),
+        ("o3", 2.00, 8.00),
+        ("o4-mini", 1.10, 4.40),
+        ("claude-3-5-sonnet", 3.00, 15.0),
+        ("claude-3-5-haiku", 0.80, 4.00),
+        ("deepseek", 0.27, 1.10),
+    ];
+    // Longest match wins so `gpt-4o-mini` does not bill as `gpt-4o`.
+    let mut best: Option<(&str, f64, f64)> = None;
+    for (name, input, output) in table {
+        if model.contains(name) && best.is_none_or(|(seen, _, _)| name.len() > seen.len()) {
+            best = Some((name, input, output));
+        }
+    }
+    best.map_or((2.50, 10.0), |(_, input, output)| (input, output))
+}
+
+/// Session spend as `$0.0000`, priced from the active model.
+pub fn format_cost(prompt_tokens: u64, completion_tokens: u64, model: &str) -> String {
+    let (input, output) = model_price(model);
+    let dollars = (prompt_tokens as f64 * input + completion_tokens as f64 * output) / 1_000_000.0;
+    // Small sessions cost fractions of a cent, so keep four decimals until it
+    // is worth showing cents.
+    if dollars < 1.0 {
+        format!("${dollars:.4}")
+    } else {
+        format!("${dollars:.2}")
     }
 }
 

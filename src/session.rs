@@ -59,6 +59,33 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Billing and timing for a finished assistant reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+/// What one reply cost and how long it took.
+///
+/// Stored as whole numbers so `Message` can keep deriving `Eq`; the elapsed
+/// time is milliseconds.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+}
+
+impl Usage {
+    /// Average output tokens per second, `None` when nothing was timed.
+    pub fn tokens_per_second(&self) -> Option<f64> {
+        if self.elapsed_ms == 0 || self.completion_tokens == 0 {
+            return None;
+        }
+        Some(self.completion_tokens as f64 / (self.elapsed_ms as f64 / 1000.0))
+    }
 }
 
 impl Message {
@@ -69,6 +96,7 @@ impl Message {
             reasoning: String::new(),
             tool_calls: None,
             tool_call_id: None,
+            usage: None,
         }
     }
 
@@ -79,6 +107,7 @@ impl Message {
             reasoning: String::new(),
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
+            usage: None,
         }
     }
 }

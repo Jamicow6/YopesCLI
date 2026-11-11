@@ -305,14 +305,28 @@ fn response_error_detail(body: &str) -> String {
     detail.chars().take(500).collect()
 }
 
+/// How long a stream may go silent before we stop waiting on it.
+///
+/// Long reasoning can pause for a while between chunks, so this is generous;
+/// without it a dropped connection stalls the response with no way to finish.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
 async fn consume_lines<F>(response: Response, mut on_line: F) -> Result<()>
 where
     F: FnMut(&str) -> Result<bool>,
 {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        buffer.extend_from_slice(&chunk?);
+    loop {
+        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,
+            Err(_) => bail!(
+                "the provider stopped sending for {}s; the connection may have dropped",
+                STREAM_IDLE_TIMEOUT.as_secs()
+            ),
+        };
+        buffer.extend_from_slice(&chunk);
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
             let bytes = buffer.drain(..=newline).collect::<Vec<_>>();
             let line = std::str::from_utf8(&bytes[..newline])?.trim_end_matches('\r');
