@@ -485,7 +485,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
     } else {
         None
     };
-    let secret = match (api_key, password.filter(|password| !password.is_empty())) {
+    let provided_secret = match (api_key, password.filter(|password| !password.is_empty())) {
         (Some(api_key), Some(password)) => {
             let sealed = credentials::seal(password, api_key)?;
             StoredSecret {
@@ -525,6 +525,33 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
         custom_providers: Vec::new(),
         secret: StoredSecret::default(),
     });
+    // Switching a model must not wipe or downgrade an existing key: when no new
+    // key was supplied, keep whatever is already stored for this endpoint.
+    let secret = if provided_secret.api_key.is_none() && provided_secret.ciphertext.is_none() {
+        match (connection.provider, &connection.custom_provider_id) {
+            (ProviderKind::Custom, Some(id)) => saved
+                .custom_providers
+                .iter()
+                .find(|stored| stored.id == id.trim())
+                .map(|stored| stored.secret.clone())
+                .or_else(|| {
+                    // Legacy configs keep the active custom secret at the top
+                    // level, with no custom_providers entry to look up.
+                    (saved.provider == ProviderKind::Custom
+                        && saved.base_url.trim_end_matches('/')
+                            == connection.base_url.trim_end_matches('/'))
+                    .then(|| saved.secret.clone())
+                })
+                .unwrap_or_default(),
+            (ProviderKind::Custom, None) => StoredSecret::default(),
+            _ => (saved.base_url.trim_end_matches('/')
+                == connection.base_url.trim_end_matches('/'))
+            .then(|| saved.secret.clone())
+            .unwrap_or_default(),
+        }
+    } else {
+        provided_secret
+    };
     saved.provider = connection.provider;
     saved.provider_name = connection.provider_name.clone();
     saved.model = connection.model.clone();
@@ -532,7 +559,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
     saved.api_key_env = connection.api_key_env.clone();
     saved.auth = connection.auth;
     saved.models = models.clone();
-    saved.secret = secret;
+    saved.secret = secret.clone();
     if connection.provider == ProviderKind::Custom {
         let display_name = if connection.provider_name.trim().is_empty() {
             "Custom".to_owned()
@@ -668,6 +695,47 @@ mod tests {
     fn the_update_subcommand_parses() {
         let cli = Cli::try_parse_from(["yopes", "update"]).unwrap();
         assert!(matches!(cli.command, Some(super::Command::Update)));
+    }
+
+    #[test]
+    fn switching_a_model_keeps_the_stored_key() {
+        use super::{Connection, SavedModel, load_custom_providers, save_connection};
+        use std::fs;
+
+        let path =
+            std::env::temp_dir().join(format!("yopes-config-test-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut connection = Connection {
+            provider: ProviderKind::Custom,
+            provider_name: "Test".to_owned(),
+            model: "one".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            api_key: Some("sk-test".to_owned()),
+            api_key_env: None,
+            auth: AuthKind::Bearer,
+            models: vec![SavedModel {
+                id: "one".to_owned(),
+                name: String::new(),
+            }],
+            custom_provider_id: None,
+        };
+        save_connection(&path, &connection, None).unwrap();
+
+        // The manager saves a model switch without going through the key again.
+        let id = load_custom_providers(&path)[0].id.clone();
+        connection.model = "two".to_owned();
+        connection.api_key = None;
+        connection.custom_provider_id = Some(id);
+        connection.models = vec![SavedModel {
+            id: "two".to_owned(),
+            name: String::new(),
+        }];
+        save_connection(&path, &connection, None).unwrap();
+
+        let providers = load_custom_providers(&path);
+        assert_eq!(providers[0].token.as_deref(), Some("sk-test"));
+        assert_eq!(providers[0].models[0].id, "two");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

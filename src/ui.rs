@@ -488,7 +488,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 ));
             }
         }
-        text.push_str(" · esc stop");
+        text.push_str(" · enter steer · esc stop");
         (text, ACCENT)
     } else if let Some(notice) = &app.notice {
         (
