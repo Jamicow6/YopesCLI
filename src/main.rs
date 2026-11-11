@@ -207,7 +207,6 @@ fn dispatch(
             }
             let backend = app.backend.clone();
             let sender = events.clone();
-            let mode_note = app.mode.instruction();
             let task = tokio::spawn(async move {
                 backend
                     .stream(request_id, messages, tools_enabled, mode_note, sender)
@@ -287,8 +286,8 @@ fn read_clipboard_image() -> Result<(String, String)> {
     }
     let encoded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || encoded.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim();
-        bail!("could not read the clipboard image: {stderr}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("could not read the clipboard image: {}", stderr.trim());
     }
     Ok(("paste".to_owned(), encoded))
 }
