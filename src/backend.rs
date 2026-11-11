@@ -97,6 +97,10 @@ impl Backend {
         &self.base_url
     }
 
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
     pub const fn auth(&self) -> AuthKind {
         self.auth
     }

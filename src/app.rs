@@ -267,6 +267,8 @@ pub struct ConnectState {
     custom_endpoint: String,
     custom_auth: AuthKind,
     custom_token: String,
+    /// The token was edited during this visit, so it needs saving again.
+    custom_token_dirty: bool,
     custom_models: Vec<SavedModel>,
     custom_model_id: String,
     custom_model_name: String,
@@ -292,6 +294,7 @@ impl ConnectState {
             custom_endpoint: String::new(),
             custom_auth: AuthKind::Bearer,
             custom_token: String::new(),
+            custom_token_dirty: false,
             custom_models: Vec::new(),
             custom_model_id: String::new(),
             custom_model_name: String::new(),
@@ -1028,7 +1031,10 @@ impl App {
                     self.input.delete_word();
                     self.reset_palette();
                 }
-                KeyCode::Char('a') => self.input.cursor = 0,
+                KeyCode::Char('a') => {
+                    self.input.clear();
+                    self.reset_palette();
+                }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 _ => {}
             }
@@ -1589,6 +1595,7 @@ impl App {
                 }
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_token = token;
+                    connect.custom_token_dirty = true;
                     if connect.custom_provider_id.is_some() {
                         connect.stage = ConnectStage::CustomModels;
                         connect.selected = 0;
@@ -1783,6 +1790,9 @@ impl App {
         let Some(item) = self.connect.as_ref().and_then(ConnectState::selected_item) else {
             return Action::None;
         };
+        let backend_base = self.backend.base_url().trim_end_matches('/').to_owned();
+        let backend_has_key = self.backend.api_key().is_some();
+        let mut finish_now = false;
         let Some(connect) = self.connect.as_mut() else {
             return Action::None;
         };
@@ -1810,6 +1820,7 @@ impl App {
                     connect.custom_auth = saved.auth;
                     connect.custom_models = saved.models.clone();
                     connect.custom_token = saved.token.clone().unwrap_or_default();
+                    connect.custom_token_dirty = false;
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
                     // Land on the manager so the endpoint, key and models can be
@@ -1822,6 +1833,7 @@ impl App {
                     connect.custom_name.clear();
                     connect.custom_endpoint.clear();
                     connect.custom_token.clear();
+                    connect.custom_token_dirty = false;
                     connect.custom_models.clear();
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
@@ -1876,13 +1888,30 @@ impl App {
                     connect.stage = ConnectStage::CustomToken;
                     connect.selected = 0;
                     connect.error = None;
+                    connect.custom_token_dirty = true;
                     return Action::None;
                 }
                 connect.model_id = Some(item.id);
                 connect.password.clear();
-                connect.stage = ConnectStage::Password;
                 connect.selected = 0;
                 connect.error = None;
+                // Switching a model on a saved endpoint reuses the stored key.
+                // Only ask for the encryption password when the key changed.
+                let reuse_secret = !connect.custom_token_dirty
+                    && connect.custom_provider_id.as_ref().is_some_and(|id| {
+                        connect.saved_custom.iter().any(|saved| {
+                            &saved.id == id
+                                && (!saved.auth.requires_token()
+                                    || saved.token.is_some()
+                                    || (backend_has_key
+                                        && saved.base_url.trim_end_matches('/') == backend_base))
+                        })
+                    });
+                if reuse_secret {
+                    finish_now = true;
+                } else {
+                    connect.stage = ConnectStage::Password;
+                }
             }
             ConnectStage::ApiKey
             | ConnectStage::ProviderName
@@ -1891,6 +1920,9 @@ impl App {
             | ConnectStage::ModelId
             | ConnectStage::ModelName
             | ConnectStage::Password => {}
+        }
+        if finish_now {
+            return self.finish_custom_connect(None);
         }
         Action::None
     }
@@ -1929,12 +1961,20 @@ impl App {
             return Action::None;
         }
         let entered_key = api_key.filter(|api_key| !api_key.trim().is_empty());
-        let effective_key = entered_key.clone().or_else(|| {
-            api_key_env
-                .as_deref()
-                .and_then(|name| std::env::var(name).ok())
-                .filter(|api_key| !api_key.trim().is_empty())
-        });
+        let effective_key = entered_key
+            .clone()
+            .or_else(|| {
+                api_key_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .filter(|api_key| !api_key.trim().is_empty())
+            })
+            .or_else(|| {
+                // Switching models on the active endpoint keeps the live key.
+                (self.backend.base_url().trim_end_matches('/') == base_url.trim_end_matches('/'))
+                    .then(|| self.backend.api_key().map(str::to_owned))
+                    .flatten()
+            });
         let connection = Connection {
             provider: ProviderKind::OpenAi,
             provider_name: provider_name.clone(),
@@ -2000,24 +2040,36 @@ impl App {
             self.connect_error("Choose a model.");
             return Action::None;
         }
-        if auth.requires_token() && token.is_empty() {
+        let stored_key = if auth.requires_token() && !token.is_empty() {
+            Some(token)
+        } else {
+            None
+        };
+        // A saved endpoint keeps its key on disk. When it is the active
+        // endpoint, reuse the live key so switching models never asks for the
+        // encryption password again.
+        let runtime_key = if auth.requires_token() {
+            stored_key.clone().or_else(|| {
+                (self.backend.base_url().trim_end_matches('/') == endpoint.trim_end_matches('/'))
+                    .then(|| self.backend.api_key().map(str::to_owned))
+                    .flatten()
+            })
+        } else {
+            None
+        };
+        if auth.requires_token() && runtime_key.is_none() {
             if let Some(connect) = self.connect.as_mut() {
                 connect.stage = ConnectStage::CustomToken;
                 connect.error = Some(format!("Enter a token for {}.", auth.label()));
             }
             return Action::None;
         }
-        let api_key = if auth.requires_token() {
-            Some(token)
-        } else {
-            None
-        };
         let connection = Connection {
             provider: ProviderKind::Custom,
             provider_name: name.clone(),
             model: model_id.clone(),
             base_url: endpoint.clone(),
-            api_key: api_key.clone(),
+            api_key: stored_key.clone(),
             api_key_env: None,
             auth,
             models: models.clone(),
@@ -2029,7 +2081,7 @@ impl App {
             name.clone(),
             model_id.clone(),
             endpoint,
-            api_key,
+            runtime_key,
             auth,
             models,
         );
@@ -2084,8 +2136,13 @@ impl App {
     }
 
     fn submit(&mut self) -> Action {
-        if self.is_busy() {
+        let steering = self.is_streaming();
+        if self.is_busy() && !steering {
             self.info("Wait for the current response or tool to finish.");
+            return Action::None;
+        }
+        if steering && self.input.value.trim().starts_with('/') {
+            self.info("Finish or stop the response before running a command.");
             return Action::None;
         }
         let value = self.input.take();
@@ -2105,6 +2162,12 @@ impl App {
         self.notice = None;
         self.tool_rounds = 0;
         self.session.update_title(prompt);
+        if steering {
+            // Drop the blank reply the interrupted request left behind, then
+            // fold the steer into the conversation and restart the turn.
+            self.discard_pending_tools("The user steered the response before this tool could run.");
+            self.remove_empty_response();
+        }
         self.session.messages.push(Message::new(Role::User, value));
         let messages = self.session.messages.clone();
         self.begin_request(messages)
