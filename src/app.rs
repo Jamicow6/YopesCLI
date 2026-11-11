@@ -898,7 +898,10 @@ impl App {
             return Action::None;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
+            && matches!(
+                key.code,
+                KeyCode::Char('c' | 'C' | 'q' | 'Q') | KeyCode::Null
+            )
         {
             self.should_quit = true;
             return Action::Quit;
