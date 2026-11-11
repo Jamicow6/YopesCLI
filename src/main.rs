@@ -68,6 +68,9 @@ async fn run() -> Result<()> {
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    // Ctrl+C is a key in raw mode, but a real interrupt must also work when the
+    // key event is swallowed, or while a blocking tool is running.
+    let mut interrupt = ctrl_c_signal();
     let mut term_signal: Pin<Box<dyn Future<Output = ()> + Send>> = {
         #[cfg(unix)]
         {
@@ -157,6 +160,7 @@ async fn run() -> Result<()> {
                     app.on_catalog(result);
                 }
             }
+            _ = interrupt.recv() => break,
             _ = term_signal.as_mut() => break,
             _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
         }
@@ -217,6 +221,31 @@ fn dispatch(
                 let _ = sender.send(result);
             });
         }
+    }
+}
+
+/// A stream that yields when the user sends an interrupt.
+fn ctrl_c_signal() -> Pin<Box<dyn Stream<Item = ()> + Send>> {
+    #[cfg(unix)]
+    {
+        match signal(SignalKind::interrupt()) {
+            Ok(mut sigint) => Box::pin(futures_util::stream::unfold(
+                sigint,
+                |mut sigint| async move { sigint.recv().await.map(|()| ((), sigint)) },
+            )),
+            Err(_) => Box::pin(futures_util::stream::pending()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows reports one Ctrl+C per press; keep the stream alive so a
+        // second press is never lost.
+        Box::pin(futures_util::stream::unfold((), |()| async move {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return None;
+            }
+            Some(((), ()))
+        }))
     }
 }
 

@@ -182,6 +182,16 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             Role::Assistant => ("yopes", ACCENT),
             Role::Tool => ("tool", MUTED),
         };
+        if message.role == Role::Tool {
+            lines.extend(tool_result_lines(app, message, inner.width));
+            if streaming {
+                if let Some(line) = lines.last_mut() {
+                    line.spans
+                        .push(Span::styled(" ▌", Style::default().fg(ACCENT)));
+                }
+            }
+            continue;
+        }
         lines.push(Line::styled(
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -196,11 +206,6 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         if !message.content.is_empty() {
             for content_line in message.content.split('\n') {
                 lines.push(Line::styled(content_line, Style::default().fg(TEXT)));
-            }
-        }
-        if let Some(call_id) = message.tool_call_id.as_deref() {
-            if let Some(report) = app.changes.get(call_id) {
-                lines.extend(change_lines(report, inner.width));
             }
         }
         if let Some(calls) = &message.tool_calls {
@@ -501,11 +506,90 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
     );
 }
 
+/// A tool result, framed so its output does not blend into the conversation.
+///
+/// The transcript is one paragraph, so the frame is drawn with box glyphs
+/// rather than a widget, and every inner line is clipped to the frame width.
+fn tool_result_lines(app: &App, message: &Message, width: u16) -> Vec<Line<'static>> {
+    let outer = usize::from(width).max(1);
+    let inner_width = outer.saturating_sub(4).max(1);
+    let failed = message.content.starts_with("Error: ");
+    let border = if failed { ERROR } else { MUTED };
+
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for content_line in message.content.split('\n') {
+        let color = if failed { ERROR } else { TEXT };
+        body.push(Line::styled(
+            truncate(content_line, inner_width),
+            Style::default().fg(color),
+        ));
+    }
+    let report = message
+        .tool_call_id
+        .as_deref()
+        .and_then(|call_id| app.changes.get(call_id));
+    if let Some(report) = report {
+        body.extend(change_lines(report, inner_width));
+    }
+    if body.is_empty() {
+        body.push(Line::styled(" ", Style::default().fg(MUTED)));
+    }
+
+    let label = truncate(
+        report.map_or("tool", |report| report.diff.path.as_str()),
+        inner_width,
+    );
+    frame_lines(label, body, inner_width, border)
+}
+
+/// Wrap body lines in a light frame of exactly `inner_width + 4` columns.
+fn frame_lines(
+    label: String,
+    body: Vec<Line<'static>>,
+    inner_width: usize,
+    border: Color,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::with_capacity(body.len() + 3);
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("╭─ {label} "), Style::default().fg(border)),
+        Span::styled(
+            "─".repeat(inner_width.saturating_sub(label.chars().count() + 2)),
+            Style::default().fg(border),
+        ),
+        Span::styled("─╮", Style::default().fg(border)),
+    ]));
+    for line in body {
+        let content = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let clipped = truncate(&content, inner_width);
+        let used = clipped.chars().count();
+        let style = line
+            .spans
+            .first()
+            .map_or_else(Style::default, |span| span.style);
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(border)),
+            Span::styled(clipped, style),
+            Span::raw(" ".repeat(inner_width.saturating_sub(used) + 1)),
+            Span::styled("│", Style::default().fg(border)),
+        ]));
+    }
+    lines.push(Line::styled(
+        format!("╰{}╯", "─".repeat(inner_width + 2)),
+        Style::default().fg(border),
+    ));
+    lines
+}
+
 /// The diff under a tool result: a file header, then the change itself.
-fn change_lines(report: &ChangeReport, width: u16) -> Vec<Line<'static>> {
-    let width = usize::from(width).max(1);
+fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
     let diff = &report.diff;
-    let mut lines = vec![Line::raw("")];
+    let mut lines = Vec::new();
     let mut spans = vec![Span::styled(
         truncate(&diff.path, width.saturating_sub(22)),
         Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
@@ -1093,7 +1177,39 @@ fn wrapped_line_count(text: &str, width: u16) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::wrapped_line_count;
+    use super::{frame_lines, wrapped_line_count};
+    use ratatui::{style::Color, text::Line};
+
+    fn text_of(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn every_framed_line_has_the_same_width() {
+        let body = vec![
+            Line::raw("short"),
+            Line::raw("a much longer body line that has to be clipped"),
+            Line::raw(""),
+        ];
+        let lines = frame_lines("main.py".to_owned(), body, 20, Color::Reset);
+        assert_eq!(lines.len(), 6);
+        for line in &lines[1..] {
+            assert_eq!(text_of(line).chars().count(), 24, "{:?}", text_of(line));
+        }
+        assert!(text_of(&lines[1]).starts_with("╭─ main.py "));
+        assert!(text_of(&lines[3]).starts_with("│ a much longer body"));
+        assert!(text_of(&lines[5]).starts_with('╰'));
+    }
+
+    #[test]
+    fn a_label_wider_than_the_frame_does_not_break_it() {
+        let lines = frame_lines("x".repeat(60), vec![Line::raw("body")], 10, Color::Reset);
+        assert_eq!(text_of(&lines[1]).chars().count(), 14);
+        assert_eq!(text_of(&lines[2]).chars().count(), 14);
+    }
 
     #[test]
     fn wrapped_counts_include_words_and_explicit_newlines() {
