@@ -143,7 +143,7 @@ impl Backend {
         self.stream(request_id, messages, false, Some(brief), events)
             .await;
         let mut text = String::new();
-        while let Ok(event) = receiver.recv().await {
+        while let Some(event) = receiver.recv().await {
             match event {
                 StreamEvent::Delta { text: delta, .. } => text.push_str(&delta),
                 StreamEvent::Error { message, .. } => bail!("{message}"),
