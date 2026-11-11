@@ -29,41 +29,24 @@ const TEXT: Color = Color::Reset;
 
 /// Rows of command text shown in the approval prompt before it stops.
 const MAX_APPROVAL_LINES: usize = 4;
-/// The startup mascot: a small cat on the welcome screen. Consecutive frames
-/// blink every ~200ms through the idle ticker, so the cat winks while waiting.
-const CAT_FRAMES: [&[&str; 6]; 4] = [
-    &[
-        "  /\\_/\\  ",
-        "+ ( o.o ) +",
-        "  #> ^ <#  ",
-        "  /| . |\\  ",
-        " (_|   |_) ",
-        "   \"   \"   ",
-    ],
-    &[
-        "  /^_/\\  ",
-        "+ ( o.o ) +",
-        "  #> ^ <#  ",
-        "  /| . |\\  ",
-        " (_|   |_) ",
-        "   \"   \"   ",
-    ],
-    &[
-        "  /\\_/\\  ",
-        "+ ( -.- ) +",
-        "  #> ^ <#  ",
-        "  /| . |\\  ",
-        " (_|   |_) ",
-        "   \"   \"   ",
-    ],
-    &[
-        "  /\\_/\\  ",
-        "+ ( o.o ) +",
-        "  #> ^ <#  ",
-        "  /| . |\\  ",
-        " (_|   |_) ",
-        "   \"   \"   ",
-    ],
+/// The startup mascot: a small cat, drawn only on the welcome screen, with a
+/// yarn ball that rolls beneath it on the idle ticker, one step every ~200ms.
+const CAT_BASE: [&str; 6] = [
+    "  /\\_/\\  ",
+    "+ ( o.o ) +",
+    "  #> ^ <#  ",
+    "  /| . |\\  ",
+    " (_|   |_) ",
+    "   \"   \"   ",
+];
+/// One row below the cat: the ball drifts right and gives back one step.
+const YARN_ROLL: [&str; 6] = [
+    " o         ",
+    "    o      ",
+    "      o    ",
+    "        o  ",
+    "         o ",
+    "        o  ",
 ];
 /// Tool output rows shown before the rest is collapsed.
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
@@ -209,9 +192,11 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::raw(""),
         ];
         // The mascot belongs to the startup screen only, never to a reply.
-        for art in CAT_FRAMES[(app.spinner / 2) % CAT_FRAMES.len()] {
-            welcome.push(Line::styled(*art, Style::default().fg(ACCENT)));
+        let ball = YARN_ROLL[(app.spinner / 2) % YARN_ROLL.len()];
+        for art in CAT_BASE {
+            welcome.push(Line::styled(art, Style::default().fg(ACCENT)));
         }
+        welcome.push(Line::styled(ball, Style::default().fg(MUTED)));
         welcome.push(Line::raw(""));
         welcome.push(Line::styled(
             "A quiet place to think out loud.",
@@ -547,13 +532,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     format!("{name} {detail} · {size}")
                 }
             }
-            None => match app.spinner % 4 {
-                0 => "thinking",
-                1 => "thinking.",
-                2 => "thinking..",
-                _ => "thinking...",
-            }
-            .to_owned(),
+            None => "thinking".to_owned(),
         };
         let mut text = format!(
             "{} {progress} · {elapsed:.1}s",
