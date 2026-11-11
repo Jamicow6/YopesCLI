@@ -52,6 +52,8 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 - `/model` — a popup over the endpoint's saved models: type to filter, `↑↓` to move, `Enter` to switch. Falls back to an info notice when the endpoint has no saved model list.
 - `/tools` — show the current tool mode.
 - `/tools on|off|auto|ask` — change how tool calls are approved.
+- `/system <text>` — set a custom system prompt, appended to the built-in one and sent with every message.
+- `/system` — show the current custom system prompt; `/system off` removes it.
 - `/quit` — save and quit.
 
 ### Tools
@@ -107,6 +109,7 @@ CLI flags override environment variables.
 | `--model <name>` | `YOPES_MODEL` | Provider-specific |
 | `--base-url <url>` | `YOPES_BASE_URL`, then `OPENAI_BASE_URL` or `OLLAMA_BASE_URL` | Provider-specific, or the endpoint saved by `/connect` |
 | `--session <path>` | `YOPES_SESSION` | Platform-local application data directory |
+| `--system-prompt <text>` | `YOPES_SYSTEM_PROMPT` | Nothing, unless set with `/system` |
 
 Models.dev providers use Bearer authentication with the provider's environment variable (for example `OPENAI_API_KEY` or `OPENROUTER_API_KEY`) or a key saved with `/connect`. Custom providers use the authorization type, token, and models saved with `/connect`. Saved connections are applied immediately and restored on the next launch; keys and tokens are never written to the session file.
 
