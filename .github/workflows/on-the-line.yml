@@ -28,3 +28,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Compile release
         run: cargo build --release --locked
+
+  publish:
+    name: Dispatch Production
+    needs: compile
+    # Only a main push may release; pull requests compile without touching it.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch Production
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run production.yml --ref main
