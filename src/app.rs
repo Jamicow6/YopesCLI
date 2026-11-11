@@ -291,6 +291,8 @@ pub struct ChangeReport {
 }
 
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
+/// Preferred provider row in /connect: Fasfas AI above models.dev.
+pub const FASFAST_ID: &str = catalog::FASFAST_ID;
 const ADD_MODEL_ID: &str = "add-model";
 /// Rows that edit an existing saved endpoint from the model list.
 const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
@@ -299,6 +301,9 @@ const EDIT_TOKEN_ID: &str = "edit-token";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
     Providers,
+    /// Preferred Fasfas flow: the Discord key notice, then the key input.
+    FasfasNotice,
+    FasfasKey,
     Models,
     ApiKey,
     ProviderName,
@@ -315,6 +320,8 @@ impl ConnectStage {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Providers => "provider",
+            Self::FasfasNotice => "fasfas",
+            Self::FasfasKey => "fasfas key",
             Self::Models => "model",
             Self::ApiKey => "api key",
             Self::ProviderName => "name",
@@ -346,6 +353,7 @@ pub fn provider_logo(id: &str) -> &'static str {
     match id {
         "openai" => "●",
         "openrouter" => "⇄",
+        "fasfas" => "✦",
         "anthropic" => "◇",
         "google" => "▴",
         "cohere" => "∞",
@@ -435,6 +443,22 @@ impl ConnectState {
         match self.stage {
             ConnectStage::Providers => {
                 let mut items = Vec::new();
+                // The preferred provider always sits above everything else.
+                if filter.is_empty()
+                    || catalog::FASFAST_LABEL
+                        .to_ascii_lowercase()
+                        .contains(filter.as_str())
+                    || catalog::FASFAST_ID.contains(filter.as_str())
+                {
+                    items.push(ConnectItem {
+                        id: FASFAST_ID.to_owned(),
+                        title: catalog::FASFAST_LABEL.to_owned(),
+                        detail: "preferred · key from Discord".to_owned(),
+                        logo: provider_logo(FASFAST_ID),
+                        custom_id: None,
+                        active: is_active(catalog::FASFAST_BASE_URL),
+                    });
+                }
                 if filter.is_empty() || "custom".contains(filter.as_str()) {
                     items.push(ConnectItem {
                         id: CUSTOM_PROVIDER_ID.to_owned(),
@@ -479,6 +503,15 @@ impl ConnectState {
                 }
                 items
             }
+            ConnectStage::FasfasNotice => vec![ConnectItem {
+                id: catalog::FASFAST_DISCORD.to_owned(),
+                title: "Get a key from Discord".to_owned(),
+                detail: catalog::FASFAST_DISCORD.to_owned(),
+                logo: provider_logo(FASFAST_ID),
+                custom_id: None,
+                active: false,
+            }],
+            ConnectStage::FasfasKey => Vec::new(),
             ConnectStage::Models => {
                 let Some(provider) = self.provider() else {
                     return Vec::new();
@@ -628,14 +661,14 @@ impl ConnectState {
         if self.stage == ConnectStage::Auth {
             return self.auth_at_selection().label().to_owned();
         }
-        if self.stage == ConnectStage::CustomModels {
+        if self.stage == ConnectStage::CustomModels || self.stage == ConnectStage::FasfasNotice {
             let items = self.items();
             return items
                 .get(self.selected.min(items.len().saturating_sub(1)))
                 .map_or_else(|| "none".to_owned(), |item| item.title.clone());
         }
         let value = match self.stage {
-            ConnectStage::ApiKey => &self.api_key,
+            ConnectStage::ApiKey | ConnectStage::FasfasKey => &self.api_key,
             ConnectStage::Password => &self.password,
             ConnectStage::ProviderName => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
@@ -643,11 +676,12 @@ impl ConnectState {
             ConnectStage::ModelId => &self.custom_model_id,
             ConnectStage::ModelName => &self.custom_model_name,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
+            ConnectStage::FasfasNotice => unreachable!("handled above"),
             ConnectStage::Auth | ConnectStage::CustomModels => unreachable!(),
         };
         if matches!(
             self.stage,
-            ConnectStage::ApiKey | ConnectStage::Password | ConnectStage::CustomToken
+            ConnectStage::ApiKey | ConnectStage::Password | ConnectStage::CustomToken | ConnectStage::FasfasKey
         ) && !value.is_empty()
         {
             "•".repeat(value.chars().count().min(64))
@@ -659,6 +693,8 @@ impl ConnectState {
     pub const fn input_label(&self) -> &'static str {
         match self.stage {
             ConnectStage::Providers | ConnectStage::Models => "search",
+            ConnectStage::FasfasNotice => "fasfas",
+            ConnectStage::FasfasKey => "fasfas key",
             ConnectStage::ApiKey => "api key",
             ConnectStage::ProviderName => "provider name",
             ConnectStage::Endpoint => "completion endpoint",
@@ -672,7 +708,10 @@ impl ConnectState {
     }
 
     pub const fn uses_cursor(&self) -> bool {
-        !matches!(self.stage, ConnectStage::Auth | ConnectStage::CustomModels)
+        !matches!(
+            self.stage,
+            ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::FasfasNotice
+        )
     }
 
     pub fn has_custom_models(&self) -> bool {
@@ -695,6 +734,15 @@ impl ConnectState {
         self.provider()
             .and_then(|provider| provider.env.first())
             .map(String::as_str)
+    }
+
+    /// What the loading row of /connect names as its source: the initial
+    /// fetch fills the provider list, the Fasfas key fetch lists models.
+    pub const fn loading_detail(&self) -> &'static str {
+        match self.stage {
+            ConnectStage::FasfasKey => "  loading models from Fasfas AI",
+            _ => "  loading providers from models.dev",
+        }
     }
 
     fn provider(&self) -> Option<&catalog::Provider> {
@@ -764,6 +812,8 @@ pub enum Action {
     PasteImage,
     Quit,
     LoadCatalog,
+    /// Fetch the Fasfas `/v1/models` list with the key entered in /connect.
+    FetchFasfas(String),
 }
 
 #[derive(Default)]
@@ -1148,7 +1198,9 @@ impl App {
                 .filter(|character| !character.is_control())
                 .collect::<String>();
             match connect.stage {
-                ConnectStage::ApiKey => connect.api_key.push_str(&clean),
+                ConnectStage::ApiKey | ConnectStage::FasfasKey => {
+                    connect.api_key.push_str(&clean)
+                }
                 ConnectStage::Password => connect.password.push_str(&clean),
                 ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
@@ -1159,7 +1211,7 @@ impl App {
                     connect.filter.push_str(&clean);
                     connect.selected = 0;
                 }
-                ConnectStage::Auth | ConnectStage::CustomModels => {}
+                ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::FasfasNotice => {}
             }
             return;
         }
@@ -1544,6 +1596,8 @@ impl App {
         }
         match stage {
             ConnectStage::Providers | ConnectStage::Models => self.handle_connect_list_key(key),
+            ConnectStage::FasfasNotice => self.handle_connect_choice_key(key),
+            ConnectStage::FasfasKey => self.handle_connect_fasfas_key(key),
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
             ConnectStage::ProviderName
             | ConnectStage::Endpoint
@@ -1639,8 +1693,9 @@ impl App {
             KeyCode::Esc => {
                 if let Some(connect) = self.connect.as_mut() {
                     // A saved endpoint's manager backs out to the provider list;
-                    // the create flow backs out to the endpoint field.
-                    connect.stage = if connect.custom_provider_id.is_some() {
+                    // the create flow backs out to the endpoint field; Fasfas
+                    // step one backs out to the provider list.
+                    connect.stage = if connect.custom_provider_id.is_some() || stage == ConnectStage::FasfasNotice {
                         ConnectStage::Providers
                     } else {
                         ConnectStage::Endpoint
@@ -1972,6 +2027,53 @@ impl App {
         Action::None
     }
 
+    /// Fasfas key entry: first step after the Discord notice. Enter fetches
+    /// the model list from ai.coffeevps.com with the key as a bearer token.
+    fn handle_connect_fasfas_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.stage = ConnectStage::Providers;
+                    connect.filter.clear();
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            KeyCode::Enter => {
+                let api_key = self
+                    .connect
+                    .as_ref()
+                    .map(|connect| connect.api_key.trim().to_owned())
+                    .unwrap_or_default();
+                if api_key.is_empty() {
+                    self.connect_error("Enter a Fasfas key from Discord.");
+                    return Action::None;
+                }
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.loading = true;
+                    connect.error = None;
+                }
+                return Action::FetchFasfas(api_key);
+            }
+            KeyCode::Backspace => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.api_key.pop();
+                }
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.api_key.push(character);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     fn handle_connect_api_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => {
@@ -2112,6 +2214,17 @@ impl App {
                     // Land on the manager so the endpoint, key and models can be
                     // edited; the token is one of its rows.
                     connect.stage = ConnectStage::CustomModels;
+                } else if item.id == FASFAST_ID {
+                    connect.custom_flow = false;
+                    connect.provider_id = Some(FASFAST_ID.to_owned());
+                    connect.model_id = None;
+                    connect.api_key.clear();
+                    connect.filter.clear();
+                    connect.selected = 0;
+                    connect.error = None;
+                    // Show where the key comes from; Enter on the notice row
+                    // or on this list both move to the key input.
+                    connect.stage = ConnectStage::FasfasNotice;
                 } else if item.id == CUSTOM_PROVIDER_ID {
                     connect.provider_id = None;
                     connect.custom_flow = true;
@@ -2130,10 +2243,28 @@ impl App {
                     connect.stage = ConnectStage::Models;
                 }
             }
+            ConnectStage::FasfasNotice => {
+                connect.filter.clear();
+                connect.selected = 0;
+                connect.error = None;
+                connect.stage = ConnectStage::FasfasKey;
+            }
             ConnectStage::Models => {
                 connect.model_id = Some(item.id);
-                connect.api_key.clear();
                 connect.password.clear();
+                connect.selected = 0;
+                connect.error = None;
+                if connect.provider_id.as_deref() == Some(FASFAST_ID) {
+                    // The Fasfas key was entered earlier: connect directly.
+                    let key = connect.api_key.trim().to_owned();
+                    if key.is_empty() {
+                        connect.stage = ConnectStage::FasfasKey;
+                        connect.error = Some("Enter a Fasfas key from Discord.".to_owned());
+                        return Action::None;
+                    }
+                    return self.finish_connect(Some(key), None);
+                }
+                connect.api_key.clear();
                 connect.stage = ConnectStage::ApiKey;
                 connect.filter.clear();
                 connect.selected = 0;
@@ -2404,6 +2535,15 @@ impl App {
             Ok(catalog) => {
                 connect.catalog = Some(catalog);
                 connect.error = None;
+                // The Fasfas fetch hands back a one-provider synthetic catalog:
+                // jump from the key field straight to its model list. The
+                // initial models.dev fetch leaves the provider list alone.
+                if connect.stage == ConnectStage::FasfasKey
+                    && connect.provider_id.as_deref() == Some(FASFAST_ID)
+                {
+                    connect.stage = ConnectStage::Models;
+                    connect.filter.clear();
+                }
                 connect.selected = 0;
             }
             Err(error) => {
@@ -3063,9 +3203,26 @@ mod tests {
             encrypted: false,
         });
         let items = connect.items_using("https://example.test/v1", "model");
-        assert_eq!(items[0].custom_id, None, "first row adds a provider");
-        assert_eq!(items[1].custom_id.as_deref(), Some(CUSTOM_PROVIDER_ID));
-        assert!(items[1].active);
+        assert_eq!(items[0].id, "fasfas", "preferred provider comes first");
+        assert_eq!(items[1].custom_id, None, "next row adds a provider");
+        assert_eq!(items[2].custom_id.as_deref(), Some(CUSTOM_PROVIDER_ID));
+        assert!(items[2].active);
+    }
+
+    #[test]
+    fn fasfas_filter_hides_other_sections() {
+        use super::{ConnectStage, ConnectState};
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::Providers;
+        connect.filter = "fasfas".to_owned();
+        let items = connect.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "fasfas");
+
+        connect.filter = "custom".to_owned();
+        let items = connect.items();
+        assert!(items.iter().all(|item| item.id != "fasfas"));
     }
 
     #[test]
