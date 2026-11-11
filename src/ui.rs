@@ -32,7 +32,7 @@ const MAX_APPROVAL_LINES: usize = 4;
 /// The startup mascot: a small cat on the welcome screen. Consecutive frames
 /// blink every ~200ms through the idle ticker, so the cat winks while waiting.
 const CAT_FRAMES: [&[&str; 6]; 4] = [
-    [
+    &[
         "  /\\_/\\  ",
         "+ ( o.o ) +",
         "  #> ^ <#  ",
@@ -40,15 +40,15 @@ const CAT_FRAMES: [&[&str; 6]; 4] = [
         " (_|   |_) ",
         "   \"   \"   ",
     ],
-    [
-        "  /^_/\  ",
+    &[
+        "  /^_/\\  ",
         "+ ( o.o ) +",
         "  #> ^ <#  ",
         "  /| . |\\  ",
         " (_|   |_) ",
         "   \"   \"   ",
     ],
-    [
+    &[
         "  /\\_/\\  ",
         "+ ( -.- ) +",
         "  #> ^ <#  ",
@@ -56,7 +56,7 @@ const CAT_FRAMES: [&[&str; 6]; 4] = [
         " (_|   |_) ",
         "   \"   \"   ",
     ],
-    [
+    &[
         "  /\\_/\\  ",
         "+ ( o.o ) +",
         "  #> ^ <#  ",
@@ -210,7 +210,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         ];
         // The mascot belongs to the startup screen only, never to a reply.
         for art in CAT_FRAMES[(app.spinner / 2) % CAT_FRAMES.len()] {
-            welcome.push(Line::styled(art, Style::default().fg(ACCENT)));
+            welcome.push(Line::styled(*art, Style::default().fg(ACCENT)));
         }
         welcome.push(Line::raw(""));
         welcome.push(Line::styled(
