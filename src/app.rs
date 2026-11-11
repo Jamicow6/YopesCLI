@@ -110,12 +110,6 @@ struct Compaction {
     text: String,
 }
 
-/// A compaction in flight: which turns it covers and the summary so far.
-struct Compaction {
-    split: usize,
-    text: String,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ToolsMode {
     #[default]
