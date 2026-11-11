@@ -70,7 +70,8 @@ async fn run() -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     // Ctrl+C is a key in raw mode, but a real interrupt must also work when the
     // key event is swallowed, or while a blocking tool is running.
-    let mut interrupt = ctrl_c_signal();
+    let interrupt = ctrl_c_interrupt();
+    tokio::pin!(interrupt);
     let mut term_signal: Pin<Box<dyn Future<Output = ()> + Send>> = {
         #[cfg(unix)]
         {
@@ -160,7 +161,7 @@ async fn run() -> Result<()> {
                     app.on_catalog(result);
                 }
             }
-            _ = interrupt.recv() => break,
+            _ = &mut interrupt => break,
             _ = term_signal.as_mut() => break,
             _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
         }
@@ -224,29 +225,12 @@ fn dispatch(
     }
 }
 
-/// A stream that yields when the user sends an interrupt.
-fn ctrl_c_signal() -> Pin<Box<dyn Stream<Item = ()> + Send>> {
-    #[cfg(unix)]
-    {
-        match signal(SignalKind::interrupt()) {
-            Ok(mut sigint) => Box::pin(futures_util::stream::unfold(
-                sigint,
-                |mut sigint| async move { sigint.recv().await.map(|()| ((), sigint)) },
-            )),
-            Err(_) => Box::pin(futures_util::stream::pending()),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows reports one Ctrl+C per press; keep the stream alive so a
-        // second press is never lost.
-        Box::pin(futures_util::stream::unfold((), |()| async move {
-            if tokio::signal::ctrl_c().await.is_err() {
-                return None;
-            }
-            Some(((), ()))
-        }))
-    }
+/// Resolves when the user interrupts. Works on every platform, including when
+/// the key event itself is swallowed.
+fn ctrl_c_interrupt() -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
 }
 
 fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64) {
