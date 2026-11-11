@@ -66,7 +66,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 7] = [
+pub const COMMANDS: [CommandSpec; 8] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -96,6 +96,11 @@ pub const COMMANDS: [CommandSpec; 7] = [
         name: "/tools",
         description: "Set tool mode: on, off, auto, ask",
         argument: Some("mode"),
+    },
+    CommandSpec {
+        name: "/system",
+        description: "Show or set the custom system prompt",
+        argument: Some("text"),
     },
     CommandSpec {
         name: "/quit",
@@ -3020,6 +3025,10 @@ impl App {
         let tools_enabled = self.mode != Mode::Chat && self.tools_mode.advertised();
         let mode_note = self.mode.instruction();
         let prompt_chars = tools::system_prompt(tools_enabled).chars().count()
+            + self
+                .backend
+                .system_prompt()
+                .map_or(0, |prompt| prompt.chars().count() + 2)
             + mode_note.map_or(0, |note| note.chars().count() + 2)
             + messages
                 .iter()
@@ -3073,6 +3082,27 @@ impl App {
                 }
             }
             "/sessions" => self.open_session_picker(),
+            "/system" => {
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                let current = self.backend.system_prompt().map(str::to_owned);
+                if rest.is_empty() {
+                    if let Some(current) = current {
+                        self.info(format!("Custom system prompt: {current}"));
+                    } else {
+                        self.info(
+                            "No custom system prompt · /system <text> to set one, /system off to remove it",
+                        );
+                    }
+                } else if matches!(rest.as_str(), "off" | "clear" | "none") {
+                    self.backend.set_system_prompt(None);
+                    self.persist_system_prompt(None);
+                    self.info("Custom system prompt removed");
+                } else {
+                    self.backend.set_system_prompt(Some(rest.clone()));
+                    self.persist_system_prompt(Some(rest));
+                    self.info("Custom system prompt set");
+                }
+            }
             "/tools" => {
                 let value = parts.next().unwrap_or_default().to_ascii_lowercase();
                 if value.is_empty() {
@@ -3411,6 +3441,13 @@ impl App {
         }
     }
 
+    /// Store the custom system prompt in the saved config.
+    fn persist_system_prompt(&mut self, value: Option<String>) {
+        if let Err(error) = config::save_system_prompt(&self.config_path, value) {
+            self.error(format!("Could not save the system prompt: {error:#}"));
+        }
+    }
+
     pub fn persist(&self) -> Result<()> {
         self.session_path
             .as_ref()
@@ -3534,7 +3571,7 @@ mod tests {
         assert_eq!(
             command_names("/"),
             vec![
-                "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/quit",
+                "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/system", "/quit",
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect"]);

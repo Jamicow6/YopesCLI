@@ -55,6 +55,8 @@ pub struct Backend {
     api_key: Option<String>,
     auth: AuthKind,
     models: Vec<SavedModel>,
+    /// Custom system prompt text, appended to the built-in one.
+    custom_prompt: Option<String>,
     client: Client,
 }
 
@@ -73,6 +75,7 @@ impl Backend {
             api_key: config.api_key.clone(),
             auth: config.auth,
             models: config.models.clone(),
+            custom_prompt: config.system_prompt.clone(),
             client,
         })
     }
@@ -111,6 +114,14 @@ impl Backend {
 
     pub fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.custom_prompt.as_deref()
+    }
+
+    pub fn set_system_prompt(&mut self, value: Option<String>) {
+        self.custom_prompt = value;
     }
 
     pub fn configure(
@@ -203,7 +214,12 @@ impl Backend {
     ) -> Result<()> {
         let mut request = serde_json::json!({
             "model": self.model,
-            "messages": request_messages(messages, tooling, mode_note)?,
+            "messages": request_messages(
+                messages,
+                tooling,
+                self.custom_prompt.as_deref(),
+                mode_note,
+            )?,
             "stream": true,
             "stream_options": { "include_usage": true },
         });
@@ -248,7 +264,12 @@ impl Backend {
     ) -> Result<()> {
         let request = serde_json::json!({
             "model": self.model,
-            "messages": request_messages(messages, false, mode_note)?,
+            "messages": request_messages(
+                messages,
+                false,
+                self.custom_prompt.as_deref(),
+                mode_note,
+            )?,
             "stream": true,
         });
         let response = send_with_retry("Ollama", || {
@@ -279,10 +300,17 @@ fn completion_url(base_url: &str) -> String {
 fn request_messages(
     messages: &[Message],
     tooling: bool,
+    custom_prompt: Option<&str>,
     mode_note: Option<&'static str>,
 ) -> Result<Vec<serde_json::Value>> {
     let mut request = Vec::with_capacity(messages.len() + 1);
     let mut system = tools::system_prompt(tooling);
+    // The user's prompt may duplicate what a built-in line already says: send
+    // it anyway, since a provider may also enforce its own system prompt.
+    if let Some(custom) = custom_prompt.filter(|custom| !custom.trim().is_empty()) {
+        system.push_str("\n\n");
+        system.push_str(custom.trim());
+    }
     if let Some(note) = mode_note {
         system.push_str("\n\n");
         system.push_str(note);
@@ -837,12 +865,12 @@ mod tests {
             Message::tool_result("call_1", "contents"),
         ];
 
-        let tooling = request_messages(&messages, true, None).unwrap();
+        let tooling = request_messages(&messages, true, None, None).unwrap();
         assert_eq!(tooling[0]["role"], "system");
         assert_eq!(tooling[2]["tool_calls"][0]["function"]["name"], "read_file");
         assert_eq!(tooling[3]["tool_call_id"], "call_1");
 
-        let plain = request_messages(&messages, false, None).unwrap();
+        let plain = request_messages(&messages, false, None, None).unwrap();
         assert!(
             plain
                 .iter()
@@ -858,8 +886,9 @@ mod tests {
     #[test]
     fn the_mode_instruction_lands_in_the_system_prompt() {
         let messages = vec![Message::new(Role::User, "hi")];
-        let plain = request_messages(&messages, true, None).unwrap();
-        let plan = request_messages(&messages, true, Some("PLAN MODE: propose only")).unwrap();
+        let plain = request_messages(&messages, true, None, None).unwrap();
+        let plan =
+            request_messages(&messages, true, None, Some("PLAN MODE: propose only")).unwrap();
         assert!(
             !plain[0]["content"]
                 .as_str()
@@ -869,6 +898,28 @@ mod tests {
             plan[0]["content"]
                 .as_str()
                 .is_some_and(|content| content.contains("PLAN MODE: propose only"))
+        );
+    }
+
+    #[test]
+    fn the_custom_system_prompt_lands_between_base_and_mode() {
+        let messages = vec![Message::new(Role::User, "hi")];
+        let request = request_messages(
+            &messages,
+            true,
+            Some(" Always answer in rhyme. "),
+            Some("PLAN MODE: propose only"),
+        )
+        .unwrap();
+        let system = request[0]["content"].as_str().unwrap();
+        assert!(system.contains("Working directory:"));
+        assert!(system.contains("Always answer in rhyme."));
+        // The custom text precedes the mode instruction, built-ins first.
+        assert!(system.find("Always answer").unwrap() < system.find("PLAN MODE").unwrap());
+        // A blank prompt adds nothing.
+        assert_eq!(
+            request_messages(&messages, true, Some("  "), None).unwrap(),
+            request_messages(&messages, true, None, None).unwrap()
         );
     }
 

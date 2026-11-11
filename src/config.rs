@@ -126,6 +126,10 @@ pub struct Cli {
     /// Do not load or save the session.
     #[arg(long)]
     no_save: bool,
+
+    /// Custom system prompt text, appended to the built-in one.
+    #[arg(long)]
+    system_prompt: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -172,6 +176,8 @@ pub struct Config {
     pub api_key: Option<String>,
     pub auth: AuthKind,
     pub models: Vec<SavedModel>,
+    /// Custom system prompt text, appended to the built-in one.
+    pub system_prompt: Option<String>,
     pub custom_providers: Vec<CustomProvider>,
     pub session_path: Option<PathBuf>,
     /// Directory holding every saved session file, when saving is on.
@@ -211,6 +217,9 @@ struct SavedConfig {
     auth: AuthKind,
     #[serde(default)]
     models: Vec<SavedModel>,
+    /// Custom system prompt text, appended to the built-in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_prompt: Option<String>,
     #[serde(default)]
     custom_providers: Vec<SavedCustomProvider>,
     #[serde(default)]
@@ -268,6 +277,26 @@ impl StoredSecret {
     }
 }
 
+impl SavedConfig {
+    /// A blank config for a first write.
+    fn empty() -> Self {
+        Self {
+            version: CONFIG_VERSION,
+            provider: ProviderKind::Unconfigured,
+            provider_name: String::new(),
+            model: String::new(),
+            base_url: String::new(),
+            api_key_env: None,
+            auth: AuthKind::Bearer,
+            models: Vec::new(),
+            system_prompt: None,
+            custom_providers: Vec::new(),
+            secret: StoredSecret::default(),
+            tavily_api_key: None,
+        }
+    }
+}
+
 impl Config {
     pub fn from_cli(cli: Cli) -> Result<Self> {
         Self::resolve(cli)
@@ -315,6 +344,7 @@ impl Config {
                 api_key: None,
                 auth: AuthKind::Bearer,
                 models: Vec::new(),
+                system_prompt: None,
                 custom_providers: custom_providers(saved.as_ref()),
                 session_path,
                 sessions_dir,
@@ -362,6 +392,20 @@ impl Config {
         let models = saved_for_provider
             .map(|saved| saved.models.clone())
             .unwrap_or_default();
+        let env_system_prompt = env::var("YOPES_SYSTEM_PROMPT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let system_prompt = cli
+            .system_prompt
+            .filter(|value| !value.trim().is_empty())
+            .or(env_system_prompt)
+            .or_else(|| {
+                saved
+                    .as_ref()
+                    .and_then(|saved| saved.system_prompt.clone())
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .map(|value| value.trim().to_owned());
         let api_key = resolve_api_key(saved_for_provider, env_key)?;
         let tavily_api_key = env::var("TAVILY_API_KEY")
             .ok()
@@ -386,6 +430,7 @@ impl Config {
             api_key,
             auth,
             models,
+            system_prompt,
             custom_providers: custom_providers(saved.as_ref()),
             session_path,
             sessions_dir,
@@ -538,19 +583,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
             name: model.name.trim().to_owned(),
         });
     }
-    let mut saved = load_saved(path)?.unwrap_or(SavedConfig {
-        version: CONFIG_VERSION,
-        provider: ProviderKind::Unconfigured,
-        provider_name: String::new(),
-        model: String::new(),
-        base_url: String::new(),
-        api_key_env: None,
-        auth: AuthKind::Bearer,
-        models: Vec::new(),
-        custom_providers: Vec::new(),
-        secret: StoredSecret::default(),
-        tavily_api_key: None,
-    });
+    let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
     // Switching a model must not wipe or downgrade an existing key: when no new
     // key was supplied, keep whatever is already stored for this endpoint.
     let secret = if provided_secret.api_key.is_none() && provided_secret.ciphertext.is_none() {
@@ -640,6 +673,18 @@ pub fn delete_saved_model(path: &Path, custom_provider_id: &str, model_id: &str)
     {
         saved.models.retain(|model| model.id != model_id);
     }
+    save_saved(path, &saved)
+}
+
+/// Store or clear the custom system prompt, in place.
+///
+/// Works before the first connection too: a config with just the prompt is
+/// created when none exists yet.
+pub fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
+    let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
+    saved.system_prompt = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     save_saved(path, &saved)
 }
 
@@ -844,6 +889,25 @@ mod tests {
             Some("my-provider-3")
         );
         assert_eq!(slug_provider_name("  !!  ", &[]), None);
+    }
+
+    #[test]
+    fn the_system_prompt_saves_and_clears() {
+        use super::save_system_prompt;
+        use std::fs;
+
+        let path =
+            std::env::temp_dir().join(format!("yopes-sysprompt-test-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        save_system_prompt(&path, Some(" Answer in rhyme. ".to_owned())).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["system_prompt"], "Answer in rhyme.");
+        save_system_prompt(&path, Some("  ".to_owned())).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.get("system_prompt"), None);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
