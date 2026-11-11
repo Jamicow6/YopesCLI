@@ -744,6 +744,8 @@ pub struct App {
     session_path: Option<PathBuf>,
     config_path: PathBuf,
     custom_providers: Vec<config::CustomProvider>,
+    /// Tavily key for the web_search tool.
+    tavily_api_key: Option<String>,
     palette_index: usize,
     palette_hidden: bool,
     connect: Option<ConnectState>,
@@ -760,6 +762,7 @@ impl App {
         session_path: Option<PathBuf>,
         config_path: PathBuf,
         custom_providers: Vec<config::CustomProvider>,
+        tavily_api_key: Option<String>,
     ) -> Self {
         Self {
             session,
@@ -788,6 +791,7 @@ impl App {
             session_path,
             config_path,
             custom_providers,
+            tavily_api_key,
             palette_index: 0,
             palette_hidden: false,
             connect: None,
@@ -798,6 +802,10 @@ impl App {
 
     pub fn connect_state(&self) -> Option<&ConnectState> {
         self.connect.as_ref()
+    }
+
+    pub fn tavily_key(&self) -> Option<&str> {
+        self.tavily_api_key.as_deref()
     }
 
     pub fn connect_open(&self) -> bool {
