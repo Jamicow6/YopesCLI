@@ -66,7 +66,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 8] = [
+pub const COMMANDS: [CommandSpec; 9] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -101,6 +101,11 @@ pub const COMMANDS: [CommandSpec; 8] = [
         name: "/system",
         description: "Show or set the custom system prompt",
         argument: Some("text"),
+    },
+    CommandSpec {
+        name: "/compact",
+        description: "Compact history now; auto on|off",
+        argument: Some("on|off|now"),
     },
     CommandSpec {
         name: "/quit",
@@ -1002,6 +1007,8 @@ pub struct App {
     pub tools_mode: ToolsMode,
     /// What the current turn is for: applying changes, planning, or chat.
     pub mode: Mode,
+    /// Whether history is summarized automatically when the context fills.
+    pub auto_compact: bool,
     /// Images pasted with Ctrl+V, sent with the next submitted message.
     pub attachments: Vec<ImageAttachment>,
     /// Counter giving each pasted image a unique display name.
@@ -1054,6 +1061,7 @@ impl App {
         config_path: PathBuf,
         custom_providers: Vec<config::CustomProvider>,
         tavily_api_key: Option<String>,
+        auto_compact: bool,
     ) -> Self {
         Self {
             session,
@@ -1070,6 +1078,7 @@ impl App {
             send_pulse: None,
             tools_mode: ToolsMode::default(),
             mode: Mode::default(),
+            auto_compact,
             attachments: Vec::new(),
             next_image: 0,
             image_rows: HashMap::new(),
@@ -2991,7 +3000,7 @@ impl App {
     /// summarize the older turns first, then send the real request.
     fn begin_turn(&mut self) -> Action {
         let total = Session::estimate_tokens(&self.session.messages);
-        if total > COMPACTION_THRESHOLD_TOKENS {
+        if self.auto_compact && total > COMPACTION_THRESHOLD_TOKENS {
             if let Some(split) = self.session.compaction_split(COMPACTION_KEEP_TOKENS) {
                 if split > 0 {
                     return self.begin_compaction(split);
@@ -3129,6 +3138,37 @@ impl App {
                     ));
                 } else {
                     self.error("Usage: /tools on|off|auto|ask");
+                }
+            }
+            "/compact" => {
+                let value = parts.next().unwrap_or_default().to_ascii_lowercase();
+                if value.is_empty() || value == "now" {
+                    if !self.backend.is_configured() {
+                        self.error("No provider connected. Run /connect to get started.");
+                    } else if let Some(split) = self
+                        .session
+                        .compaction_split(COMPACTION_KEEP_TOKENS)
+                        .filter(|split| *split > 0)
+                    {
+                        return self.begin_compaction(split);
+                    } else {
+                        self.info(format!(
+                            "Nothing to compact · auto compact {} · /compact on|off|now",
+                            if self.auto_compact { "on" } else { "off" }
+                        ));
+                    }
+                } else if matches!(value.as_str(), "on" | "off") {
+                    self.auto_compact = value == "on";
+                    self.persist_auto_compact(self.auto_compact);
+                    self.info(if self.auto_compact {
+                        "Auto compact on — older turns summarize once the context fills".to_owned()
+                    } else {
+                        "Auto compact off — the full history is sent; /compact summarizes \
+                         manually"
+                            .to_owned()
+                    });
+                } else {
+                    self.error("Usage: /compact on|off|now");
                 }
             }
             "/quit" => {
@@ -3448,6 +3488,13 @@ impl App {
         }
     }
 
+    /// Store the automatic compaction switch in the saved config.
+    fn persist_auto_compact(&mut self, value: bool) {
+        if let Err(error) = config::save_auto_compact(&self.config_path, value) {
+            self.error(format!("Could not save the compact setting: {error:#}"));
+        }
+    }
+
     pub fn persist(&self) -> Result<()> {
         self.session_path
             .as_ref()
@@ -3571,10 +3618,11 @@ mod tests {
         assert_eq!(
             command_names("/"),
             vec![
-                "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/system", "/quit",
+                "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/system", "/compact",
+                "/quit",
             ]
         );
-        assert_eq!(command_names("/c"), vec!["/connect"]);
+        assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);
         assert_eq!(command_names("/m"), vec!["/model"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
         assert_eq!(command_names("/MO"), vec!["/model"]);
