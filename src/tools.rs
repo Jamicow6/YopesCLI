@@ -3,7 +3,11 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
+    process::{Child as ProcessChild, Command as ProcessCommand, Stdio},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Mutex, MutexGuard, OnceLock,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +29,7 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 12] = [
+pub const TOOL_NAMES: [&str; 15] = [
     "list_dir",
     "read_file",
     "glob",
@@ -34,6 +38,9 @@ pub const TOOL_NAMES: [&str; 12] = [
     "edit_file",
     "multi_edit",
     "run_command",
+    "bash_background",
+    "bash_output",
+    "bash_kill",
     "web_search",
     "web_fetch",
     "todo_write",
@@ -56,10 +63,11 @@ pub fn requires_approval(call: &ToolCall) -> bool {
         // A subagent request spends extra tokens on the user's account.
         return true;
     }
-    call.function.name == "run_command" && command_risk(&call.function.arguments)
+    matches!(call.function.name.as_str(), "run_command" | "bash_background")
+        && command_risk(&call.function.arguments)
 }
 
-/// The `risk` flag the model set on a `run_command` call.
+/// The `risk` flag the model set on a `run_command` or `bash_background` call.
 pub fn command_risk(arguments: &str) -> bool {
     serde_json::from_str::<Value>(arguments)
         .ok()
@@ -87,6 +95,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              facts, and cite the URL you used. \
              Use web_fetch to read the text of a specific page, such as one surfaced by \
              web_search. \
+             Start long-running or detached work with bash_background, then read it with \
+             bash_output and stop it with bash_kill when it has served its purpose. \
              For multi-step work or when the user asks for a todo list, maintain the \
              checklist with todo_write: send the whole list each call, marking done items. \
              For an independent subtask use delegate: hand the subagent one self-contained \
@@ -313,6 +323,65 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "bash_background",
+                "description": "Start one bash shell command in the background and get a job id. Its output lands in a log: read it with bash_output, stop it with bash_kill. Set risk to true for anything destructive or hard to undo so the user is asked first.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Bash command to start."
+                        },
+                        "risk": {
+                            "type": "boolean",
+                            "description": "True when the command is destructive or could discard work, so the user is asked first."
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "Kill the job after this many seconds. Defaults to 120."
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "bash_output",
+                "description": "Read a background bash job: everything it printed so far and whether it still runs or has exited. Pass the job id from bash_background.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "integer",
+                            "description": "The id bash_background returned."
+                        }
+                    },
+                    "required": ["job_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "bash_kill",
+                "description": "Stop a background bash job by its id. A finished or unknown job answers so, no need to kill twice.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "integer",
+                            "description": "The id bash_background returned."
+                        }
+                    },
+                    "required": ["job_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "web_search",
                 "description": "Search the web and return the top results with titles, URLs and snippets. Use it for current information, documentation, release notes, or anything the user asks about that is newer than your knowledge. Cite the URL you used.",
                 "parameters": {
@@ -445,6 +514,15 @@ pub fn preview(call: &ToolCall) -> String {
             format!("{edits} edits")
         }
         "run_command" => clip(&string("command"), 160),
+        "bash_background" => clip(&string("command"), 160),
+        "bash_output" | "bash_kill" => {
+            let id = arguments
+                .as_ref()
+                .and_then(|value| value.get("job_id"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            format!("job {id}")
+        }
         "web_search" => clip(&string("query"), 160),
         "web_fetch" => clip(&string("url"), 160),
         "todo_write" => {
@@ -472,7 +550,7 @@ pub fn target_existed(call: &ToolCall) -> bool {
 }
 
 pub fn command_text(call: &ToolCall) -> Option<String> {
-    if call.function.name != "run_command" {
+    if !matches!(call.function.name.as_str(), "run_command" | "bash_background") {
         return None;
     }
     serde_json::from_str::<Value>(&call.function.arguments)
@@ -705,6 +783,9 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
         "edit_file" => edit_file(&call.function.arguments),
         "multi_edit" => multi_edit(&call.function.arguments),
         "run_command" => run_command(&call.function.arguments),
+        "bash_background" => bash_background(&call.function.arguments),
+        "bash_output" => bash_output(&call.function.arguments),
+        "bash_kill" => bash_kill(&call.function.arguments),
         "web_search" => web_search(&call.function.arguments, web_key),
         "web_fetch" => web_fetch(&call.function.arguments),
         "todo_write" => todo_write(&call.function.arguments),
@@ -1367,15 +1448,7 @@ fn run_command(arguments: &str) -> Result<String> {
         .try_clone()
         .with_context(|| format!("opening {}", log_path.display()))?;
 
-    let mut process = if cfg!(windows) {
-        let mut process = ProcessCommand::new("cmd");
-        process.args(["/C", command]);
-        process
-    } else {
-        let mut process = ProcessCommand::new("sh");
-        process.args(["-c", command]);
-        process
-    };
+    let mut process = shell_process(command);
     process
         .current_dir(workspace())
         .stdin(Stdio::null())
@@ -1416,6 +1489,209 @@ fn run_command(arguments: &str) -> Result<String> {
         result.push_str(&output);
     }
     Ok(truncate_output(result))
+}
+
+/// One background command: where it writes, when it started, and how to stop
+/// it. `exit` is set the first time its output is read after finishing.
+struct BashJob {
+    started: Instant,
+    timeout: u64,
+    log_path: PathBuf,
+    child: Option<ProcessChild>,
+    exit: Option<i32>,
+}
+
+const MAX_BASH_JOBS: usize = 16;
+static BASH_JOBS: OnceLock<Mutex<HashMap<u32, BashJob>>> = OnceLock::new();
+static JOB_SEQ: AtomicU32 = AtomicU32::new(1);
+
+fn bash_jobs() -> MutexGuard<'static, HashMap<u32, BashJob>> {
+    BASH_JOBS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The cached bash executable. On Windows it arrives with Git for Windows;
+/// without it the shell tools refuse to run and `run_command` stays on cmd.
+static BASH_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn bash_path() -> Option<&'static PathBuf> {
+    BASH_PATH.get_or_init(detect_bash).as_ref()
+}
+
+fn detect_bash() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return Some(PathBuf::from("bash"));
+    }
+    let probe = ProcessCommand::new("where").arg("git").output().ok()?;
+    if !probe.status.success() {
+        return None;
+    }
+    let git = String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .next()?
+        .trim();
+    // git.exe usually lives in …\cmd or …\bin; bash.exe in …\bin or …\usr\bin.
+    let root = PathBuf::from(git).parent()?.to_path_buf();
+    let step_up = root.parent().map(|root| root.join("bin").join("bash.exe"));
+    vec![
+        root.join("bash.exe"),
+        root.join("bin").join("bash.exe"),
+        root.join("usr").join("bin").join("bash.exe"),
+    ]
+    .into_iter()
+    .chain(step_up)
+    .find(|candidate| candidate.is_file())
+}
+
+/// The process wrapper every command runs through: git-bash when it is
+/// installed, otherwise the platform default. That is the graceful disable.
+fn shell_process(command: &str) -> ProcessCommand {
+    if let Some(bash) = bash_path() {
+        let mut process = ProcessCommand::new(bash);
+        process.args(["-lc", command]);
+        return process;
+    }
+    if cfg!(windows) {
+        let mut process = ProcessCommand::new("cmd");
+        process.args(["/C", command]);
+        process
+    } else {
+        let mut process = ProcessCommand::new("sh");
+        process.args(["-c", command]);
+        process
+    }
+}
+
+#[derive(Deserialize)]
+struct BashBackgroundArgs {
+    command: String,
+    #[serde(default)]
+    risk: bool,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct BashJobArgs {
+    job_id: u32,
+}
+
+fn bash_background(arguments: &str) -> Result<String> {
+    let Some(bash) = bash_path().cloned() else {
+        bail!(
+            "bash is not available on this machine; install Git for Windows and \
+             restart yopes to run background jobs"
+        );
+    };
+    let args: BashBackgroundArgs = parse(arguments)?;
+    let command = args.command.trim();
+    if command.is_empty() {
+        bail!("command cannot be empty");
+    }
+    let timeout = args
+        .timeout_seconds
+        .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
+        .clamp(1, MAX_TIMEOUT_SECONDS);
+    let mut jobs = bash_jobs();
+    if jobs.len() >= MAX_BASH_JOBS {
+        bail!(
+            "too many bash jobs are waiting or running ({}, the limit is \
+             {MAX_BASH_JOBS}); read their output with bash_output first",
+            jobs.len()
+        );
+    }
+    let id = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    let log_path = temporary_log_path();
+    let file =
+        fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let stderr = file
+        .try_clone()
+        .with_context(|| format!("opening {}", log_path.display()))?;
+    let mut process = ProcessCommand::new(bash);
+    process.args(["-lc", command]);
+    let child = process
+        .current_dir(workspace())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| format!("running `{command}`"))?;
+    jobs.insert(
+        id,
+        BashJob {
+            started: Instant::now(),
+            timeout,
+            log_path,
+            child: Some(child),
+            exit: None,
+        },
+    );
+    Ok(format!(
+        "Started bash job {id} (timeout {timeout}s). Call bash_output with job id {id} \
+         to read it, and bash_kill to stop it."
+    ))
+}
+
+fn bash_output(arguments: &str) -> Result<String> {
+    let args: BashJobArgs = parse(arguments)?;
+    let mut jobs = bash_jobs();
+    let Some(job) = jobs.get_mut(&args.job_id) else {
+        bail!("no bash job with id {}; it was never started or was already read", args.job_id);
+    };
+    // Ownership of the child moves through this block so the job can finish
+    // between calls; on kill and exit the child is consumed and dropped.
+    let mut held = job.child.take();
+    if let Some(child) = held.as_mut() {
+        match child.try_wait().context("waiting for the bash job")? {
+            Some(status) => {
+                job.exit = Some(status.code().unwrap_or(-1));
+                held = None;
+            }
+            None if job.started.elapsed() >= Duration::from_secs(job.timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                job.exit = Some(-1);
+                held = None;
+            }
+            None => {}
+        }
+    }
+    if job.exit.is_none() {
+        job.child = held;
+    }
+    let mut result = String::new();
+    match job.exit {
+        Some(exit) => result.push_str(&format!("Exit code: {exit}.\n")),
+        None => result.push_str("Still running.\n"),
+    }
+    let output = read_log(&job.log_path);
+    if output.is_empty() {
+        if job.child.is_some() {
+            result.push_str("(no output yet)");
+        } else {
+            result.push_str("(no output)");
+        }
+    } else {
+        result.push_str(&output);
+    }
+    Ok(truncate_output(result))
+}
+
+fn bash_kill(arguments: &str) -> Result<String> {
+    let args: BashJobArgs = parse(arguments)?;
+    let Some(job) = bash_jobs().get_mut(&args.job_id) else {
+        bail!("no bash job with id {args.job_id}; it was never started or was already read");
+    };
+    let Some(child) = job.child.as_mut() else {
+        return Ok(format!("Bash job {args.job_id} already finished."));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    job.child = None;
+    job.exit = Some(-1);
+    Ok(format!("Killed bash job {args.job_id}. It reported no exit code."))
 }
 
 #[derive(Deserialize)]
@@ -1877,6 +2153,79 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("m.txt")).unwrap(), "cc\n");
         assert!(execute(&call, None).is_ok());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bash_background_output_and_kill_handle_the_lifecycle() {
+        use std::{thread, time::Duration};
+        use super::{bash_path, execute};
+        if bash_path().is_none() {
+            // No bash on this machine yet; the tools refuse gracefully.
+            let error = execute(
+                &ToolCall::new("call_40", "bash_background", r#"{"command":"echo hi"}"#),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("bash is not available"), "{error}");
+            return;
+        }
+        let job_id = |started: &str| {
+            started
+                .split("bash job ")
+                .nth(1)
+                .and_then(|part| part.split_whitespace().next())
+                .and_then(|part| part.parse::<u32>().ok())
+                .unwrap()
+        };
+        let started = execute(
+            &ToolCall::new(
+                "call_41",
+                "bash_background",
+                r#"{"command":"printf step-one","timeout_seconds":30}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        let id = job_id(&started);
+        let arguments = format!(r#"{{"job_id":{id}}}"#);
+        let mut output = String::new();
+        for _ in 0..50 {
+            output = execute(&ToolCall::new("call_42", "bash_output", &arguments), None).unwrap();
+            if output.contains("Exit code") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(output.contains("step-one"), "{output}");
+        assert!(output.contains("Exit code"), "{output}");
+
+        // An unknown id refuses with the same phrasing everywhere.
+        let error = execute(
+            &ToolCall::new("call_43", "bash_output", r#"{"job_id":999999}"#),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no bash job"), "{error}");
+
+        // Killing a sleeper ends it immediately with no exit code.
+        let sleeper = execute(
+            &ToolCall::new(
+                "call_44",
+                "bash_background",
+                r#"{"command":"sleep 60","timeout_seconds":60}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        let id = job_id(&sleeper);
+        let arguments = format!(r#"{{"job_id":{id}}}"#);
+        let killed = execute(&ToolCall::new("call_45", "bash_kill", &arguments), None).unwrap();
+        assert!(killed.contains("Killed"), "{killed}");
+        thread::sleep(Duration::from_millis(50));
+        let after = execute(&ToolCall::new("call_46", "bash_output", &arguments), None).unwrap();
+        assert!(after.contains("Exit code"), "{after}");
     }
 
     #[test]

@@ -214,7 +214,9 @@ impl Mode {
     pub fn denied(self, tool: &str) -> bool {
         match self {
             Self::Build => false,
-            Self::Plan => matches!(tool, "write_file" | "edit_file" | "multi_edit" | "run_command"),
+            Self::Plan => {
+                matches!(tool, "write_file" | "edit_file" | "multi_edit" | "run_command" | "bash_background")
+            }
             Self::Chat => true,
         }
     }
@@ -3759,6 +3761,7 @@ mod tests {
         assert!(Mode::Plan.denied("edit_file"));
         assert!(Mode::Plan.denied("multi_edit"));
         assert!(Mode::Plan.denied("run_command"));
+        assert!(Mode::Plan.denied("bash_background"));
         assert!(Mode::Chat.denied("read_file"));
         assert!(
             Mode::Plan
