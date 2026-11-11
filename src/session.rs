@@ -118,6 +118,10 @@ pub struct Session {
     pub id: u64,
     pub title: String,
     pub messages: Vec<Message>,
+    /// Summary of compacted earlier turns, kept so long sessions stay small
+    /// without forgetting them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 impl Default for Session {
@@ -136,6 +140,7 @@ impl Session {
             id,
             title: "New session".to_owned(),
             messages: Vec::new(),
+            summary: None,
         }
     }
 
@@ -241,6 +246,63 @@ impl Session {
             self.title = title;
         }
     }
+
+    /// Estimated prompt tokens for `messages`, at four characters per token.
+    ///
+    /// Matches how the provider request is built: reasoning and tool arguments
+    /// are both sent, so both count.
+    pub fn estimate_tokens(messages: &[Message]) -> u64 {
+        messages
+            .iter()
+            .map(|message| {
+                (message.content.chars().count()
+                    + message.reasoning.chars().count()
+                    + message.tool_calls.as_ref().map_or(0, |calls| {
+                        calls
+                            .iter()
+                            .map(|call| {
+                                call.function.name.chars().count()
+                                    + call.function.arguments.chars().count()
+                            })
+                            .sum::<usize>()
+                    })) as u64
+                    / 4
+            })
+            .sum()
+    }
+
+    /// Where the transcript can be cut for compaction: the start of the
+    /// earliest user turn whose messages all fit in `keep_tokens`.
+    ///
+    /// Cutting at a user turn keeps every tool call and its result on the same
+    /// side of the split, so both halves stay valid request history. `None`
+    /// when nothing can be dropped, such as one turn over the whole budget.
+    pub fn compaction_split(&self, keep_tokens: u64) -> Option<usize> {
+        let mut used = 0u64;
+        let mut split = None;
+        for (index, message) in self.messages.iter().enumerate().rev() {
+            if message.role == Role::User && used <= keep_tokens {
+                split = Some(index);
+            }
+            used += Self::estimate_tokens(std::slice::from_ref(message));
+            if used > keep_tokens {
+                break;
+            }
+        }
+        split
+    }
+
+    /// Replace everything before `split` with one user message holding the
+    /// summary, so the model still sees what happened earlier.
+    pub fn compact(&mut self, split: usize, summary: String) {
+        if split == 0 || split > self.messages.len() || summary.trim().is_empty() {
+            return;
+        }
+        self.messages.drain(..split);
+        self.summary = Some(summary.clone());
+        self.messages
+            .insert(0, Message::new(Role::User, format!("Earlier conversation, summarized:\n\n{summary}")));
+    }
 }
 
 #[cfg(test)]
@@ -321,5 +383,35 @@ mod tests {
 
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].content, "write a file");
+    }
+
+    #[test]
+    fn compaction_cuts_at_a_user_turn_and_keeps_the_summary() {
+        let mut session = Session::new();
+        session.messages.push(Message::new(Role::User, "first"));
+        let mut assistant = Message::new(Role::Assistant, "");
+        assistant.tool_calls = Some(vec![ToolCall::new("call_1", "read_file", "{}")]);
+        session.messages.push(assistant);
+        session.messages.push(Message::tool_result("call_1", "ok"));
+        session.messages.push(Message::new(Role::User, "second"));
+        session.messages.push(Message::new(Role::Assistant, "answer"));
+
+        // A budget the whole history fits never splits.
+        assert_eq!(session.compaction_split(u64::MAX), Some(0));
+        // A tiny budget still lands on a user message, never mid tool pair.
+        let split = session.compaction_split(1).unwrap();
+        assert_eq!(session.messages[split].role, Role::User);
+
+        session.compact(split, "the user asked about files".to_owned());
+        assert_eq!(session.messages.len(), 3);
+        assert!(session.messages[0].content.contains("the user asked about files"));
+        assert_eq!(session.messages[1].content, "second");
+        assert_eq!(session.messages[2].content, "answer");
+        assert_eq!(session.summary.as_deref(), Some("the user asked about files"));
+
+        // Round-trips through the session file as an optional field.
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.summary.as_deref(), session.summary.as_deref());
     }
 }

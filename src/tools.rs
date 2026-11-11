@@ -24,13 +24,14 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 6] = [
+pub const TOOL_NAMES: [&str; 7] = [
     "list_dir",
     "read_file",
     "write_file",
     "edit_file",
     "run_command",
     "web_search",
+    "todo_write",
 ];
 
 #[derive(Debug)]
@@ -70,6 +71,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              true for anything destructive or hard to undo so the user is asked first. \
              Use web_search for anything newer than your knowledge or that needs current \
              facts, and cite the URL you used. \
+             For multi-step work or when the user asks for a todo list, maintain the \
+             checklist with todo_write: send the whole list each call, marking done items. \
              Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
@@ -220,6 +223,37 @@ pub fn definitions() -> Value {
                     "required": ["query"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "todo_write",
+                "description": "Write the workspace task checklist to todo.md. Rewrite the whole list each call: every item is an object with the task text and a done flag. Use it whenever the user asks for a todo list or a multi-step plan.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "description": "The full checklist.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "description": "The task."
+                                    },
+                                    "done": {
+                                        "type": "boolean",
+                                        "description": "Whether the task is finished. Defaults to false."
+                                    }
+                                },
+                                "required": ["text"]
+                            }
+                        }
+                    },
+                    "required": ["items"]
+                }
+            }
         }
     ])
 }
@@ -260,6 +294,14 @@ pub fn preview(call: &ToolCall) -> String {
         "edit_file" => string("path"),
         "run_command" => clip(&string("command"), 160),
         "web_search" => clip(&string("query"), 160),
+        "todo_write" => {
+            let items = arguments
+                .as_ref()
+                .and_then(|value| value.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            format!("{items} items")
+        }
         _ => clip(call.function.arguments.trim(), 160),
     }
 }
@@ -430,6 +472,7 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
         "edit_file" => edit_file(&call.function.arguments),
         "run_command" => run_command(&call.function.arguments),
         "web_search" => web_search(&call.function.arguments, web_key),
+        "todo_write" => todo_write(&call.function.arguments),
         other => bail!("unknown tool `{other}`"),
     }
 }
@@ -755,6 +798,53 @@ fn web_search(arguments: &str, api_key: Option<&str>) -> Result<String> {
     Ok(truncate_output(output))
 }
 
+#[derive(Deserialize)]
+struct TodoItemArgs {
+    text: String,
+    #[serde(default)]
+    done: bool,
+}
+
+#[derive(Deserialize)]
+struct TodoWriteArgs {
+    items: Vec<TodoItemArgs>,
+}
+
+const MAX_TODO_ITEMS: usize = 100;
+const MAX_TODO_TEXT: usize = 500;
+
+/// Rewrite the workspace checklist as `todo.md` with checkbox lines.
+///
+/// The model owns the list content: it sends the whole list every time, so the
+/// file is always a faithful mirror of what the model believes.
+fn todo_write(arguments: &str) -> Result<String> {
+    let args: TodoWriteArgs = parse(arguments)?;
+    if args.items.is_empty() {
+        bail!("items cannot be empty");
+    }
+    if args.items.len() > MAX_TODO_ITEMS {
+        bail!("too many items; the checklist is capped at {MAX_TODO_ITEMS}");
+    }
+    let mut file = String::new();
+    for item in &args.items {
+        let text = item.text.trim();
+        if text.is_empty() {
+            bail!("item text cannot be empty");
+        }
+        let text = clip(text, MAX_TODO_TEXT);
+        let mark = if item.done { "x" } else { " " };
+        file.push_str(&format!("- [{mark}] {text}\n"));
+    }
+    let path = workspace().join("todo.md");
+    fs::write(&path, file).with_context(|| format!("writing {}", path.display()))?;
+    let done = args.items.iter().filter(|item| item.done).count();
+    Ok(format!(
+        "todo.md written: {} item{} ({done} done)",
+        args.items.len(),
+        if args.items.len() == 1 { "" } else { "s" }
+    ))
+}
+
 fn workspace() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -888,6 +978,22 @@ mod tests {
         let empty = ToolCall::new("call_4", "web_search", r#"{"query":"  "}"#);
         let error = execute(&empty, Some("tvly-test")).unwrap_err().to_string();
         assert!(error.contains("query"));
+    }
+
+    #[test]
+    fn todo_write_rejects_an_empty_list_and_previews_the_count() {
+        use super::execute;
+        let empty = ToolCall::new("call_5", "todo_write", r#"{"items":[]}"#);
+        let error = execute(&empty, None).unwrap_err().to_string();
+        assert!(error.contains("items cannot be empty"));
+
+        let call = ToolCall::new(
+            "call_6",
+            "todo_write",
+            r#"{"items":[{"text":"a"},{"text":"b","done":true}]}"#,
+        );
+        assert_eq!(preview(&call), "2 items");
+        assert!(!requires_approval(&call));
     }
 
     #[test]

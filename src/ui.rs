@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -5,6 +7,8 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
@@ -102,7 +106,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let inner = padded(area, 2);
-    let right = if app.backend.model().is_empty() {
+    let mut right = if app.backend.model().is_empty() {
         format!("{} · {}", app.backend.provider_label(), app.spent_cost())
     } else {
         format!(
@@ -112,6 +116,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             app.spent_cost()
         )
     };
+    if app.context_tokens() > 0 {
+        right.push_str(&format!(" · ctx {}", format_tokens(app.context_tokens())));
+    }
     let right_width = (right.chars().count() as u16).min(inner.width / 2);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -223,8 +230,12 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         let (label, color) = match message.role {
             Role::User => ("you", MUTED),
-            Role::Assistant => ("yopes", ACCENT),
             Role::Tool => ("tool", MUTED),
+            // The label names the responding model, not the product.
+            Role::Assistant => {
+                let model = app.backend.model();
+                (if model.is_empty() { "yopes" } else { model }, ACCENT)
+            }
         };
         if message.role == Role::Tool {
             let start = lines.len();
@@ -666,7 +677,7 @@ fn frame_lines(
     // cap, and one separating space leave over.
     let total = inner_width + 4;
     let label = truncate(&label, total.saturating_sub(6));
-    let head = "╭─ ".len() + label.chars().count() + 1;
+    let head = "╭─ ".chars().count() + label.chars().count() + 1;
     lines.push(Line::from(vec![
         Span::styled(format!("╭─ {label} "), Style::default().fg(border)),
         Span::styled(
@@ -1371,10 +1382,83 @@ fn padded(area: Rect, horizontal: u16) -> Rect {
 }
 
 fn wrapped_line_count(text: &str, width: u16) -> usize {
-    let options = textwrap::Options::new(usize::from(width).max(1));
-    text.split('\n')
-        .map(|line| textwrap::wrap(line, &options).len().max(1))
-        .sum()
+    let width = usize::from(width).max(1);
+    text.split('\n').map(|line| wrapped_rows(line, width)).sum()
+}
+
+/// Rows ratatui's `WordWrapper { trim: false }` renders for one logical line.
+///
+/// A port of the width bookkeeping in ratatui 0.29 `process_input`: greedy word
+/// wrap, a word longer than the width splits across rows. textwrap disagrees on
+/// exactly those cases, and the click map must match what is drawn.
+fn wrapped_rows(line: &str, width: usize) -> usize {
+    let mut rows = 0usize;
+    let mut line_width = 0usize;
+    let mut word_width = 0usize;
+    let mut whitespace_width = 0usize;
+    let mut pending_whitespace: VecDeque<usize> = VecDeque::new();
+    let mut non_whitespace_previous = false;
+    let mut line_has_graphemes = false;
+    let mut word_has_graphemes = false;
+
+    for grapheme in line.graphemes(true) {
+        let is_whitespace = grapheme.chars().all(char::is_whitespace);
+        let symbol_width = grapheme.width();
+        if symbol_width > width {
+            continue;
+        }
+
+        let word_found = non_whitespace_previous && is_whitespace;
+        let untrimmed_overflow =
+            !line_has_graphemes && word_width + whitespace_width + symbol_width > width;
+        if word_found || untrimmed_overflow {
+            line_width += whitespace_width + word_width;
+            line_has_graphemes = true;
+            whitespace_width = 0;
+            word_width = 0;
+            word_has_graphemes = false;
+            pending_whitespace.clear();
+        }
+
+        let line_full = line_width >= width;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= width;
+        if line_full || pending_word_overflow {
+            rows += 1;
+            let mut remaining = width.saturating_sub(line_width);
+            line_width = 0;
+            line_has_graphemes = false;
+            while let Some(&first) = pending_whitespace.front() {
+                if first > remaining {
+                    break;
+                }
+                whitespace_width -= first;
+                remaining -= first;
+                pending_whitespace.pop_front();
+            }
+            if is_whitespace && pending_whitespace.is_empty() {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width += symbol_width;
+            pending_whitespace.push_back(symbol_width);
+        } else {
+            word_width += symbol_width;
+            word_has_graphemes = true;
+        }
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    if !line_has_graphemes && !word_has_graphemes && !pending_whitespace.is_empty() {
+        rows += 1;
+    }
+    line_has_graphemes = line_has_graphemes || !pending_whitespace.is_empty() || word_has_graphemes;
+    if line_has_graphemes {
+        rows += 1;
+    }
+    rows.max(1)
 }
 
 #[cfg(test)]

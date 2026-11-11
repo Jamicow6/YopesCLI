@@ -20,6 +20,11 @@ use crate::{
 
 const MAX_TOOL_ROUNDS: usize = 24;
 
+/// Estimated prompt tokens that trigger compaction of older turns.
+const COMPACTION_THRESHOLD_TOKENS: u64 = 32_000;
+/// Tokens of recent history kept intact when compaction runs.
+const COMPACTION_KEEP_TOKENS: u64 = 12_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoticeKind {
     Info,
@@ -94,6 +99,21 @@ struct ActiveRequest {
     prompt_tokens: u64,
     usage: Option<(u64, u64)>,
     tool_progress: Option<(String, String, u64)>,
+    /// Set while this request summarizes older turns instead of replying.
+    compacting: Option<Compaction>,
+}
+
+/// A compaction in flight: which history prefix it summarizes and the text
+/// streamed back so far.
+struct Compaction {
+    split: usize,
+    text: String,
+}
+
+/// A compaction in flight: which turns it covers and the summary so far.
+struct Compaction {
+    split: usize,
+    text: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -864,6 +884,11 @@ impl App {
         )
     }
 
+    /// Estimated tokens the next request would send, the context window load.
+    pub fn context_tokens(&self) -> u64 {
+        Session::estimate_tokens(&self.session.messages)
+    }
+
     pub fn palette_matches(&self) -> Vec<&'static CommandSpec> {
         if self.palette_hidden {
             return Vec::new();
@@ -1290,8 +1315,7 @@ impl App {
             self.save_session();
             return Action::None;
         }
-        let messages = self.session.messages.clone();
-        self.begin_request(messages)
+        self.begin_turn()
     }
 
     fn handle_connect_key(&mut self, key: KeyEvent) -> Action {
@@ -2153,6 +2177,15 @@ impl App {
             self.info("Finish or stop the response before running a command.");
             return Action::None;
         }
+        if steering
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.compacting.is_some())
+        {
+            self.info("Wait for compaction to finish.");
+            return Action::None;
+        }
         let value = self.input.take();
         self.reset_palette();
         let prompt = value.trim();
@@ -2177,14 +2210,42 @@ impl App {
             self.remove_empty_response();
         }
         self.session.messages.push(Message::new(Role::User, value));
-        let messages = self.session.messages.clone();
-        self.begin_request(messages)
+        self.begin_turn()
     }
 
-    fn begin_request(&mut self, messages: Vec<Message>) -> Action {
-        self.session
-            .messages
-            .push(Message::new(Role::Assistant, ""));
+    /// Start the next turn: when the history outgrows the context budget,
+    /// summarize the older turns first, then send the real request.
+    fn begin_turn(&mut self) -> Action {
+        let total = Session::estimate_tokens(&self.session.messages);
+        if total > COMPACTION_THRESHOLD_TOKENS {
+            if let Some(split) = self.session.compaction_split(COMPACTION_KEEP_TOKENS) {
+                if split > 0 {
+                    return self.begin_compaction(split);
+                }
+            }
+        }
+        let messages = self.session.messages.clone();
+        self.begin_request(messages, None)
+    }
+
+    /// Summarize everything before `split`, then continue with the turn.
+    fn begin_compaction(&mut self, split: usize) -> Action {
+        let mut messages = self.session.messages[..split].to_vec();
+        messages.push(Message::new(
+            Role::User,
+            "Summarize the conversation above for an assistant taking over: what the user wants, decisions made, files changed, and anything still unfinished. Reply with the summary only.",
+        ));
+        self.begin_request(messages, Some(split))
+    }
+
+    fn begin_request(&mut self, messages: Vec<Message>, compacting: Option<usize>) -> Action {
+        // A compaction request streams into its own buffer, not the transcript,
+        // so no reply placeholder is pushed.
+        if compacting.is_none() {
+            self.session
+                .messages
+                .push(Message::new(Role::Assistant, ""));
+        }
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id;
         let tools_enabled = self.tools_mode.advertised();
@@ -2210,6 +2271,10 @@ impl App {
             prompt_tokens: prompt_chars as u64 / 4,
             usage: None,
             tool_progress: None,
+            compacting: compacting.map(|split| Compaction {
+                split,
+                text: String::new(),
+            }),
         });
         self.follow_tail = true;
         self.save_session();
@@ -2320,6 +2385,12 @@ impl App {
         let Some(active) = self.active.take() else {
             return Action::None;
         };
+        if active.compacting.is_some() {
+            // The queued turn never started, so there is nothing to finish.
+            self.info("Compaction stopped. Send another message to continue.");
+            self.save_session();
+            return Action::Cancel(active.id);
+        }
         self.discard_pending_tools("The user stopped the response before this tool could run.");
         self.tool_rounds = 0;
         self.remove_empty_response();
@@ -2333,7 +2404,11 @@ impl App {
             StreamEvent::Delta { request_id, text }
                 if self.active_request_id() == Some(request_id) =>
             {
-                if let Some(message) = self.session.messages.last_mut() {
+                if let Some(compaction) =
+                    self.active.as_mut().and_then(|active| active.compacting.as_mut())
+                {
+                    compaction.text.push_str(&text);
+                } else if let Some(message) = self.session.messages.last_mut() {
                     message.content.push_str(&text);
                 }
                 Action::None
@@ -2341,8 +2416,15 @@ impl App {
             StreamEvent::Reasoning { request_id, text }
                 if self.active_request_id() == Some(request_id) =>
             {
-                if let Some(message) = self.session.messages.last_mut() {
-                    message.reasoning.push_str(&text);
+                // A compaction summary is content only; reasoning is ignored.
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.compacting.is_none())
+                {
+                    if let Some(message) = self.session.messages.last_mut() {
+                        message.reasoning.push_str(&text);
+                    }
                 }
                 Action::None
             }
@@ -2370,7 +2452,11 @@ impl App {
                 Action::None
             }
             StreamEvent::ToolCalls { request_id, calls }
-                if self.active_request_id() == Some(request_id) =>
+                if self.active_request_id() == Some(request_id)
+                    && self
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.compacting.is_none()) =>
             {
                 if let Some(message) = self.session.messages.last_mut() {
                     if message.role == Role::Assistant {
@@ -2389,6 +2475,23 @@ impl App {
                     self.spent_prompt_tokens = self.spent_prompt_tokens.saturating_add(prompt);
                     self.spent_completion_tokens =
                         self.spent_completion_tokens.saturating_add(completion);
+                }
+                // A finished compaction folds the summary in, then the queued
+                // turn starts against the now-small history.
+                let compacted = self
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.compacting.as_ref())
+                    .map(|compaction| (compaction.split, compaction.text.clone()));
+                if let Some((split, summary)) = compacted {
+                    self.active = None;
+                    if summary.trim().is_empty() {
+                        self.info("Compaction returned nothing; sending the full history.");
+                    } else {
+                        self.session.compact(split, summary);
+                    }
+                    self.save_session();
+                    return self.begin_turn();
                 }
                 // Record what the reply cost and how long it took, so the
                 // transcript can show it under the finished message.
@@ -2425,7 +2528,19 @@ impl App {
                 request_id,
                 message,
             } if self.active_request_id() == Some(request_id) => {
+                let compacting = self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.compacting.is_some());
                 self.active = None;
+                if compacting {
+                    // The queued turn never started, so continue without the
+                    // summary instead of failing it too.
+                    self.info("Compaction failed; sending the full history.");
+                    self.save_session();
+                    let messages = self.session.messages.clone();
+                    return self.begin_request(messages, None);
+                }
                 self.discard_pending_tools("The response failed before this tool call could run.");
                 self.tool_rounds = 0;
                 self.remove_empty_response();
