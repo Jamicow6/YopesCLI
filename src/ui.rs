@@ -1018,7 +1018,8 @@ fn tool_result_lines(
 
     let label = truncate(
         report
-            .map(|report| report.diff.path.clone())
+            .and_then(|report| report.diffs.first())
+            .map(|diff| diff.path.clone())
             .or(label)
             .unwrap_or_else(|| "tool".to_owned())
             .as_str(),
@@ -1084,10 +1085,21 @@ fn frame_lines(
     lines
 }
 
-/// The diff under a tool result: a file header, then the change itself.
+/// The diffs under a tool result: per file, a header then the change, with a
+/// blank line between files.
 fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
-    let diff = &report.diff;
+    let mut lines = Vec::new();
+    for (index, diff) in report.diffs.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
+        lines.extend(change_file_lines(diff, width, report.side_by_side));
+    }
+    lines
+}
+
+fn change_file_lines(diff: &FileDiff, width: usize, side_by_side: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut spans = vec![Span::styled(
         truncate(&diff.path, width.saturating_sub(22)),
@@ -1113,7 +1125,7 @@ fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
         ));
         return lines;
     }
-    if report.side_by_side {
+    if side_by_side {
         lines.extend(side_by_side_lines(diff, width));
     } else {
         lines.extend(unified_lines(diff, width));
@@ -1149,12 +1161,15 @@ fn approval_lines(approval: &ToolApproval, width: usize, side_by_side: bool) -> 
             break;
         }
     }
-    if shown == 0 && approval.diff.is_none() {
+    if shown == 0 && approval.diffs.is_empty() {
         lines.push(Line::styled("$", Style::default().fg(TEXT)));
     }
-    if let Some(diff) = &approval.diff {
+    for (index, diff) in approval.diffs.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
         let report = ChangeReport {
-            diff: diff.clone(),
+            diffs: vec![diff.clone()],
             side_by_side,
         };
         lines.append(&mut change_lines(&report, width));
@@ -1906,7 +1921,7 @@ mod tests {
         let approval = ToolApproval {
             call,
             note: Some("old_text was not found; the edit will fail.".to_owned()),
-            diff: Some(FileDiff::new("hello.txt", "", "hi\n", true)),
+            diffs: vec![FileDiff::new("hello.txt", "", "hi\n", true)],
             scroll: 0,
             page_height: 0,
         };
