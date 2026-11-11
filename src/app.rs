@@ -222,7 +222,12 @@ impl Mode {
     /// An instruction appended to the system prompt for this turn.
     pub fn instruction(self) -> Option<&'static str> {
         match self {
-            Self::Build => None,
+            // Build also states its mode: without a note, nothing tells the
+            // model that plan mode ended, and it keeps gating itself.
+            Self::Build => Some(
+                "BUILD MODE: changes may be applied. Use the tools to write files, edit files, \
+                 and run commands as the user asked, subject to the approval rules above.",
+            ),
             Self::Plan => Some(
                 "PLAN MODE: research and propose a plan only. Do not write files, edit files, \
                  or run commands; the user will switch to build mode to apply changes. Reading \
@@ -3747,7 +3752,11 @@ mod tests {
                 .instruction()
                 .is_some_and(|note| note.contains("PLAN"))
         );
-        assert_eq!(Mode::Build.instruction(), None);
+        assert!(
+            Mode::Build
+                .instruction()
+                .is_some_and(|note| note.contains("BUILD"))
+        );
     }
 
     #[test]
