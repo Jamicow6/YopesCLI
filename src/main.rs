@@ -68,6 +68,8 @@ async fn run() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let (tool_sender, mut tool_receiver) = mpsc::unbounded_channel::<ToolEvent>();
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
+    let (paste_sender, mut paste_receiver) =
+        mpsc::unbounded_channel::<Result<(String, String), String>>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     // Ctrl+C is a key in raw mode, but a real interrupt must also work when the
@@ -110,6 +112,7 @@ async fn run() -> Result<()> {
                             &sender,
                             &tool_sender,
                             &catalog_sender,
+                            &paste_sender,
                             &mut active_task,
                         );
                     }
@@ -143,6 +146,7 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
+                    &paste_sender,
                     &mut active_task,
                 );
             }
@@ -155,6 +159,7 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
+                    &paste_sender,
                     &mut active_task,
                 );
             }
@@ -162,6 +167,10 @@ async fn run() -> Result<()> {
                 if let Some(result) = result {
                     app.on_catalog(result);
                 }
+            }
+            result = paste_receiver.recv() => {
+                let Some(result) = result else { break; };
+                app.on_paste_image(result);
             }
             _ = &mut interrupt => break,
             _ = term_signal.as_mut() => break,
@@ -182,6 +191,7 @@ fn dispatch(
     events: &mpsc::UnboundedSender<StreamEvent>,
     tool_events: &mpsc::UnboundedSender<ToolEvent>,
     catalog_events: &mpsc::UnboundedSender<FetchResult>,
+    paste_events: &mpsc::UnboundedSender<Result<(String, String), String>>,
     active_task: &mut Option<(u64, JoinHandle<()>)>,
 ) {
     match action {
@@ -206,6 +216,16 @@ fn dispatch(
             *active_task = Some((request_id, task));
         }
         Action::Cancel(request_id) => cancel_task(active_task, request_id),
+        Action::PasteImage => {
+            let sender = paste_sender.clone();
+            tokio::spawn(async move {
+                let read = tokio::task::spawn_blocking(read_clipboard_image)
+                    .await
+                    .map_err(|error| format!("paste task failed: {error:#}"))
+                    .and_then(|result| result);
+                let _ = sender.send(read);
+            });
+        }
         Action::RunTool { call } => {
             let sender = tool_events.clone();
             let web_key = app.tavily_key().map(str::to_owned);
@@ -239,6 +259,41 @@ fn ctrl_c_interrupt() -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async {
         let _ = tokio::signal::ctrl_c().await;
     })
+}
+
+/// Read the clipboard as a PNG via PowerShell, returning its base64 text.
+///
+/// PowerShell encodes the image itself so binary data never crosses stdout,
+/// which Windows PowerShell would otherwise re-encode.
+#[cfg(windows)]
+fn read_clipboard_image() -> Result<(String, String)> {
+    use std::process::Command as ProcessCommand;
+
+    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; \
+        Add-Type -AssemblyName System.Drawing; \
+        $img = [System.Windows.Forms.Clipboard]::GetImage(); \
+        if ($img -eq $null) { exit 2 } \
+        $ms = New-Object System.IO.MemoryStream; \
+        $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); \
+        [Convert]::ToBase64String($ms.ToArray())";
+    let output = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", SCRIPT])
+        .output()
+        .context("running powershell to read the clipboard")?;
+    if output.status.code() == Some(2) {
+        bail!("the clipboard does not hold an image");
+    }
+    let encoded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || encoded.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim();
+        bail!("could not read the clipboard image: {stderr}");
+    }
+    Ok(("paste".to_owned(), encoded))
+}
+
+#[cfg(not(windows))]
+fn read_clipboard_image() -> Result<(String, String)> {
+    bail!("image paste is currently only supported on windows")
 }
 
 fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64) {

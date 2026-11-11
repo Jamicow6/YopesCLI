@@ -8,13 +8,17 @@ use anyhow::Result;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::{
+    style::{Color, Style},
+    text::{Line, Span},
+};
 
 use crate::{
     backend::{Backend, StreamEvent},
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
-    session::{self, Message, Role, Session, ToolCall},
+    session::{self, ImageAttachment, Message, Role, Session, ToolCall},
     tools,
 };
 
@@ -210,6 +214,53 @@ impl Mode {
             Self::Chat => Some("CHAT MODE: tools are disabled. Answer in plain text."),
         }
     }
+}
+
+/// Half-block pixel art of a pasted image: each TUI row shows two pixel
+/// lines at once, through `▄` glyphs with per-span foreground and background.
+fn build_image_rows(encoded: &str, cols: u16) -> Vec<Line<'static>> {
+    let unreadable = || {
+        Line::styled(
+            " (image could not be shown)",
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+        Ok(bytes) => bytes,
+        Err(_) => return vec![unreadable()],
+    };
+    let rendered = match image::load_from_memory(&decoded) {
+        Ok(image) => image.into_rgba8(),
+        Err(_) => return vec![unreadable()],
+    };
+    let cols = usize::from(cols).max(4);
+    let (width, height) = (rendered.width().max(1), rendered.height().max(1));
+    // Cells are twice as wide as tall, and one `▄` carries two pixel rows,
+    // so two pixels per cell in both directions keep the aspect square.
+    let row_pairs =
+        ((u64::from(height) * u64::from(cols)) / u64::from(width) / 2).clamp(1, 18) as u32;
+    let scaled = image::imageops::thumbnail(&rendered, (cols * 2) as u32, row_pairs * 2);
+    let mut rows = Vec::with_capacity(row_pairs as usize);
+    for pair in 0..row_pairs {
+        let top_y = (pair * 2).min(scaled.height() - 1);
+        let bottom_y = (top_y + 1).min(scaled.height() - 1);
+        let mut spans = Vec::with_capacity(cols);
+        for x in 0..scaled.width() {
+            spans.push(Span::styled(
+                "▄",
+                Style::default()
+                    .fg(pixel_color(scaled.get_pixel(x, bottom_y)))
+                    .bg(pixel_color(scaled.get_pixel(x, top_y))),
+            ));
+        }
+        rows.push(Line::from(spans));
+    }
+    rows
+}
+
+fn pixel_color(pixel: &image::Rgba<u8>) -> Color {
+    let [red, green, blue, _] = pixel.0;
+    Color::Rgb(red, green, blue)
 }
 
 pub struct ToolApproval {
@@ -709,6 +760,8 @@ pub enum Action {
     RunTool {
         call: ToolCall,
     },
+    /// Read the clipboard on Ctrl+V and attach an image when it holds one.
+    PasteImage,
     Quit,
     LoadCatalog,
 }
@@ -818,6 +871,14 @@ pub struct App {
     pub tools_mode: ToolsMode,
     /// What the current turn is for: applying changes, planning, or chat.
     pub mode: Mode,
+    /// Images pasted with Ctrl+V, sent with the next submitted message.
+    pub attachments: Vec<ImageAttachment>,
+    /// Counter giving each pasted image a unique display name.
+    next_image: usize,
+    /// Pre-rendered half-block rows of pasted images, keyed `name:width`.
+    image_rows: HashMap<String, Vec<Line<'static>>>,
+    /// Terminal width the cached image rows were rendered for.
+    image_width: u16,
     pub approval: Option<ToolApproval>,
     pub running_tool: Option<RunningTool>,
     /// Diffs for write and edit calls, shown under their results.
@@ -870,6 +931,10 @@ impl App {
             spinner: 0,
             tools_mode: ToolsMode::default(),
             mode: Mode::default(),
+            attachments: Vec::new(),
+            next_image: 0,
+            image_rows: HashMap::new(),
+            image_width: 0,
             approval: None,
             running_tool: None,
             changes: HashMap::new(),
@@ -895,6 +960,54 @@ impl App {
 
     pub fn connect_state(&self) -> Option<&ConnectState> {
         self.connect.as_ref()
+    }
+
+    /// An image arrived from the clipboard: queue it and confirm briefly.
+    pub fn on_paste_image(&mut self, result: Result<(String, String), String>) -> Action {
+        match result {
+            Ok((_, data)) => {
+                let name = format!("paste-{}.png", self.next_image);
+                self.next_image += 1;
+                self.attachments.push(ImageAttachment { name, data });
+                self.info(format!(
+                    "Image {} attached — send it with the next message.",
+                    self.attachments.len()
+                ));
+            }
+            Err(error) => self.error(error),
+        }
+        Action::None
+    }
+
+    /// Render any not-yet-cached pasted image for a terminal width.
+    ///
+    /// The transcript loop only reads the session, so rows are prepared here
+    /// beforehand and the loop then extends its lines from this cache.
+    pub fn warm_image_cache(&mut self, width: u16) {
+        if self.image_width != width {
+            self.image_rows.clear();
+            self.image_width = width;
+        }
+        if self.image_rows.len() > 40 {
+            self.image_rows.clear();
+        }
+        let mut rows = std::mem::take(&mut self.image_rows);
+        for message in &self.session.messages {
+            for image in &message.images {
+                let key = format!("{}:{width}", image.name);
+                rows.entry(key)
+                    .or_insert_with(|| build_image_rows(&image.data, width));
+            }
+        }
+        self.image_rows = rows;
+    }
+
+    /// The cached half-block rows of one pasted image, if rendered for the
+    /// current terminal width.
+    pub fn cached_image(&self, name: &str) -> Option<&[Line<'static>]> {
+        self.image_rows
+            .get(&format!("{name}:{}", self.image_width))
+            .map(Vec::as_slice)
     }
 
     pub fn tavily_key(&self) -> Option<&str> {
@@ -1185,6 +1298,9 @@ impl App {
                     self.mode.label()
                 ));
                 Action::None
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::PasteImage
             }
             KeyCode::Backspace => {
                 self.input.backspace();
@@ -2324,7 +2440,7 @@ impl App {
         let value = self.input.take();
         self.reset_palette();
         let prompt = value.trim();
-        if prompt.is_empty() {
+        if prompt.is_empty() && self.attachments.is_empty() {
             return Action::None;
         }
         if prompt.starts_with('/') {
@@ -2344,7 +2460,9 @@ impl App {
             self.discard_pending_tools("The user steered the response before this tool could run.");
             self.remove_empty_response();
         }
-        self.session.messages.push(Message::new(Role::User, value));
+        let mut message = Message::new(Role::User, value);
+        message.images = std::mem::take(&mut self.attachments);
+        self.session.messages.push(message);
         self.begin_turn()
     }
 
@@ -3007,5 +3125,23 @@ mod tests {
                 .is_some_and(|note| note.contains("PLAN"))
         );
         assert_eq!(Mode::Build.instruction(), None);
+    }
+
+    #[test]
+    fn an_image_renders_as_half_block_pixel_rows() {
+        let png = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(2, 2, |_, _| {
+            image::Rgb([255u8, 0, 0])
+        }));
+        let mut bytes = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut bytes);
+        png.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        let rows = build_image_rows(&data, 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].spans.len(), 4);
+        assert_eq!(rows[0].spans[0].content, "▄");
+        assert_eq!(rows[0].spans[0].style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(rows[0].spans[3].style.fg, Some(Color::Rgb(255, 0, 0)));
     }
 }
