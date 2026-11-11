@@ -694,7 +694,10 @@ const MAX_WEB_RESULTS: usize = 10;
 /// `spawn_blocking`, not on the async runtime.
 fn web_search(arguments: &str, api_key: Option<&str>) -> Result<String> {
     let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
-        bail!("web search is not configured; set TAVILY_API_KEY");
+        bail!(
+            "web search is not configured; add tavily_api_key to the config or set \
+             TAVILY_API_KEY, then restart yopes"
+        );
     };
     let args: WebSearchArgs = parse(arguments)?;
     let query = args.query.trim();
