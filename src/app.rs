@@ -161,6 +161,57 @@ impl ToolsMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Mode {
+    /// Apply changes: tools follow the /tools setting as usual.
+    #[default]
+    Build,
+    /// Research and propose only; writes and commands are blocked.
+    Plan,
+    /// Plain conversation; tools are not offered or run.
+    Chat,
+}
+
+impl Mode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Plan => "plan",
+            Self::Chat => "chat",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Build => Self::Plan,
+            Self::Plan => Self::Chat,
+            Self::Chat => Self::Build,
+        }
+    }
+
+    /// Tool names the model may not call in this mode.
+    pub fn denied(self, tool: &str) -> bool {
+        match self {
+            Self::Build => false,
+            Self::Plan => matches!(tool, "write_file" | "edit_file" | "run_command"),
+            Self::Chat => true,
+        }
+    }
+
+    /// An instruction appended to the system prompt for this turn.
+    pub fn instruction(self) -> Option<&'static str> {
+        match self {
+            Self::Build => None,
+            Self::Plan => Some(
+                "PLAN MODE: research and propose a plan only. Do not write files, edit files, \
+                 or run commands; the user will switch to build mode to apply changes. Reading \
+                 files, listing directories, and web search stay allowed.",
+            ),
+            Self::Chat => Some("CHAT MODE: tools are disabled. Answer in plain text."),
+        }
+    }
+}
+
 pub struct ToolApproval {
     pub call: ToolCall,
     pub note: Option<String>,
@@ -651,6 +702,8 @@ pub enum Action {
         request_id: u64,
         messages: Vec<Message>,
         tools_enabled: bool,
+        /// Mode instruction appended to the system prompt for this request.
+        mode_note: Option<&'static str>,
     },
     Cancel(u64),
     RunTool {
@@ -763,6 +816,8 @@ pub struct App {
     pub notice: Option<Notice>,
     pub spinner: usize,
     pub tools_mode: ToolsMode,
+    /// What the current turn is for: applying changes, planning, or chat.
+    pub mode: Mode,
     pub approval: Option<ToolApproval>,
     pub running_tool: Option<RunningTool>,
     /// Diffs for write and edit calls, shown under their results.
@@ -814,6 +869,7 @@ impl App {
             notice: None,
             spinner: 0,
             tools_mode: ToolsMode::default(),
+            mode: Mode::default(),
             approval: None,
             running_tool: None,
             changes: HashMap::new(),
@@ -1122,6 +1178,14 @@ impl App {
                 self.palette_complete();
                 Action::None
             }
+            KeyCode::Tab => {
+                self.mode = self.mode.next();
+                self.info(format!(
+                    "Mode: {} — Tab again to cycle build · plan · chat",
+                    self.mode.label()
+                ));
+                Action::None
+            }
             KeyCode::Backspace => {
                 self.input.backspace();
                 self.reset_palette();
@@ -1301,6 +1365,20 @@ impl App {
         let Some(call) = self.pending_tools.front().cloned() else {
             return self.continue_after_tools();
         };
+        if self.mode.denied(&call.function.name) {
+            self.pending_tools.pop_front();
+            self.record_tool_result(
+                call.id,
+                format!(
+                    "This tool call was blocked: {} mode only proposes work. Switch to build \
+                     mode (Tab) to let changes run.",
+                    self.mode.label()
+                ),
+            );
+            self.follow_tail = true;
+            self.save_session();
+            return self.advance_tools();
+        }
         if self.tools_mode.needs_approval(&call, &self.approved_tools) {
             let change = tools::change_preview(&call);
             self.approval = Some(ToolApproval {
@@ -2305,8 +2383,10 @@ impl App {
         }
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id;
-        let tools_enabled = self.tools_mode.advertised();
+        let tools_enabled = self.mode != Mode::Chat && self.tools_mode.advertised();
+        let mode_note = self.mode.instruction();
         let prompt_chars = tools::system_prompt(tools_enabled).chars().count()
+            + mode_note.map_or(0, |note| note.chars().count() + 2)
             + messages
                 .iter()
                 .map(|message| {
@@ -2339,6 +2419,7 @@ impl App {
             request_id,
             messages,
             tools_enabled,
+            mode_note,
         }
     }
 
@@ -2904,5 +2985,27 @@ mod tests {
         assert!(connect.remove_selected_model().is_none());
         assert_eq!(connect.custom_models.len(), 1);
         assert_eq!(connect.custom_models[0].id, "two");
+    }
+
+    #[test]
+    fn the_mode_cycle_and_denials_match_the_labels() {
+        use super::Mode;
+        assert_eq!(Mode::default(), Mode::Build);
+        assert_eq!(Mode::Build.next(), Mode::Plan);
+        assert_eq!(Mode::Plan.next(), Mode::Chat);
+        assert_eq!(Mode::Chat.next(), Mode::Build);
+        assert!(!Mode::Build.denied("write_file"));
+        assert!(!Mode::Plan.denied("read_file"));
+        assert!(!Mode::Plan.denied("web_search"));
+        assert!(Mode::Plan.denied("write_file"));
+        assert!(Mode::Plan.denied("edit_file"));
+        assert!(Mode::Plan.denied("run_command"));
+        assert!(Mode::Chat.denied("read_file"));
+        assert!(
+            Mode::Plan
+                .instruction()
+                .is_some_and(|note| note.contains("PLAN"))
+        );
+        assert_eq!(Mode::Build.instruction(), None);
     }
 }

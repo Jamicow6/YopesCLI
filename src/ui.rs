@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
-        NoticeKind, ToolApproval, format_bytes, format_tokens,
+        Mode, NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
     diff::{ChangeKind, DiffLine, FileDiff},
     session::{Message, Role, Usage},
@@ -510,7 +510,16 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             },
         )
     } else {
-        ("enter send · / commands · F1 help".to_owned(), MUTED)
+        // The mode is the idle status's first word: Tab cycles build · plan · chat.
+        let text = format!(
+            "mode {} · enter send · / commands · F1 help",
+            app.mode.label()
+        );
+        let color = match app.mode {
+            Mode::Build => MUTED,
+            _ => ACCENT,
+        };
+        (text, color)
     };
     frame.render_widget(
         Paragraph::new(text).style(Style::default().fg(color)),

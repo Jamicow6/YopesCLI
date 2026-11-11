@@ -137,6 +137,7 @@ impl Backend {
         request_id: u64,
         messages: Vec<Message>,
         tools_enabled: bool,
+        mode_note: Option<&'static str>,
         events: mpsc::UnboundedSender<StreamEvent>,
     ) {
         let tooling =
@@ -146,10 +147,13 @@ impl Backend {
                 "no provider connected; run /connect to get started"
             )),
             ProviderKind::OpenAi | ProviderKind::Custom => {
-                self.stream_openai(request_id, &messages, tooling, &events)
+                self.stream_openai(request_id, &messages, tooling, mode_note, &events)
                     .await
             }
-            ProviderKind::Ollama => self.stream_ollama(request_id, &messages, &events).await,
+            ProviderKind::Ollama => {
+                self.stream_ollama(request_id, &messages, mode_note, &events)
+                    .await
+            }
         };
         match result {
             Ok(()) => {
@@ -169,11 +173,12 @@ impl Backend {
         request_id: u64,
         messages: &[Message],
         tooling: bool,
+        mode_note: Option<&'static str>,
         events: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let mut request = serde_json::json!({
             "model": self.model,
-            "messages": request_messages(messages, tooling)?,
+            "messages": request_messages(messages, tooling, mode_note)?,
             "stream": true,
             "stream_options": { "include_usage": true },
         });
@@ -213,11 +218,12 @@ impl Backend {
         &self,
         request_id: u64,
         messages: &[Message],
+        mode_note: Option<&'static str>,
         events: &mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let request = serde_json::json!({
             "model": self.model,
-            "messages": request_messages(messages, false)?,
+            "messages": request_messages(messages, false, mode_note)?,
             "stream": true,
         });
         let response = send_with_retry("Ollama", || {
@@ -245,11 +251,20 @@ fn completion_url(base_url: &str) -> String {
     }
 }
 
-fn request_messages(messages: &[Message], tooling: bool) -> Result<Vec<serde_json::Value>> {
+fn request_messages(
+    messages: &[Message],
+    tooling: bool,
+    mode_note: Option<&'static str>,
+) -> Result<Vec<serde_json::Value>> {
     let mut request = Vec::with_capacity(messages.len() + 1);
+    let mut system = tools::system_prompt(tooling);
+    if let Some(note) = mode_note {
+        system.push_str("\n\n");
+        system.push_str(note);
+    }
     request.push(serde_json::json!({
         "role": "system",
-        "content": tools::system_prompt(tooling),
+        "content": system,
     }));
     for message in messages {
         if message.role == Role::Tool && !tooling {
@@ -778,12 +793,12 @@ mod tests {
             Message::tool_result("call_1", "contents"),
         ];
 
-        let tooling = request_messages(&messages, true).unwrap();
+        let tooling = request_messages(&messages, true, None).unwrap();
         assert_eq!(tooling[0]["role"], "system");
         assert_eq!(tooling[2]["tool_calls"][0]["function"]["name"], "read_file");
         assert_eq!(tooling[3]["tool_call_id"], "call_1");
 
-        let plain = request_messages(&messages, false).unwrap();
+        let plain = request_messages(&messages, false, None).unwrap();
         assert!(
             plain
                 .iter()
@@ -794,6 +809,23 @@ mod tests {
                 .as_str()
                 .is_some_and(|content| content.contains("Tool result"))
         }));
+    }
+
+    #[test]
+    fn the_mode_instruction_lands_in_the_system_prompt() {
+        let messages = vec![Message::new(Role::User, "hi")];
+        let plain = request_messages(&messages, true, None).unwrap();
+        let plan = request_messages(&messages, true, Some("PLAN MODE: propose only")).unwrap();
+        assert!(
+            !plain[0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("PLAN MODE"))
+        );
+        assert!(
+            plan[0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("PLAN MODE: propose only"))
+        );
     }
 
     #[test]
