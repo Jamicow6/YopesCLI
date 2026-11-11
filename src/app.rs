@@ -5,7 +5,9 @@ use std::{
 };
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::{
     backend::{Backend, StreamEvent},
@@ -115,10 +117,10 @@ impl ToolsMode {
 
     pub const fn detail(self) -> &'static str {
         match self {
-            Self::On => "reads run automatically; writes and commands ask",
+            Self::On => "edits run automatically; commands the model flags as risky ask",
             Self::Off => "tools are not offered to the model",
             Self::Auto => "all tool calls run automatically",
-            Self::Ask => "every tool call asks for approval",
+            Self::Ask => "every command the model flags as risky asks",
         }
     }
 
@@ -136,29 +138,29 @@ impl ToolsMode {
         !matches!(self, Self::Off)
     }
 
-    fn needs_approval(self, tool: &str, approved: &HashSet<String>) -> bool {
+    fn needs_approval(self, call: &ToolCall, approved: &HashSet<String>) -> bool {
         match self {
             Self::Off | Self::Auto => false,
-            Self::Ask => true,
-            Self::On => tools::requires_approval(tool) && !approved.contains(tool),
+            Self::Ask => tools::requires_approval(call),
+            Self::On => tools::requires_approval(call) && !approved.contains(&call.function.name),
         }
     }
 }
 
 pub struct ToolApproval {
     pub call: ToolCall,
-    pub diff: Option<FileDiff>,
-    /// File contents before the change, kept to show the outcome diff.
-    pub before: Option<String>,
     pub note: Option<String>,
     pub scroll: usize,
     pub page_height: u16,
-    pub side_by_side: bool,
 }
 
 pub struct RunningTool {
     pub call: ToolCall,
     pub started: Instant,
+    /// File contents from before the call, kept for the outcome diff.
+    pub before: Option<String>,
+    /// Whether the write or edit target existed before the call ran.
+    pub existed: bool,
 }
 
 pub struct ToolEvent {
@@ -669,6 +671,10 @@ pub struct App {
     pub running_tool: Option<RunningTool>,
     /// Diffs for write and edit calls, shown under their results.
     pub changes: HashMap<String, ChangeReport>,
+    /// Tool results the user expanded to see the full output.
+    pub expanded: HashSet<String>,
+    /// Screen row of each collapsible tool output, for click detection.
+    pub output_rows: Vec<(u16, String)>,
     /// Unified or side-by-side diff view, kept across approvals and results.
     pub diff_sides: bool,
     active: Option<ActiveRequest>,
@@ -708,6 +714,8 @@ impl App {
             approval: None,
             running_tool: None,
             changes: HashMap::new(),
+            expanded: HashSet::new(),
+            output_rows: Vec::new(),
             diff_sides: true,
             active: None,
             next_request_id: 0,
@@ -889,7 +897,23 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(3),
             MouseEventKind::ScrollDown => self.scroll_down(3),
+            MouseEventKind::Down(MouseButton::Left) => self.toggle_output_at(mouse.row),
             _ => {}
+        }
+    }
+
+    /// Expand or collapse the tool output drawn on a screen row.
+    fn toggle_output_at(&mut self, row: u16) {
+        let Some((_, call_id)) = self
+            .output_rows
+            .iter()
+            .find(|(line, _)| *line == row)
+            .cloned()
+        else {
+            return;
+        };
+        if !self.expanded.remove(&call_id) {
+            self.expanded.insert(call_id);
         }
     }
 
@@ -1101,9 +1125,6 @@ impl App {
     /// Switch every visible diff between unified and side-by-side.
     fn toggle_diff_view(&mut self) {
         self.diff_sides = !self.diff_sides;
-        if let Some(approval) = self.approval.as_mut() {
-            approval.side_by_side = self.diff_sides;
-        }
         for report in self.changes.values_mut() {
             report.side_by_side = self.diff_sides;
         }
@@ -1135,7 +1156,10 @@ impl App {
     }
 
     fn start_tool(&mut self, call: ToolCall) -> Action {
+        let preview = tools::change_preview(&call);
         self.running_tool = Some(RunningTool {
+            existed: tools::target_existed(&call),
+            before: preview.before,
             call: call.clone(),
             started: Instant::now(),
         });
@@ -1150,19 +1174,13 @@ impl App {
         let Some(call) = self.pending_tools.front().cloned() else {
             return self.continue_after_tools();
         };
-        if self
-            .tools_mode
-            .needs_approval(&call.function.name, &self.approved_tools)
-        {
+        if self.tools_mode.needs_approval(&call, &self.approved_tools) {
             let change = tools::change_preview(&call);
             self.approval = Some(ToolApproval {
                 call,
-                diff: change.diff,
-                before: change.before,
                 note: change.note,
                 scroll: 0,
                 page_height: 0,
-                side_by_side: self.diff_sides,
             });
             self.follow_tail = true;
             return Action::None;
@@ -2213,19 +2231,18 @@ impl App {
     }
 
     pub fn on_tool_result(&mut self, event: ToolEvent) -> Action {
-        if !self
+        let Some(running) = self
             .running_tool
-            .as_ref()
-            .is_some_and(|running| running.call.id == event.call.id)
-        {
+            .take()
+            .filter(|running| running.call.id == event.call.id)
+        else {
             return Action::None;
-        }
-        self.running_tool = None;
-        let before = self.previous_contents(&event.call);
-        let created = tools::target_existed(&event.call);
+        };
+        let before = running.before;
+        let existed = running.existed;
         let content = match event.result {
             Ok(output) => {
-                if let Some(diff) = tools::applied_change(&event.call, before, created) {
+                if let Some(diff) = tools::applied_change(&event.call, before, existed) {
                     self.changes.insert(
                         event.call.id.clone(),
                         ChangeReport {
@@ -2241,17 +2258,6 @@ impl App {
         self.record_tool_result(event.call.id, content);
         self.save_session();
         self.advance_tools()
-    }
-
-    /// File contents from before a write or edit, for the outcome diff.
-    ///
-    /// Only available while an approval dialog is open, which is also where the
-    /// tool can be running after the user pressed enter.
-    fn previous_contents(&self, call: &ToolCall) -> Option<String> {
-        self.approval
-            .as_ref()
-            .filter(|approval| approval.call.id == call.id)
-            .and_then(|approval| approval.before.clone())
     }
 
     fn record_tool_result(&mut self, call_id: impl Into<String>, content: impl Into<String>) {

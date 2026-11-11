@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
@@ -22,12 +22,18 @@ const ERROR: Color = Color::Red;
 const ADDED: Color = Color::Green;
 const REMOVED: Color = Color::Red;
 const TEXT: Color = Color::Reset;
+
+/// Rows of command text shown in the approval prompt before it stops.
+const MAX_APPROVAL_LINES: usize = 4;
+/// Tool output rows shown before the rest is collapsed.
+const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PALETTE_WIDTH: u16 = 60;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     if area.width < 28 || area.height < 8 {
+        app.output_rows.clear();
         frame.render_widget(
             Paragraph::new("Terminal too small")
                 .alignment(Alignment::Center)
@@ -119,6 +125,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.output_rows.clear();
     let inner = Block::default()
         .padding(Padding::new(2, 2, 1, 1))
         .inner(area);
@@ -164,6 +171,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let mut lines = Vec::new();
+    let mut rows: Vec<(u16, String)> = Vec::new();
     for (index, message) in app.session.messages.iter().enumerate() {
         let has_calls = message
             .tool_calls
@@ -183,7 +191,9 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             Role::Tool => ("tool", MUTED),
         };
         if message.role == Role::Tool {
-            lines.extend(tool_result_lines(app, message, inner.width));
+            let start = lines.len();
+            let framed = tool_result_lines(app, message, inner.width, rows, start);
+            lines.extend(framed);
             if streaming {
                 if let Some(line) = lines.last_mut() {
                     line.spans
@@ -231,20 +241,20 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let text = ratatui::text::Text::from(lines);
-    let total_lines = text
-        .lines
-        .iter()
-        .map(|line| {
-            let content = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            wrapped_line_count(&content, inner.width)
-        })
-        .sum::<usize>();
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    // Screen row of every transcript line, accounting for wrapped text above.
+    let mut starts: Vec<usize> = Vec::with_capacity(lines.len());
+    let mut next_row = 0;
+    for line in &lines {
+        starts.push(next_row);
+        let content = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        next_row += wrapped_line_count(&content, inner.width);
+    }
+    let total_lines = next_row;
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     let maximum = total_lines.saturating_sub(usize::from(inner.height));
     if app.follow_tail {
         app.scroll = maximum;
@@ -258,6 +268,22 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         paragraph.scroll((app.scroll.min(u16::MAX as usize) as u16, 0)),
         inner,
     );
+
+    // Map tool frames to screen rows so a click can hit one.
+    let scroll = app.scroll.min(u16::MAX as usize);
+    for (line_index, call_id) in rows {
+        let Some(&screen_row) = starts.get(usize::from(line_index)) else {
+            continue;
+        };
+        if screen_row < scroll {
+            continue;
+        }
+        let offset = (screen_row - scroll) as u16;
+        if offset >= inner.height {
+            continue;
+        }
+        app.output_rows.push((inner.y.saturating_add(offset), call_id));
+    }
 }
 
 fn draw_palette(frame: &mut Frame, app: &App, palette: &[&'static CommandSpec], area: Rect) {
@@ -448,43 +474,35 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// A small prompt for a risky command. It only names the command and asks.
 fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
-    let width = area.width.saturating_sub(4).min(160);
-    let height = area.height.saturating_sub(4);
-    if width < 40 || height < 8 {
+    let width = area.width.saturating_sub(4).min(72);
+    if width < 30 || area.height < 8 {
         return;
     }
+    let content_width = usize::from(width.saturating_sub(6));
+    let lines = approval_lines(approval, content_width);
+    let height = (lines.len() as u16 + 4).clamp(7, area.height.saturating_sub(2));
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
+        area.y + area.height.saturating_sub(height) * 2 / 3,
         width,
         height,
     );
     frame.render_widget(Clear, popup);
 
-    let name = approval.call.function.name.as_str();
-    let view = if approval.side_by_side {
-        "unified"
-    } else {
-        "side-by-side"
-    };
-    let hint = if approval.diff.is_some() {
-        format!(" enter run · a always allow {name} · esc deny · v {view} ")
-    } else {
-        format!(" enter run · a always allow {name} · esc deny ")
-    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(MUTED))
-        .title_top(Line::from(vec![
-            Span::styled(
-                " approval ",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("· {name} "), Style::default().fg(MUTED)),
-        ]))
-        .title_bottom(Line::styled(hint, Style::default().fg(MUTED)))
-        .padding(Padding::new(2, 2, 1, 1));
+        .border_style(Style::default().fg(ACCENT))
+        .title_top(Line::from(vec![Span::styled(
+            " run this command? ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )]))
+        .title_bottom(Line::styled(
+            " enter run · a always · esc deny ",
+            Style::default().fg(MUTED),
+        ))
+        .padding(Padding::new(1, 1, 1, 1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
@@ -492,14 +510,8 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
     }
 
     approval.page_height = inner.height;
-    let mut lines = approval_lines(approval, usize::from(inner.width));
     let maximum = lines.len().saturating_sub(usize::from(inner.height));
     approval.scroll = approval.scroll.min(maximum);
-    if lines.len() < usize::from(inner.height) {
-        while lines.len() < usize::from(inner.height) {
-            lines.push(Line::raw(""));
-        }
-    }
     frame.render_widget(
         Paragraph::new(lines).scroll((approval.scroll.min(u16::MAX as usize) as u16, 0)),
         inner,
@@ -510,16 +522,23 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
 ///
 /// The transcript is one paragraph, so the frame is drawn with box glyphs
 /// rather than a widget, and every inner line is clipped to the frame width.
-fn tool_result_lines(app: &App, message: &Message, width: u16) -> Vec<Line<'static>> {
+fn tool_result_lines(
+    app: &App,
+    message: &Message,
+    width: u16,
+    rows: &mut Vec<(u16, String)>,
+    start_row: usize,
+) -> Vec<Line<'static>> {
     let outer = usize::from(width).max(1);
     let inner_width = outer.saturating_sub(4);
     let failed = message.content.starts_with("Error: ");
     let border = if failed { ERROR } else { MUTED };
+    let rendered = message.content.split('\n').collect::<Vec<_>>();
     // On a very narrow terminal a frame would not fit; draw the raw lines.
     if inner_width < 6 {
-        return message
-            .content
-            .split('\n')
+        return rendered
+            .iter()
+            .take(TOOL_OUTPUT_PREVIEW_LINES)
             .map(|line| {
                 Line::styled(
                     truncate(line, outer),
@@ -529,30 +548,66 @@ fn tool_result_lines(app: &App, message: &Message, width: u16) -> Vec<Line<'stat
             .collect();
     }
 
+    let color = if failed { ERROR } else { TEXT };
+    let call_id = message.tool_call_id.clone().unwrap_or_default();
+    let report = message
+        .tool_call_id
+        .as_deref()
+        .and_then(|call_id| app.changes.get(call_id));
     let mut body: Vec<Line<'static>> = Vec::new();
-    for content_line in message.content.split('\n') {
-        let color = if failed { ERROR } else { TEXT };
+    for content_line in &rendered {
         body.push(Line::styled(
             truncate(content_line, inner_width),
             Style::default().fg(color),
         ));
     }
-    let report = message
-        .tool_call_id
-        .as_deref()
-        .and_then(|call_id| app.changes.get(call_id));
     if let Some(report) = report {
         body.extend(change_lines(report, inner_width));
     }
     if body.is_empty() {
         body.push(Line::styled(" ", Style::default().fg(MUTED)));
     }
+    // Long output, diff included, is folded; a click on the frame reveals the rest.
+    let total = body.len();
+    let clickable = total > TOOL_OUTPUT_PREVIEW_LINES;
+    let expanded = clickable && app.expanded.contains(&call_id);
+    if clickable && !expanded {
+        let hidden = total - TOOL_OUTPUT_PREVIEW_LINES;
+        let hint = if inner_width >= 30 {
+            format!(
+                "… {hidden} more line{} · click to expand",
+                if hidden == 1 { "" } else { "s" }
+            )
+        } else {
+            format!("… {hidden} more")
+        };
+        let mut shown: Vec<Line<'static>> = body.drain(..TOOL_OUTPUT_PREVIEW_LINES).collect();
+        shown.push(Line::styled(
+            truncate(&hint, inner_width),
+            Style::default().fg(MUTED),
+        ));
+        body = shown;
+    }
+    if expanded {
+        body.push(Line::styled(
+            truncate("· click to collapse", inner_width),
+            Style::default().fg(MUTED),
+        ));
+    }
 
     let label = truncate(
         report.map_or("tool", |report| report.diff.path.as_str()),
         inner_width,
     );
-    frame_lines(label, body, inner_width, border)
+    let framed = frame_lines(label, body, inner_width, border);
+    if clickable {
+        // Rows are traced so a click anywhere on the frame toggles it. The
+        // leading blank line is row 0 of `framed`, so skip it.
+        for offset in 1..framed.len() {
+            rows.push((start_row.saturating_add(offset) as u16, call_id.clone()));
+        }
+    }
+    framed
 }
 
 /// Wrap body lines in a light frame of exactly `inner_width + 4` columns.
@@ -644,82 +699,38 @@ fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
 fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut lines = Vec::new();
-    if let Some(diff) = &approval.diff {
-        let mut spans = vec![Span::styled(
-            truncate(&diff.path, width.saturating_sub(20)),
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        )];
-        if diff.created {
-            spans.push(Span::styled("  new file", Style::default().fg(MUTED)));
-        }
-        spans.push(Span::styled(
-            format!("  +{}", diff.additions),
-            Style::default().fg(ADDED),
-        ));
-        spans.push(Span::styled(
-            format!("  −{}", diff.deletions),
-            Style::default().fg(REMOVED),
-        ));
-        lines.push(Line::from(spans));
-        if let Some(note) = &approval.note {
-            lines.push(Line::styled(
-                truncate(note, width),
-                Style::default().fg(ERROR),
-            ));
-        }
-        lines.push(Line::raw(""));
-        if diff.is_empty() {
-            if diff.note.is_none() {
-                lines.push(Line::styled("No changes.", Style::default().fg(MUTED)));
-            } else if let Some(note) = &diff.note {
-                lines.push(Line::styled(
-                    truncate(note, width),
-                    Style::default().fg(MUTED),
-                ));
-            }
-        } else if approval.side_by_side {
-            lines.extend(side_by_side_lines(diff, width));
+    let command = tools::command_text(&approval.call).unwrap_or_default();
+    // The command is the whole point: show it first, wrapped, capped at a few
+    // rows so the prompt stays small.
+    let mut shown = 0;
+    for (index, raw) in command.lines().enumerate() {
+        let line = if index == 0 {
+            format!("$ {raw}")
         } else {
-            lines.extend(unified_lines(diff, width));
+            format!("  {raw}")
+        };
+        for wrapped in textwrap::wrap(&line, textwrap::Options::new(width)) {
+            if shown == MAX_APPROVAL_LINES {
+                lines.push(Line::styled("…", Style::default().fg(MUTED)));
+                break;
+            }
+            lines.push(Line::styled(
+                wrapped.into_owned(),
+                Style::default().fg(TEXT),
+            ));
+            shown += 1;
         }
-        return lines;
+        if shown == MAX_APPROVAL_LINES {
+            break;
+        }
     }
-
-    lines.push(Line::from(vec![
-        Span::styled(
-            approval.call.function.name.clone(),
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", tools::preview(&approval.call)),
-            Style::default().fg(MUTED),
-        ),
-    ]));
+    if shown == 0 {
+        lines.push(Line::styled("$", Style::default().fg(TEXT)));
+    }
     if let Some(note) = &approval.note {
         lines.push(Line::styled(
             truncate(note, width),
             Style::default().fg(ERROR),
-        ));
-    }
-    lines.push(Line::raw(""));
-    if let Some(command) = tools::command_text(&approval.call) {
-        for (index, line) in command.lines().enumerate() {
-            let line = if index == 0 {
-                format!("$ {line}")
-            } else {
-                format!("  {line}")
-            };
-            for wrapped in textwrap::wrap(&line, textwrap::Options::new(width.max(1))) {
-                lines.push(Line::styled(
-                    wrapped.into_owned(),
-                    Style::default().fg(TEXT),
-                ));
-            }
-        }
-    } else {
-        lines.push(Line::styled(
-            "This tool only reads the workspace.",
-            Style::default().fg(MUTED),
         ));
     }
     lines

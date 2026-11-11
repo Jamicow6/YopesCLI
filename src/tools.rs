@@ -39,8 +39,20 @@ pub struct ChangePreview {
     pub note: Option<String>,
 }
 
-pub fn requires_approval(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file" | "run_command")
+/// Whether a tool call needs the user's approval.
+///
+/// File writes and edits never ask: their diff is shown in the transcript and
+/// they are easy to undo. Only a command the model marks as risky asks.
+pub fn requires_approval(call: &ToolCall) -> bool {
+    call.function.name == "run_command" && command_risk(&call.function.arguments)
+}
+
+/// The `risk` flag the model set on a `run_command` call.
+pub fn command_risk(arguments: &str) -> bool {
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|arguments| arguments.get("risk").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 pub fn system_prompt(tools_enabled: bool) -> String {
@@ -53,8 +65,9 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Operating system: {os}\n\
              Use the provided tools to inspect and change files and to run commands. \
              Prefer tools over guessing, read a file before editing it, and never claim \
-             that a file changed unless a tool result confirms it. Keep responses short \
-             and concrete. Paths may be relative to the working directory."
+             that a file changed unless a tool result confirms it. Set run_command risk to \
+             true for anything destructive or hard to undo so the user is asked first. \
+             Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
         format!(
@@ -163,13 +176,17 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command in the workspace and return its output.",
+                "description": "Run a shell command in the workspace and return its output. Set risk to true for anything destructive or hard to undo: deleting or overwriting files, git resets or force pushes, installing or uninstalling software, stopping services, or anything reaching outside the working directory. Risky commands ask the user before they run.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
                             "description": "Shell command to run from the working directory."
+                        },
+                        "risk": {
+                            "type": "boolean",
+                            "description": "True when the command is destructive or could discard work, so the user is asked first."
                         },
                         "timeout_seconds": {
                             "type": "integer",
@@ -248,15 +265,15 @@ pub fn command_text(call: &ToolCall) -> Option<String> {
 /// The change a successful write or edit made, reconstructed from what is on
 /// disk after the tool ran.
 ///
-/// The previous contents come from the approval preview when it is available,
-/// otherwise they are rebuilt by reversing the arguments.
+/// `before` and `existed` were captured before the call ran; when the
+/// previous contents are unknown the edit is rebuilt by reversing the
+/// arguments instead.
 pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) -> Option<FileDiff> {
     match call.function.name.as_str() {
         "write_file" => {
             let args: WriteFileArgs = parse(&call.function.arguments).ok()?;
-            let created = before.is_none() && !existed;
             let before = before.unwrap_or_default();
-            Some(FileDiff::new(args.path, &before, &args.content, created))
+            Some(FileDiff::new(args.path, &before, &args.content, !existed))
         }
         "edit_file" => {
             let args: EditFileArgs = parse(&call.function.arguments).ok()?;
@@ -701,7 +718,7 @@ fn read_log(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_NAMES, definitions, preview, requires_approval};
+    use super::{TOOL_NAMES, applied_change, definitions, preview, requires_approval};
     use crate::session::ToolCall;
 
     #[test]
@@ -718,12 +735,43 @@ mod tests {
     }
 
     #[test]
-    fn only_mutating_tools_need_approval() {
-        assert!(!requires_approval("read_file"));
-        assert!(!requires_approval("list_dir"));
-        assert!(requires_approval("write_file"));
-        assert!(requires_approval("edit_file"));
-        assert!(requires_approval("run_command"));
+    fn writes_never_ask_and_only_risky_commands_do() {
+        let call = |name: &str, arguments: &str| ToolCall::new("call_1", name, arguments);
+        assert!(!requires_approval(&call(
+            "write_file",
+            r#"{"path":"a.txt","content":"x"}"#
+        )));
+        assert!(!requires_approval(&call(
+            "edit_file",
+            r#"{"path":"a.txt","old_text":"x","new_text":"y"}"#
+        )));
+        assert!(!requires_approval(&call(
+            "read_file",
+            r#"{"path":"a.txt"}"#
+        )));
+        assert!(!requires_approval(&call(
+            "run_command",
+            r#"{"command":"cargo fmt --all"}"#
+        )));
+        assert!(!requires_approval(&call(
+            "run_command",
+            r#"{"command":"ls","risk":false}"#
+        )));
+        assert!(requires_approval(&call(
+            "run_command",
+            r#"{"command":"rm -rf build","risk":true}"#
+        )));
+    }
+
+    #[test]
+    fn write_diffs_are_new_only_when_the_file_did_not_exist_before() {
+        let call = ToolCall::new(
+            "call_1",
+            "write_file",
+            r#"{"path":"new.txt","content":"hello"}"#,
+        );
+        assert!(applied_change(&call, Some(String::new()), false).unwrap().created);
+        assert!(!applied_change(&call, Some("old".to_owned()), true).unwrap().created);
     }
 
     #[test]
