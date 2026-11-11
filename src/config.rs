@@ -174,6 +174,8 @@ pub struct Config {
     pub custom_providers: Vec<CustomProvider>,
     pub session_path: Option<PathBuf>,
     pub config_path: PathBuf,
+    /// Tavily key backing the web_search tool.
+    pub tavily_api_key: Option<String>,
 }
 
 pub struct Connection {
@@ -210,6 +212,9 @@ struct SavedConfig {
     custom_providers: Vec<SavedCustomProvider>,
     #[serde(default)]
     secret: StoredSecret,
+    /// Tavily key for the web_search tool; `TAVILY_API_KEY` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tavily_api_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -349,6 +354,15 @@ impl Config {
             .map(|saved| saved.models.clone())
             .unwrap_or_default();
         let api_key = resolve_api_key(saved_for_provider, env_key)?;
+        let tavily_api_key = env::var("TAVILY_API_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| {
+                saved
+                    .as_ref()
+                    .and_then(|saved| saved.tavily_api_key.clone())
+                    .filter(|key| !key.trim().is_empty())
+            });
         if provider == ProviderKind::OpenAi && api_key.is_none() && saved_for_provider.is_none() {
             bail!(
                 "no API key for the OpenAI-compatible provider; set OPENAI_API_KEY or run /connect"
@@ -366,6 +380,7 @@ impl Config {
             custom_providers: custom_providers(saved.as_ref()),
             session_path,
             config_path,
+            tavily_api_key,
         })
     }
 }
@@ -524,6 +539,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
         models: Vec::new(),
         custom_providers: Vec::new(),
         secret: StoredSecret::default(),
+        tavily_api_key: None,
     });
     // Switching a model must not wipe or downgrade an existing key: when no new
     // key was supplied, keep whatever is already stored for this endpoint.

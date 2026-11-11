@@ -55,12 +55,14 @@ async fn run() -> Result<()> {
     let session = load_session(session_path.as_deref())?;
     let backend = Backend::new(&config)?;
     let custom_providers = config.custom_providers.clone();
+    let tavily_api_key = config.tavily_api_key.clone();
     let mut app = App::new(
         session,
         backend,
         session_path,
         config_path,
         custom_providers,
+        tavily_api_key,
     );
     let mut terminal = TerminalGuard::new()?;
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
@@ -204,9 +206,11 @@ fn dispatch(
         Action::Cancel(request_id) => cancel_task(active_task, request_id),
         Action::RunTool { call } => {
             let sender = tool_events.clone();
+            let web_key = app.tavily_key().map(str::to_owned);
             tokio::spawn(async move {
                 let task_call = call.clone();
-                let joined = tokio::task::spawn_blocking(move || tools::execute(&task_call)).await;
+                let joined =
+                    tokio::task::spawn_blocking(move || tools::execute(&task_call, web_key)).await;
                 let result = match joined {
                     Ok(Ok(output)) => Ok(output),
                     Ok(Err(error)) => Err(format!("{error:#}")),

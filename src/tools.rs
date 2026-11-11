@@ -24,12 +24,13 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 5] = [
+pub const TOOL_NAMES: [&str; 6] = [
     "list_dir",
     "read_file",
     "write_file",
     "edit_file",
     "run_command",
+    "web_search",
 ];
 
 #[derive(Debug)]
@@ -67,6 +68,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Prefer tools over guessing, read a file before editing it, and never claim \
              that a file changed unless a tool result confirms it. Set run_command risk to \
              true for anything destructive or hard to undo so the user is asked first. \
+             Use web_search for anything newer than your knowledge or that needs current \
+             facts, and cite the URL you used. \
              Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
@@ -196,6 +199,27 @@ pub fn definitions() -> Value {
                     "required": ["command"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web and return the top results with titles, URLs and snippets. Use it for current information, documentation, release notes, or anything the user asks about that is newer than your knowledge. Cite the URL you used.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results. Defaults to 5."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
         }
     ])
 }
@@ -235,6 +259,7 @@ pub fn preview(call: &ToolCall) -> String {
         }
         "edit_file" => string("path"),
         "run_command" => clip(&string("command"), 160),
+        "web_search" => clip(&string("query"), 160),
         _ => clip(call.function.arguments.trim(), 160),
     }
 }
@@ -397,13 +422,14 @@ fn read_preview(path: &Path, display: &str) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("reading {display}"))
 }
 
-pub fn execute(call: &ToolCall) -> Result<String> {
+pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
         "list_dir" => list_dir(&call.function.arguments),
         "read_file" => read_file(&call.function.arguments),
         "write_file" => write_file(&call.function.arguments),
         "edit_file" => edit_file(&call.function.arguments),
         "run_command" => run_command(&call.function.arguments),
+        "web_search" => web_search(&call.function.arguments, web_key),
         other => bail!("unknown tool `{other}`"),
     }
 }
@@ -652,6 +678,80 @@ fn run_command(arguments: &str) -> Result<String> {
     Ok(truncate_output(result))
 }
 
+#[derive(Deserialize)]
+struct WebSearchArgs {
+    query: String,
+    #[serde(default)]
+    max_results: Option<usize>,
+}
+
+const TAVILY_SEARCH_URL: &str = "https://api.tavily.com/search";
+const MAX_WEB_RESULTS: usize = 10;
+
+/// Search the web with Tavily and format the top results.
+///
+/// Uses a blocking HTTP client because tool execution runs on
+/// `spawn_blocking`, not on the async runtime.
+fn web_search(arguments: &str, api_key: Option<&str>) -> Result<String> {
+    let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        bail!("web search is not configured; set TAVILY_API_KEY");
+    };
+    let args: WebSearchArgs = parse(arguments)?;
+    let query = args.query.trim();
+    if query.is_empty() {
+        bail!("query cannot be empty");
+    }
+    let max_results = args.max_results.unwrap_or(5).clamp(1, MAX_WEB_RESULTS);
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("creating the search client")?;
+    let response = client
+        .post(TAVILY_SEARCH_URL)
+        .bearer_auth(api_key)
+        .json(&json!({ "query": query, "max_results": max_results }))
+        .send()
+        .context("contacting Tavily")?;
+    let status = response.status();
+    let body: Value = response.json().context("reading the Tavily response")?;
+    if !status.is_success() {
+        let message = body
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or("no detail");
+        bail!("Tavily returned {status}: {message}");
+    }
+    let results = body
+        .get("results")
+        .and_then(Value::as_array)
+        .context("the Tavily response has no results")?;
+    if results.is_empty() {
+        return Ok(format!("{query}\n(no results)"));
+    }
+    let mut output = format!("{query}\n");
+    for (index, result) in results.iter().enumerate() {
+        let title = result
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("(untitled)");
+        let url = result
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let snippet = result
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        output.push_str(&format!(
+            "\n{}. {title}\n{url}\n{}\n",
+            index + 1,
+            snippet.trim()
+        ));
+    }
+    Ok(truncate_output(output))
+}
+
 fn workspace() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -772,6 +872,19 @@ mod tests {
         );
         assert!(applied_change(&call, Some(String::new()), false).unwrap().created);
         assert!(!applied_change(&call, Some("old".to_owned()), true).unwrap().created);
+    }
+
+    #[test]
+    fn web_search_needs_a_key_and_previews_the_query() {
+        use super::execute;
+        let search = ToolCall::new("call_3", "web_search", r#"{"query":"rust 2026 release"}"#);
+        assert_eq!(preview(&search), "rust 2026 release");
+
+        let error = execute(&search, None).unwrap_err().to_string();
+        assert!(error.contains("TAVILY_API_KEY"));
+        let empty = ToolCall::new("call_4", "web_search", r#"{"query":"  "}"#);
+        let error = execute(&empty, Some("tvly-test")).unwrap_err().to_string();
+        assert!(error.contains("query"));
     }
 
     #[test]
