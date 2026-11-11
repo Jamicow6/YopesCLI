@@ -287,6 +287,8 @@ fn pixel_color(pixel: &image::Rgba<u8>) -> Color {
 pub struct ToolApproval {
     pub call: ToolCall,
     pub note: Option<String>,
+    /// Change preview of a write or edit, drawn in the dialog itself.
+    pub diff: Option<FileDiff>,
     pub scroll: usize,
     pub page_height: u16,
 }
@@ -1936,6 +1938,7 @@ impl App {
             self.approval = Some(ToolApproval {
                 call,
                 note: change.note,
+                diff: change.diff,
                 scroll: 0,
                 page_height: 0,
             });

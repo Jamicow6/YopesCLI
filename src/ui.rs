@@ -173,8 +173,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_footer(frame, app, chunks[index + 2]);
 
     let spinner = app.spinner;
+    let sides = app.diff_sides;
     if let Some(approval) = app.approval.as_mut() {
-        draw_approval(frame, approval, spinner, area);
+        draw_approval(frame, approval, sides, spinner, area);
     } else if app.show_help {
         draw_help(frame, area);
     } else if let Some(connect) = app.connect_state() {
@@ -826,15 +827,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// A small prompt for a risky command. It only names the command and asks.
-/// The border pulses on the idle ticker so the dialog pulls the eye.
-fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, spinner: usize, area: Rect) {
+/// A small prompt for a risky command. It shows the command and, for a write
+/// or edit, the change itself. The border pulses on the idle ticker so the
+/// dialog pulls the eye.
+fn draw_approval(
+    frame: &mut Frame,
+    approval: &mut ToolApproval,
+    side_by_side: bool,
+    spinner: usize,
+    area: Rect,
+) {
     let width = area.width.saturating_sub(4).min(72);
     if width < 30 || area.height < 8 {
         return;
     }
     let content_width = usize::from(width.saturating_sub(6));
-    let lines = approval_lines(approval, content_width);
+    let lines = approval_lines(approval, content_width, side_by_side);
     let height = (lines.len() as u16 + 4).clamp(7, area.height.saturating_sub(2));
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
@@ -852,11 +860,16 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, spinner: usize,
         } else {
             Modifier::empty()
         });
+    let has_command = tools::command_text(&approval.call).is_some();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
         .title_top(Line::from(vec![Span::styled(
-            " run this command? ",
+            if has_command {
+                " run this command? "
+            } else {
+                " apply this change? "
+            },
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]))
         .title_bottom(Line::styled(
@@ -1108,7 +1121,7 @@ fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
+fn approval_lines(approval: &ToolApproval, width: usize, side_by_side: bool) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let command = tools::command_text(&approval.call).unwrap_or_default();
@@ -1136,8 +1149,15 @@ fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
             break;
         }
     }
-    if shown == 0 {
+    if shown == 0 && approval.diff.is_none() {
         lines.push(Line::styled("$", Style::default().fg(TEXT)));
+    }
+    if let Some(diff) = &approval.diff {
+        let report = ChangeReport {
+            diff: diff.clone(),
+            side_by_side,
+        };
+        lines.append(&mut change_lines(&report, width));
     }
     if let Some(note) = &approval.note {
         lines.push(Line::styled(
@@ -1869,6 +1889,37 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn approvals_render_the_diff_of_a_change() {
+        use super::approval_lines;
+        use crate::app::ToolApproval;
+        use crate::diff::FileDiff;
+        use crate::session::ToolCall;
+
+        let call = ToolCall::new(
+            "call_1",
+            "write_file",
+            r#"{"path":"hello.txt","content":"hi"}"#,
+        );
+        let approval = ToolApproval {
+            call,
+            note: Some("old_text was not found; the edit will fail.".to_owned()),
+            diff: Some(FileDiff::new("hello.txt", "", "hi\n", true)),
+            scroll: 0,
+            page_height: 0,
+        };
+        let lines = approval_lines(&approval, 60, false);
+        let text = lines
+            .iter()
+            .map(text_of)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("hello.txt"), "{text}");
+        assert!(text.contains("+1"), "{text}");
+        assert!(!text.contains("$"), "{text}");
+        assert!(text.contains("old_text was not found"), "{text}");
     }
 
     #[test]
