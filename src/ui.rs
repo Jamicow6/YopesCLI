@@ -1576,6 +1576,10 @@ fn usage_line(usage: Usage) -> Line<'static> {
 
 /// Thinking above a reply: every dim line while streaming or expanded, and
 /// after the reply a single summary that the expand set can open back up.
+/// Lines of thinking shown while streaming; older lines collapse into a
+/// summary so long reasoning does not re-wrap the whole transcript per frame.
+const STREAMING_REASONING_LINES: usize = 24;
+
 fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Line<'static>> {
     let lines: Vec<&str> = message
         .reasoning
@@ -1588,15 +1592,26 @@ fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Li
     }
     if streaming || expanded {
         let style = Style::default().fg(MUTED).add_modifier(Modifier::DIM);
-        return lines
-            .into_iter()
-            .map(|line| {
-                Line::from(vec![
-                    Span::styled("│ ", Style::default().fg(MUTED)),
-                    Span::styled(line.to_owned(), style),
-                ])
-            })
-            .collect();
+        let hidden = lines.len().saturating_sub(STREAMING_REASONING_LINES);
+        let show_hidden = streaming && hidden > 0 && !expanded;
+        let start = if show_hidden { hidden } else { 0 };
+        let mut output: Vec<Line<'static>> = Vec::new();
+        if show_hidden {
+            output.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!("… {hidden} earlier lines of thinking"),
+                    style,
+                ),
+            ]));
+        }
+        for line in &lines[start..] {
+            output.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(MUTED)),
+                Span::styled((*line).to_owned(), style),
+            ]));
+        }
+        return output;
     }
     let text = if lines.len() > 2 {
         format!("{} … {} lines of thinking", lines[0], lines.len())
@@ -1761,14 +1776,29 @@ fn wrapped_rows(line: &str, width: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_lines, wrapped_line_count};
+    use super::{frame_lines, reasoning_lines, wrapped_line_count};
     use ratatui::{style::Color, text::Line};
+    use crate::session::{Message, Role};
 
     fn text_of(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn streaming_reasoning_shows_recent_lines_with_a_summary() {
+        let mut message = Message::new(Role::Assistant, "");
+        message.reasoning = (0..40).map(|i| format!("thought {i}")).collect::<Vec<_>>().join("\n");
+        let lines = reasoning_lines(&message, true, false);
+        assert_eq!(lines.len(), 25);
+        assert_eq!(text_of(&lines[0]), "│ … 16 earlier lines of thinking");
+        assert_eq!(text_of(&lines[1]), "│ thought 16");
+        assert_eq!(text_of(&lines[24]), "│ thought 39");
+        // Expanding keeps every line.
+        assert_eq!(reasoning_lines(&message, true, true).len(), 40);
+        assert_eq!(reasoning_lines(&message, false, false).len(), 1);
     }
 
     #[test]
