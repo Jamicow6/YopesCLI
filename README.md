@@ -44,7 +44,9 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 ## Commands
 
 - `/help` — show keyboard help.
-- `/new` — start a fresh session.
+- `/new` — start a fresh session; the earlier one stays saved.
+- After the first reply of a new session, the model gives it a short title for easy recall.
+- `/sessions` — switch between saved sessions: type to filter, `↑↓` to move, `Enter` to load.
 - `/connect` — browse models.dev providers or configure a custom OpenAI-compatible endpoint.
 - `/model <name>` — switch model for subsequent messages.
 - `/model` — a popup over the endpoint's saved models: type to filter, `↑↓` to move, `Enter` to switch. Falls back to an info notice when the endpoint has no saved model list.

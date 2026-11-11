@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs,
     path::PathBuf,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 use anyhow::Result;
@@ -65,7 +66,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 6] = [
+pub const COMMANDS: [CommandSpec; 7] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -85,6 +86,11 @@ pub const COMMANDS: [CommandSpec; 6] = [
         name: "/model",
         description: "Show or change the active model",
         argument: Some("name"),
+    },
+    CommandSpec {
+        name: "/sessions",
+        description: "Switch between saved sessions",
+        argument: None,
     },
     CommandSpec {
         name: "/tools",
@@ -281,7 +287,7 @@ pub struct RunningTool {
 
 /// Filter state of the `/model` popup.
 #[derive(Debug, Clone, Default)]
-pub struct ModelPicker {
+pub struct ListPicker {
     pub filter: String,
     pub selected: usize,
 }
@@ -295,6 +301,47 @@ fn model_matching<'a>(models: &'a [SavedModel], filter: &str) -> Vec<&'a SavedMo
             filter.is_empty()
                 || model.name.to_ascii_lowercase().contains(&filter)
                 || model.id.to_ascii_lowercase().contains(&filter)
+        })
+        .collect()
+}
+
+/// One row of the `/sessions` popup: a saved session file with its title.
+#[derive(Clone)]
+pub struct SessionEntry {
+    pub path: PathBuf,
+    pub title: String,
+    pub modified: Option<SystemTime>,
+}
+
+/// Title probe: parse only the `title` field out of a session file.
+#[derive(Default, serde::Deserialize)]
+struct SessionProbe {
+    #[serde(default)]
+    title: String,
+}
+
+fn session_entry(path: PathBuf) -> SessionEntry {
+    let title = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SessionProbe>(&text).ok())
+        .map(|probe| probe.title.trim().to_owned())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "Untitled".to_owned());
+    let modified = fs::metadata(&path).ok().and_then(|metadata| metadata.modified().ok());
+    SessionEntry {
+        path,
+        title,
+        modified,
+    }
+}
+
+/// Saved sessions matching the picker filter, newest first.
+fn session_matching<'a>(sessions: &'a [SessionEntry], filter: &str) -> Vec<&'a SessionEntry> {
+    let filter = filter.to_ascii_lowercase();
+    sessions
+        .iter()
+        .filter(|entry| {
+            filter.is_empty() || entry.title.to_ascii_lowercase().contains(&filter)
         })
         .collect()
 }
@@ -837,6 +884,10 @@ pub enum Action {
     LoadCatalog,
     /// Fetch the Fasfas `/v1/models` list with the key entered in /connect.
     FetchFasfas(String),
+    /// Ask the provider for a short title after the first reply of a session.
+    NameSession {
+        task: String,
+    },
 }
 
 #[derive(Default)]
@@ -956,7 +1007,9 @@ pub struct App {
     image_width: u16,
     pub approval: Option<ToolApproval>,
     /// Popup picker opened by `/model` with no argument.
-    pub model_picker: Option<ModelPicker>,
+    pub model_picker: Option<ListPicker>,
+    /// Popup picker opened by `/sessions`.
+    pub session_picker: Option<ListPicker>,
     pub running_tool: Option<RunningTool>,
     /// Diffs for write and edit calls, shown under their results.
     pub changes: HashMap<String, ChangeReport>,
@@ -972,6 +1025,8 @@ pub struct App {
     approved_tools: HashSet<String>,
     tool_rounds: usize,
     session_path: Option<PathBuf>,
+    /// Directory holding every saved session file, when saving.
+    sessions_dir: Option<PathBuf>,
     config_path: PathBuf,
     custom_providers: Vec<config::CustomProvider>,
     /// Tavily key for the web_search tool.
@@ -990,6 +1045,7 @@ impl App {
         session: Session,
         backend: Backend,
         session_path: Option<PathBuf>,
+        sessions_dir: Option<PathBuf>,
         config_path: PathBuf,
         custom_providers: Vec<config::CustomProvider>,
         tavily_api_key: Option<String>,
@@ -1015,6 +1071,7 @@ impl App {
             image_width: 0,
             approval: None,
             model_picker: None,
+            session_picker: None,
             running_tool: None,
             changes: HashMap::new(),
             expanded: HashSet::new(),
@@ -1026,6 +1083,7 @@ impl App {
             approved_tools: HashSet::new(),
             tool_rounds: 0,
             session_path,
+            sessions_dir,
             config_path,
             custom_providers,
             tavily_api_key,
@@ -1107,6 +1165,11 @@ impl App {
 
     pub fn is_busy(&self) -> bool {
         self.is_streaming() || self.tools_busy()
+    }
+
+    /// Path of the session currently open, for the `/sessions` popup marker.
+    pub fn active_session_path(&self) -> Option<&PathBuf> {
+        self.session_path.as_ref()
     }
 
     pub fn running_tool_elapsed(&self) -> Option<f64> {
@@ -1234,7 +1297,7 @@ impl App {
             self.info("No saved model list for this endpoint — run /connect to browse models.");
             return;
         }
-        self.model_picker = Some(ModelPicker::default());
+        self.model_picker = Some(ListPicker::default());
     }
 
     fn handle_model_picker_key(&mut self, key: KeyEvent) -> Action {
@@ -1280,6 +1343,204 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    fn open_session_picker(&mut self) {
+        if self.is_busy() || self.connect.is_some() {
+            self.info("Finish the current turn before switching sessions.");
+            return;
+        }
+        let current = self.session_path.clone().unwrap_or_default();
+        let entries = self.collect_sessions();
+        if entries.len() == 1 && entries[0].path == current {
+            self.info("Only the current session exists yet — /new starts another.");
+            return;
+        }
+        self.session_picker = Some(ListPicker::default());
+    }
+
+    /// `/sessions` rows: every file in the sessions directory, newest first,
+    /// plus the active file when it lives somewhere else.
+    fn collect_sessions(&self) -> Vec<SessionEntry> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = &self.sessions_dir {
+            if let Ok(list) = fs::read_dir(dir) {
+                paths.extend(
+                    list.flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.extension().is_some_and(|x| x == "json")),
+                );
+            }
+            if let Some(current) = &self.session_path {
+                if !current.starts_with(dir) {
+                    paths.push(current.clone());
+                }
+            }
+        } else if let Some(current) = &self.session_path {
+            paths.push(current.clone());
+        }
+        let mut entries: Vec<SessionEntry> = paths.into_iter().map(session_entry).collect();
+        entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+        entries.truncate(80);
+        entries
+    }
+
+    pub fn session_matches(&self) -> Vec<SessionEntry> {
+        let entries = self.collect_sessions();
+        let filter = self
+            .session_picker
+            .as_ref()
+            .map_or("", |picker| picker.filter.as_str());
+        session_matching(&entries, filter)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Rows shown in the `/sessions` popup for its current filter.
+    pub fn session_picker_count(&self) -> usize {
+        self.session_matches().len()
+    }
+
+    fn handle_session_picker_key(&mut self, key: KeyEvent) -> Action {
+        if key.code == KeyCode::Esc {
+            self.session_picker = None;
+            return Action::None;
+        }
+        let picker = match self.session_picker.as_mut() {
+            Some(picker) => picker,
+            None => return Action::None,
+        };
+        match key.code {
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                // collect_sessions never touches the picker field, so the
+                // live mutable borrow stays clean.
+                let entries = self.collect_sessions();
+                let count = session_matching(&entries, &picker.filter).len();
+                picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Backspace => {
+                picker.filter.pop();
+                picker.selected = 0;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                picker.filter.push(character);
+                picker.selected = 0;
+            }
+            KeyCode::Enter => {
+                let entries = self.collect_sessions();
+                let matches = session_matching(&entries, &picker.filter);
+                let target = matches
+                    .get(picker.selected.min(matches.len().saturating_sub(1)))
+                    .map(|entry| entry.path.clone());
+                self.session_picker = None;
+                if let Some(path) = target {
+                    self.switch_session(path);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Swap in the saved session at `path`; future saves go there too.
+    fn switch_session(&mut self, path: PathBuf) {
+        if Some(&path) == self.session_path.as_ref() {
+            return;
+        }
+        match Session::load(&path) {
+            Ok(session) => {
+                self.session = session;
+                self.session_path = Some(path);
+                self.reset_session_view();
+                self.save_session();
+                self.info(format!("Loaded: {}", self.session.title));
+            }
+            Err(error) => self.error(format!("Could not load session: {error:#}")),
+        }
+    }
+
+    /// State that belongs to the view of one session, reset on /new or switch.
+    fn reset_session_view(&mut self) {
+        self.scroll = 0;
+        self.follow_tail = true;
+        self.notice = None;
+        self.tool_rounds = 0;
+        self.pending_tools.clear();
+        self.approval = None;
+        self.approved_tools.clear();
+    }
+
+    /// After the first completed reply of an unnamed session, ask the model
+    /// for a short title; it lands back through on_session_title.
+    fn maybe_name_session(&mut self) -> Action {
+        if self.session.title != "New session" || !self.backend.is_configured() {
+            return Action::None;
+        }
+        let excerpt = |text: &str| -> String {
+            text.split('\n')
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(400)
+                .collect()
+        };
+        let Some(user) = self
+            .session
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User && !message.content.trim().is_empty())
+        else {
+            return Action::None;
+        };
+        let Some(reply) = self
+            .session
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Assistant && !message.content.trim().is_empty())
+        else {
+            return Action::None;
+        };
+        Action::NameSession {
+            task: format!(
+                "Name this conversation with a title of at most five words, capitalized, \
+                 no quotes and no final period.\n\nUser message:\n{}\n\nAssistant reply:\n{}\n\n\
+                 Answer with only the title.",
+                excerpt(&user.content),
+                excerpt(&reply.content),
+            ),
+        }
+    }
+
+    /// Result of the background naming request, handled in the main loop.
+    /// The id keeps a fast `/sessions` switch from stealing another session's name.
+    pub fn on_session_title(&mut self, session_id: u64, raw: String) {
+        if self.session.id != session_id || self.session.title != "New session" {
+            return;
+        }
+        let title: String = raw
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .trim_matches(|character: char| {
+                matches!(character, '"' | '\'' | '`' | '*' | '#')
+            })
+            .chars()
+            .take(48)
+            .collect();
+        let title = title.trim();
+        if title.is_empty() || title.eq_ignore_ascii_case("new session") {
+            return;
+        }
+        self.session.title = title.to_owned();
+        self.save_session();
     }
 
     pub fn handle_paste(&mut self, value: &str) {
@@ -1390,6 +1651,9 @@ impl App {
         }
         if self.model_picker.is_some() {
             return self.handle_model_picker_key(key);
+        }
+        if self.session_picker.is_some() {
+            return self.handle_session_picker_key(key);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -2807,6 +3071,7 @@ impl App {
                     self.info(format!("Model changed to {model}"));
                 }
             }
+            "/sessions" => self.open_session_picker(),
             "/tools" => {
                 let value = parts.next().unwrap_or_default().to_ascii_lowercase();
                 if value.is_empty() {
@@ -2878,13 +3143,14 @@ impl App {
             return;
         }
         self.session = Session::new();
-        self.scroll = 0;
-        self.follow_tail = true;
-        self.notice = None;
-        self.tool_rounds = 0;
-        self.pending_tools.clear();
-        self.approval = None;
-        self.approved_tools.clear();
+        // Future saves land in a fresh file, so this one keeps its history.
+        if let Some(dir) = &self.sessions_dir {
+            let stamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_millis() as u64);
+            self.session_path = Some(dir.join(format!("session-{stamp}.json")));
+        }
+        self.reset_session_view();
         self.save_session();
     }
 
@@ -3025,11 +3291,10 @@ impl App {
                     self.tool_rounds = 0;
                     self.remove_empty_response();
                     self.save_session();
-                    Action::None
-                } else {
-                    self.save_session();
-                    self.advance_tools()
+                    return self.maybe_name_session();
                 }
+                self.save_session();
+                self.advance_tools()
             }
             StreamEvent::Error {
                 request_id,
@@ -3267,7 +3532,9 @@ mod tests {
     fn palette_matches_command_prefixes() {
         assert_eq!(
             command_names("/"),
-            vec!["/help", "/new", "/connect", "/model", "/tools", "/quit"]
+            vec![
+                "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/quit",
+            ]
         );
         assert_eq!(command_names("/c"), vec!["/connect"]);
         assert_eq!(command_names("/m"), vec!["/model"]);

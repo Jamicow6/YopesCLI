@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::SystemTime};
 
 use ratatui::{
     Frame,
@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
-        Mode, ModelPicker, NoticeKind, ToolApproval, format_bytes, format_tokens,
+        Mode, ListPicker, NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
     catalog::FASFAST_ID,
     diff::{ChangeKind, DiffLine, FileDiff},
@@ -78,7 +78,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let picker = app.model_picker.clone();
-    let palette = if app.show_help || app.connect_open() || app.approval.is_some() || picker.is_some()
+    let session_picker = app.session_picker.clone();
+    let palette = if app.show_help
+        || app.connect_open()
+        || app.approval.is_some()
+        || picker.is_some()
+        || session_picker.is_some()
     {
         Vec::new()
     } else {
@@ -95,7 +100,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         0
     };
-    let popup_height = palette_height + picker_height;
+    let session_height = if session_picker.is_some() {
+        (app.session_picker_count().min(12).max(1) as u16).saturating_add(2)
+    } else {
+        0
+    };
+    let popup_height = palette_height + picker_height + session_height;
     let composer_height = composer_height(app, area.width);
 
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(2)];
@@ -116,7 +126,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let mut index = 2;
     if popup_height > 0 {
-        if let Some(picker) = &picker {
+        if let Some(session_picker) = &session_picker {
+            draw_session_picker(frame, app, session_picker, chunks[index]);
+        } else if let Some(picker) = &picker {
             draw_model_picker(frame, app, picker, chunks[index]);
         } else {
             draw_palette(frame, app, &palette, chunks[index]);
@@ -402,7 +414,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ModelPicker, area: Rect) {
+fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: Rect) {
     let width = area.width.saturating_sub(4).min(PALETTE_WIDTH);
     if width < 20 {
         return;
@@ -479,6 +491,102 @@ fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ModelPicker, area: R
             Span::styled(model.id.clone(), Style::default().fg(MUTED)),
         ]);
         frame.render_widget(Paragraph::new(line), row);
+    }
+}
+
+fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: Rect) {
+    let width = area.width.saturating_sub(4).min(PALETTE_WIDTH);
+    if width < 24 || area.height < 3 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y,
+        width,
+        area.height,
+    );
+    let filter_field = if picker.filter.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", picker.filter)
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title_top(Line::styled(
+            format!(" sessions{filter_field} "),
+            Style::default().fg(MUTED),
+        ))
+        .title_bottom(Line::styled(
+            " ↑↓ move · enter load · esc cancel ",
+            Style::default().fg(MUTED),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sessions = app.session_matches();
+    if sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching sessions.").style(Style::default().fg(MUTED)),
+            inner,
+        );
+        return;
+    }
+    let selected = picker.selected.min(sessions.len() - 1);
+    let active = app.active_session_path().unwrap_or_default().to_owned();
+    // Rows show a window of the whole list, moving with the selection.
+    let visible = inner.height as usize;
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    let right_width = 4;
+    for (offset, entry) in sessions
+        .iter()
+        .skip(start)
+        .take(visible)
+        .enumerate()
+    {
+        let index = start + offset;
+        let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
+        let chosen = index == selected;
+        let marker = if chosen { "› " } else { "  " };
+        let current = entry.path == active;
+        let right = if current {
+            format!("{} · now", age_label(entry.modified))
+        } else {
+            age_label(entry.modified)
+        };
+        let left_width = inner.width.saturating_sub(right_width + 4) as usize;
+        let title = entry.title.clone();
+        let title_style = if chosen {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        let line = Line::from(vec![
+            Span::styled(marker, Style::default().fg(ACCENT)),
+            Span::styled(format!("{title:<left_width$} "), title_style),
+            Span::styled(right, Style::default().fg(MUTED)),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
+    }
+}
+
+/// Rough age of a saved session file: now / minutes / hours / days.
+fn age_label(modified: Option<SystemTime>) -> String {
+    let Some(modified) = modified else {
+        return String::new();
+    };
+    let seconds = modified.elapsed().map_or(0, |age| age.as_secs());
+    if seconds < 60 {
+        "now".to_owned()
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}d", seconds / 86_400)
     }
 }
 
