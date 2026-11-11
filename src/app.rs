@@ -505,8 +505,11 @@ impl ConnectState {
             }
             ConnectStage::FasfasNotice => vec![ConnectItem {
                 id: catalog::FASFAST_DISCORD.to_owned(),
-                title: "Get a key from Discord".to_owned(),
-                detail: catalog::FASFAST_DISCORD.to_owned(),
+                title: "Get a key in Discord".to_owned(),
+                // Scheme dropped so the invite fits the list column.
+                detail: catalog::FASFAST_DISCORD
+                    .trim_start_matches("https://")
+                    .to_owned(),
                 logo: provider_logo(FASFAST_ID),
                 custom_id: None,
                 active: false,
