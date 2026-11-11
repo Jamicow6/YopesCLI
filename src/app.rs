@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
+use base64::Engine as _;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -237,8 +238,7 @@ fn build_image_rows(encoded: &str, cols: u16) -> Vec<Line<'static>> {
     let (width, height) = (rendered.width().max(1), rendered.height().max(1));
     // Cells are twice as wide as tall, and one `▄` carries two pixel rows,
     // so two pixels per cell in both directions keep the aspect square.
-    let row_pairs =
-        ((u64::from(height) * u64::from(cols)) / u64::from(width) / 2).clamp(1, 18) as u32;
+    let row_pairs = ((u64::from(height) * cols as u64) / u64::from(width) / 2).clamp(1, 18) as u32;
     let scaled = image::imageops::thumbnail(&rendered, (cols * 2) as u32, row_pairs * 2);
     let mut rows = Vec::with_capacity(row_pairs as usize);
     for pair in 0..row_pairs {
@@ -2978,7 +2978,9 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS, Input, format_bytes, format_tokens, matching_commands};
+    use super::{
+        COMMANDS, Input, build_image_rows, format_bytes, format_tokens, matching_commands,
+    };
 
     fn command_names(value: &str) -> Vec<&'static str> {
         matching_commands(value)
@@ -3129,6 +3131,9 @@ mod tests {
 
     #[test]
     fn an_image_renders_as_half_block_pixel_rows() {
+        use base64::Engine as _;
+        use ratatui::style::Color;
+
         let png = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(2, 2, |_, _| {
             image::Rgb([255u8, 0, 0])
         }));

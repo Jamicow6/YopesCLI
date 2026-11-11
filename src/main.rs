@@ -191,7 +191,7 @@ fn dispatch(
     events: &mpsc::UnboundedSender<StreamEvent>,
     tool_events: &mpsc::UnboundedSender<ToolEvent>,
     catalog_events: &mpsc::UnboundedSender<FetchResult>,
-    paste_events: &mpsc::UnboundedSender<Result<(String, String), String>>,
+    paste_sender: &mpsc::UnboundedSender<Result<(String, String), String>>,
     active_task: &mut Option<(u64, JoinHandle<()>)>,
 ) {
     match action {
@@ -219,10 +219,12 @@ fn dispatch(
         Action::PasteImage => {
             let sender = paste_sender.clone();
             tokio::spawn(async move {
-                let read = tokio::task::spawn_blocking(read_clipboard_image)
-                    .await
-                    .map_err(|error| format!("paste task failed: {error:#}"))
-                    .and_then(|result| result);
+                // Anyhow's chain needs rendering before crossing the channel.
+                let read = match tokio::task::spawn_blocking(read_clipboard_image).await {
+                    Ok(Ok(result)) => Ok(result),
+                    Ok(Err(error)) => Err(format!("{error:#}")),
+                    Err(join) => Err(format!("paste task failed: {join}")),
+                };
                 let _ = sender.send(read);
             });
         }
