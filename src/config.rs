@@ -185,6 +185,8 @@ pub struct Config {
     pub config_path: PathBuf,
     /// Tavily key backing the web_search tool.
     pub tavily_api_key: Option<String>,
+    /// Whether compaction runs automatically when the context grows large.
+    pub auto_compact: bool,
 }
 
 pub struct Connection {
@@ -227,6 +229,13 @@ struct SavedConfig {
     /// Tavily key for the web_search tool; `TAVILY_API_KEY` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tavily_api_key: Option<String>,
+    /// Whether compaction summarizes older turns automatically.
+    #[serde(default = "auto_compact_default")]
+    auto_compact: bool,
+}
+
+fn auto_compact_default() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -293,6 +302,7 @@ impl SavedConfig {
             custom_providers: Vec::new(),
             secret: StoredSecret::default(),
             tavily_api_key: None,
+            auto_compact: true,
         }
     }
 }
@@ -350,6 +360,7 @@ impl Config {
                 sessions_dir,
                 config_path,
                 tavily_api_key: None,
+                auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
             });
         }
 
@@ -436,6 +447,7 @@ impl Config {
             sessions_dir,
             config_path,
             tavily_api_key,
+            auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
         })
     }
 }
@@ -688,6 +700,12 @@ pub fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
     save_saved(path, &saved)
 }
 
+pub fn save_auto_compact(path: &Path, value: bool) -> Result<()> {
+    let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
+    saved.auto_compact = value;
+    save_saved(path, &saved)
+}
+
 fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
     if !path.exists() {
         return Ok(None);
@@ -826,6 +844,17 @@ mod tests {
     fn the_update_subcommand_parses() {
         let cli = Cli::try_parse_from(["yopes", "update"]).unwrap();
         assert!(matches!(cli.command, Some(super::Command::Update)));
+    }
+
+    #[test]
+    fn auto_compact_defaults_to_on_when_absent() {
+        use super::load_saved;
+        let path =
+            std::env::temp_dir().join(format!("yopes-compact-test-{}.json", std::process::id()));
+        std::fs::write(&path, format!("{{\"version\": {}}}", super::CONFIG_VERSION)).unwrap();
+        let saved = load_saved(&path).unwrap().unwrap();
+        assert!(saved.auto_compact);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

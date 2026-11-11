@@ -60,6 +60,7 @@ async fn run() -> Result<()> {
     let backend = Backend::new(&config)?;
     let custom_providers = config.custom_providers.clone();
     let tavily_api_key = config.tavily_api_key.clone();
+    let auto_compact = config.auto_compact;
     let mut app = App::new(
         session,
         backend,
@@ -68,6 +69,7 @@ async fn run() -> Result<()> {
         config_path,
         custom_providers,
         tavily_api_key,
+        auto_compact,
     );
     let mut terminal = TerminalGuard::new()?;
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
