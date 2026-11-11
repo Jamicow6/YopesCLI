@@ -29,19 +29,56 @@ const TEXT: Color = Color::Reset;
 
 /// Rows of command text shown in the approval prompt before it stops.
 const MAX_APPROVAL_LINES: usize = 4;
-/// The startup mascot: a small cat, drawn only on the welcome screen.
-const CAT_ART: [&str; 6] = [
-    "  /\\_/\\  ",
-    "+ ( o.o ) +",
-    "  #> ^ <#  ",
-    "  /| . |\\  ",
-    " (_|   |_) ",
-    "   \"   \"   ",
+/// The startup mascot: a small cat on the welcome screen. Consecutive frames
+/// blink every ~200ms through the idle ticker, so the cat winks while waiting.
+const CAT_FRAMES: [&[&str; 6]; 4] = [
+    [
+        "  /\\_/\\  ",
+        "+ ( o.o ) +",
+        "  #> ^ <#  ",
+        "  /| . |\\  ",
+        " (_|   |_) ",
+        "   \"   \"   ",
+    ],
+    [
+        "  /^_/\  ",
+        "+ ( o.o ) +",
+        "  #> ^ <#  ",
+        "  /| . |\\  ",
+        " (_|   |_) ",
+        "   \"   \"   ",
+    ],
+    [
+        "  /\\_/\\  ",
+        "+ ( -.- ) +",
+        "  #> ^ <#  ",
+        "  /| . |\\  ",
+        " (_|   |_) ",
+        "   \"   \"   ",
+    ],
+    [
+        "  /\\_/\\  ",
+        "+ ( o.o ) +",
+        "  #> ^ <#  ",
+        "  /| . |\\  ",
+        " (_|   |_) ",
+        "   \"   \"   ",
+    ],
 ];
 /// Tool output rows shown before the rest is collapsed.
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PALETTE_WIDTH: u16 = 60;
+
+/// The streaming caret alternates on a ~300ms cadence driven by the 100ms
+/// ticker, so a quiet stretch of tokens still reads as alive.
+fn caret(spinner: usize) -> &'static str {
+    if (spinner / 3) % 2 == 0 {
+        "▌"
+    } else {
+        ""
+    }
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -172,7 +209,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::raw(""),
         ];
         // The mascot belongs to the startup screen only, never to a reply.
-        for art in CAT_ART {
+        for art in CAT_FRAMES[(app.spinner / 2) % CAT_FRAMES.len()] {
             welcome.push(Line::styled(art, Style::default().fg(ACCENT)));
         }
         welcome.push(Line::raw(""));
@@ -248,7 +285,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             if streaming {
                 if let Some(line) = lines.last_mut() {
                     line.spans
-                        .push(Span::styled(" ▌", Style::default().fg(ACCENT)));
+                        .push(Span::styled(format!(" {}", caret(app.spinner)), Style::default().fg(ACCENT)));
                 }
             }
             continue;
@@ -274,7 +311,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.extend(reasoning);
         }
         if message.content.is_empty() && streaming && !has_calls && message.reasoning.is_empty() {
-            lines.push(Line::styled("▌", Style::default().fg(ACCENT)));
+            lines.push(Line::styled(caret(app.spinner), Style::default().fg(ACCENT)));
             continue;
         }
         if !message.content.is_empty() {
@@ -316,7 +353,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         if streaming {
             if let Some(line) = lines.last_mut() {
                 line.spans
-                    .push(Span::styled(" ▌", Style::default().fg(ACCENT)));
+                    .push(Span::styled(format!(" {}", caret(app.spinner)), Style::default().fg(ACCENT)));
             }
         }
     }
@@ -510,7 +547,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     format!("{name} {detail} · {size}")
                 }
             }
-            None => "thinking".to_owned(),
+            None => match app.spinner % 4 {
+                0 => "thinking",
+                1 => "thinking.",
+                2 => "thinking..",
+                _ => "thinking...",
+            }
+            .to_owned(),
         };
         let mut text = format!(
             "{} {progress} · {elapsed:.1}s",

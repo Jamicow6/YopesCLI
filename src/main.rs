@@ -174,7 +174,14 @@ async fn run() -> Result<()> {
             }
             _ = &mut interrupt => break,
             _ = term_signal.as_mut() => break,
-            _ = ticker.tick(), if app.is_streaming() || app.connect_open() || app.tools_busy() => app.tick(),
+            _ = ticker.tick(),
+            if app.is_streaming()
+                || app.connect_open()
+                || app.tools_busy()
+                || app.session.messages.is_empty() =>
+            {
+                app.tick()
+            }
         }
     }
 
