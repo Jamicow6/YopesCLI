@@ -274,6 +274,24 @@ fn request_messages(
             }));
             continue;
         }
+        // Attached screenshots travel as multimodal content parts so a
+        // vision-capable model sees them.
+        if tooling && message.role == Role::User && !message.images.is_empty() {
+            let mut parts: Vec<serde_json::Value> = Vec::with_capacity(1 + message.images.len());
+            if !message.content.is_empty() {
+                parts.push(serde_json::json!({ "type": "text", "text": message.content }));
+            }
+            for image in &message.images {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:image/png;base64,{}", image.data)
+                    }
+                }));
+            }
+            request.push(serde_json::json!({ "role": "user", "content": parts }));
+            continue;
+        }
         if message.role == Role::Assistant
             && message.content.is_empty()
             && message.tool_calls.is_none()
@@ -285,6 +303,7 @@ fn request_messages(
             if let Some(object) = value.as_object_mut() {
                 object.remove("tool_calls");
                 object.remove("tool_call_id");
+                object.remove("images");
             }
             if message.role == Role::Assistant && message.content.is_empty() {
                 continue;

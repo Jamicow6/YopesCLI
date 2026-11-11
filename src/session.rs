@@ -62,6 +62,18 @@ pub struct Message {
     /// Billing and timing for a finished assistant reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Images the user pasted with this message, stored as base64 PNG data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+/// One attached screenshot: name for display, PNG bytes base64-encoded so the
+/// session file stays plain text.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub name: String,
+    /// base64 of the PNG file.
+    pub data: String,
 }
 
 /// What one reply cost and how long it took.
@@ -97,6 +109,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             usage: None,
+            images: Vec::new(),
         }
     }
 
@@ -108,6 +121,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
             usage: None,
+            images: Vec::new(),
         }
     }
 }

@@ -207,6 +207,10 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Rows for newly seen images are rendered up front: the message loop
+    // borrows the session immutably, so it can only read the finished cache.
+    app.warm_image_cache(inner.width.min(48).max(4));
+
     let mut lines = Vec::new();
     let mut rows: Vec<(u16, String)> = Vec::new();
     for (index, message) in app.session.messages.iter().enumerate() {
@@ -263,6 +267,16 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         if !message.content.is_empty() {
             for content_line in message.content.split('\n') {
                 lines.push(message_line(content_line));
+            }
+        }
+        // Pasted screenshots show up as pixel art directly under the text.
+        for image in &message.images {
+            match app.cached_image(&image.name) {
+                Some(rows) => lines.extend(rows.iter().cloned()),
+                None => lines.push(Line::styled(
+                    format!(" {}", image.name),
+                    Style::default().fg(MUTED),
+                )),
             }
         }
         // Stats belong under a finished answer, not under a tool-call turn.
@@ -499,7 +513,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 ));
             }
         }
-        text.push_str(" · enter steer · esc stop");
+        text.push_str(" · esc stop");
         (text, ACCENT)
     } else if let Some(notice) = &app.notice {
         (
