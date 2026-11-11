@@ -7,7 +7,7 @@ mod diff;
 mod session;
 mod tools;
 mod ui;
-mod update;
+mod upd4te;
 
 use std::{
     future::Future,
