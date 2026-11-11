@@ -512,9 +512,22 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
 /// rather than a widget, and every inner line is clipped to the frame width.
 fn tool_result_lines(app: &App, message: &Message, width: u16) -> Vec<Line<'static>> {
     let outer = usize::from(width).max(1);
-    let inner_width = outer.saturating_sub(4).max(1);
+    let inner_width = outer.saturating_sub(4);
     let failed = message.content.starts_with("Error: ");
     let border = if failed { ERROR } else { MUTED };
+    // On a very narrow terminal a frame would not fit; draw the raw lines.
+    if inner_width < 6 {
+        return message
+            .content
+            .split('\n')
+            .map(|line| {
+                Line::styled(
+                    truncate(line, outer),
+                    Style::default().fg(if failed { ERROR } else { TEXT }),
+                )
+            })
+            .collect();
+    }
 
     let mut body: Vec<Line<'static>> = Vec::new();
     for content_line in message.content.split('\n') {
@@ -551,10 +564,16 @@ fn frame_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(body.len() + 3);
     lines.push(Line::raw(""));
+    // Every row is exactly inner_width + 4 columns, so the frame stays aligned
+    // even when the label is clipped. The label gets what the corners, the left
+    // cap, and one separating space leave over.
+    let total = inner_width + 4;
+    let label = truncate(&label, total.saturating_sub(6));
+    let head = "╭─ ".len() + label.chars().count() + 1;
     lines.push(Line::from(vec![
         Span::styled(format!("╭─ {label} "), Style::default().fg(border)),
         Span::styled(
-            "─".repeat(inner_width.saturating_sub(label.chars().count() + 2)),
+            "─".repeat(total.saturating_sub(head + 2)),
             Style::default().fg(border),
         ),
         Span::styled("─╮", Style::default().fg(border)),
@@ -579,7 +598,7 @@ fn frame_lines(
         ]));
     }
     lines.push(Line::styled(
-        format!("╰{}╯", "─".repeat(inner_width + 2)),
+        format!("╰{}╯", "─".repeat(total.saturating_sub(2))),
         Style::default().fg(border),
     ));
     lines
@@ -1209,6 +1228,27 @@ mod tests {
         let lines = frame_lines("x".repeat(60), vec![Line::raw("body")], 10, Color::Reset);
         assert_eq!(text_of(&lines[1]).chars().count(), 14);
         assert_eq!(text_of(&lines[2]).chars().count(), 14);
+    }
+
+    #[test]
+    fn the_frame_fits_every_usable_width() {
+        for inner in 6..90 {
+            for label in ["tool", "main.py", "yopes", "a-very-long-path/some/file.rs"] {
+                let body = vec![
+                    Line::raw("short"),
+                    Line::raw("a much longer body line that has to be clipped"),
+                    Line::raw(""),
+                ];
+                let lines = frame_lines(label.to_owned(), body, inner, Color::Reset);
+                for line in &lines[1..] {
+                    assert_eq!(
+                        text_of(line).chars().count(),
+                        inner + 4,
+                        "inner={inner} label={label}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
