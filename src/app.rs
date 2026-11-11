@@ -1407,15 +1407,14 @@ impl App {
             self.session_picker = None;
             return Action::None;
         }
-        let picker = match self.session_picker.as_mut() {
-            Some(picker) => picker,
-            None => return Action::None,
+        // Editing a clone and writing it back keeps the borrow rules simple:
+        // helper methods borrow the whole App, not single fields.
+        let Some(mut picker) = self.session_picker.clone() else {
+            return Action::None;
         };
         match key.code {
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => {
-                // collect_sessions never touches the picker field, so the
-                // live mutable borrow stays clean.
                 let entries = self.collect_sessions();
                 let count = session_matching(&entries, &picker.filter).len();
                 picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
@@ -1442,9 +1441,11 @@ impl App {
                 if let Some(path) = target {
                     self.switch_session(path);
                 }
+                return Action::None;
             }
-            _ => {}
+            _ => return Action::None,
         }
+        self.session_picker = Some(picker);
         Action::None
     }
 
