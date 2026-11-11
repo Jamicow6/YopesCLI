@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, time::SystemTime};
+use std::{collections::VecDeque, path::PathBuf, time::SystemTime};
 
 use ratatui::{
     Frame,
@@ -536,7 +536,7 @@ fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: 
         return;
     }
     let selected = picker.selected.min(sessions.len() - 1);
-    let active = app.active_session_path().unwrap_or_default().to_owned();
+    let active: Option<PathBuf> = app.active_session_path().cloned();
     // Rows show a window of the whole list, moving with the selection.
     let visible = inner.height as usize;
     let start = selected.saturating_sub(visible.saturating_sub(1));
@@ -551,7 +551,7 @@ fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: 
         let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
         let chosen = index == selected;
         let marker = if chosen { "› " } else { "  " };
-        let current = entry.path == active;
+        let current = active.as_ref() == Some(&entry.path);
         let right = if current {
             format!("{} · now", age_label(entry.modified))
         } else {
