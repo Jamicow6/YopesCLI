@@ -499,6 +499,29 @@ impl ConnectState {
         }
     }
 
+    /// Drop the model row the user is on in the saved endpoint's model list.
+    ///
+    /// Returns the model id so the caller can persist the deletion; special
+    /// rows (add model, change endpoint, change key) are never removable.
+    fn remove_selected_model(&mut self) -> Option<String> {
+        if self.stage != ConnectStage::CustomModels {
+            return None;
+        }
+        let items = self.items();
+        let item = items.get(self.selected.min(items.len().saturating_sub(1)))?;
+        if matches!(
+            item.id.as_str(),
+            ADD_MODEL_ID | EDIT_ENDPOINT_ID | EDIT_TOKEN_ID
+        ) {
+            return None;
+        }
+        let id = item.id.clone();
+        self.custom_models.retain(|model| model.id != id);
+        self.selected = self.selected.min(self.items().len().saturating_sub(1));
+        self.error = None;
+        Some(id)
+    }
+
     pub fn input(&self) -> String {
         if self.stage == ConnectStage::Auth {
             return self.auth_at_selection().label().to_owned();
@@ -1453,6 +1476,14 @@ impl App {
                     connect.selected = usize::MAX;
                 }
             }
+            KeyCode::Delete | KeyCode::Char('d' | 'D')
+                if stage == ConnectStage::CustomModels
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                return self.delete_selected_model();
+            }
             KeyCode::Char('a' | 'A')
                 if stage == ConnectStage::CustomModels
                     && !key
@@ -1468,6 +1499,38 @@ impl App {
                 }
             }
             _ => {}
+        }
+        Action::None
+    }
+
+    /// Delete key in the model list: drop the row and persist it on disk.
+    fn delete_selected_model(&mut self) -> Action {
+        let Some(id) = self
+            .connect
+            .as_mut()
+            .and_then(ConnectState::remove_selected_model)
+        else {
+            return Action::None;
+        };
+        // The provider id decides whether the deletion is persisted; in the
+        // create flow the endpoint is not saved yet, so nothing to rewrite.
+        let Some(provider_id) = self
+            .connect
+            .as_ref()
+            .and_then(|connect| connect.custom_provider_id.clone())
+        else {
+            return Action::None;
+        };
+        match config::delete_saved_model(&self.config_path, &provider_id, &id) {
+            Ok(()) => {
+                self.custom_providers = config::load_custom_providers(&self.config_path);
+                self.info(format!("Removed model {id}"));
+            }
+            Err(error) => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.error = Some(format!("Could not remove {id}: {error:#}"));
+                }
+            }
         }
         Action::None
     }
@@ -2806,5 +2869,40 @@ mod tests {
         assert_eq!(format_tokens(1200), "1.2k");
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(2150), "2.1 KB");
+    }
+
+    #[test]
+    fn delete_removes_only_a_model_row() {
+        use super::{ADD_MODEL_ID, ConnectStage, ConnectState};
+        use crate::config::SavedModel;
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::CustomModels;
+        connect.custom_models = vec![
+            SavedModel {
+                id: "one".to_owned(),
+                name: "One".to_owned(),
+            },
+            SavedModel {
+                id: "two".to_owned(),
+                name: "Two".to_owned(),
+            },
+        ];
+        assert_eq!(connect.remove_selected_model().as_deref(), Some("one"));
+        assert_eq!(connect.custom_models.len(), 1);
+
+        // The action rows (add model, change endpoint) are never removable.
+        let last = connect.items().len().saturating_sub(1);
+        connect.selected = last;
+        assert!(connect.remove_selected_model().is_none());
+        assert_eq!(connect.custom_models.len(), 1);
+        assert_eq!(connect.items()[last].id, ADD_MODEL_ID);
+
+        connect.custom_provider_id = Some("endpoint".to_owned());
+        let last = connect.items().len().saturating_sub(1);
+        connect.selected = last;
+        assert!(connect.remove_selected_model().is_none());
+        assert_eq!(connect.custom_models.len(), 1);
+        assert_eq!(connect.custom_models[0].id, "two");
     }
 }

@@ -614,6 +614,26 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
     save_saved(path, &saved)
 }
 
+/// Remove a model from a saved custom provider, in place.
+///
+/// The entry is matched by id; when that provider is the active connection,
+/// its top-level model list is dropped too so a restart shows the same list.
+pub fn delete_saved_model(path: &Path, custom_provider_id: &str, model_id: &str) -> Result<()> {
+    let mut saved = load_saved(path)?.context("no configuration file")?;
+    let entry = saved
+        .custom_providers
+        .iter_mut()
+        .find(|stored| stored.id == custom_provider_id)
+        .context("the endpoint is no longer saved")?;
+    entry.models.retain(|model| model.id != model_id);
+    if saved.provider == ProviderKind::Custom
+        && saved.base_url.trim_end_matches('/') == entry.base_url.trim_end_matches('/')
+    {
+        saved.models.retain(|model| model.id != model_id);
+    }
+    save_saved(path, &saved)
+}
+
 fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
     if !path.exists() {
         return Ok(None);
@@ -775,5 +795,59 @@ mod tests {
             Some("my-provider-3")
         );
         assert_eq!(slug_provider_name("  !!  ", &[]), None);
+    }
+
+    #[test]
+    fn deleting_a_model_updates_both_lists_of_the_active_provider() {
+        use super::{
+            Connection, SavedModel, delete_saved_model, load_custom_providers, save_connection,
+        };
+        use std::{fs, process};
+
+        let path = std::env::temp_dir().join(format!("yopes-delete-test-{}.json", process::id()));
+        let _ = fs::remove_file(&path);
+        let connection = Connection {
+            provider: ProviderKind::Custom,
+            provider_name: "Test".to_owned(),
+            model: "one".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            api_key: Some("sk-test".to_owned()),
+            api_key_env: None,
+            auth: AuthKind::Bearer,
+            models: vec![
+                SavedModel {
+                    id: "one".to_owned(),
+                    name: String::new(),
+                },
+                SavedModel {
+                    id: "two".to_owned(),
+                    name: String::new(),
+                },
+            ],
+            custom_provider_id: None,
+        };
+        save_connection(&path, &connection, None).unwrap();
+        let id = load_custom_providers(&path)[0].id.clone();
+
+        delete_saved_model(&path, &id, "one").unwrap();
+
+        let providers = load_custom_providers(&path);
+        assert_eq!(providers[0].models.len(), 1);
+        assert_eq!(providers[0].models[0].id, "two");
+        assert_eq!(providers[0].token.as_deref(), Some("sk-test"));
+        // The active connection's list drops the model too; its selected model
+        // stays so the running session is untouched.
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| model["id"] == "one"),
+            false
+        );
+        assert_eq!(saved["model"], "one");
+        let _ = fs::remove_file(&path);
     }
 }

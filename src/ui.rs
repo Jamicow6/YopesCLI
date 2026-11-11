@@ -1142,9 +1142,7 @@ fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
         ConnectStage::ModelName => {
             "enter add model · empty uses the model id · esc back".to_owned()
         }
-        ConnectStage::CustomModels => {
-            "↑↓ choose · enter use · esc back · rows below edit the endpoint".to_owned()
-        }
+        ConnectStage::CustomModels => "↑↓ choose · enter use · d delete · esc back".to_owned(),
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }
