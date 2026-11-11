@@ -176,21 +176,21 @@ impl Backend {
         if tooling {
             request["tools"] = tools::definitions();
         }
-        let mut builder = self
-            .client
-            .post(completion_url(&self.base_url))
-            .json(&request);
-        if let Some(api_key) = &self.api_key {
-            builder = match self.auth {
-                AuthKind::Bearer => builder.bearer_auth(api_key),
-                AuthKind::XApiKey => builder.header("x-api-key", api_key.as_str()),
-                AuthKind::None => builder,
-            };
-        }
-        let response = builder
-            .send()
-            .await
-            .context("connecting to OpenAI-compatible API")?;
+        let response = send_with_retry("OpenAI-compatible API", || {
+            let mut builder = self
+                .client
+                .post(completion_url(&self.base_url))
+                .json(&request);
+            if let Some(api_key) = &self.api_key {
+                builder = match self.auth {
+                    AuthKind::Bearer => builder.bearer_auth(api_key),
+                    AuthKind::XApiKey => builder.header("x-api-key", api_key.as_str()),
+                    AuthKind::None => builder,
+                };
+            }
+            builder
+        })
+        .await?;
         let response = check_response(response, "OpenAI-compatible API").await?;
         let mut state = OpenAiState::default();
         consume_lines(response, |line| {
@@ -216,13 +216,13 @@ impl Backend {
             "messages": request_messages(messages, false)?,
             "stream": true,
         });
-        let response = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&request)
-            .send()
-            .await
-            .context("connecting to Ollama; is `ollama serve` running?")?;
+        let response = send_with_retry("Ollama", || {
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&request)
+        })
+        .await
+        .context("connecting to Ollama; is `ollama serve` running?")?;
         let response = check_response(response, "Ollama").await?;
         consume_lines(response, |line| {
             let (parsed, done) = parse_ollama_line(line)?;
@@ -274,6 +274,44 @@ fn request_messages(messages: &[Message], tooling: bool) -> Result<Vec<serde_jso
         request.push(value);
     }
     Ok(request)
+}
+
+/// How long to wait between connection retries, doubling up to the cap.
+const RETRY_MIN_DELAY: Duration = Duration::from_secs(1);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Send a request, retrying forever while the provider is unreachable.
+///
+/// DNS failures and refused connections are usually a dropped network or a
+/// sleeping server, so giving up wastes a turn the user can do nothing about.
+/// HTTP error statuses are *not* retried; those are answered by `check_response`.
+async fn send_with_retry<F>(provider: &str, build: F) -> Result<Response>
+where
+    F: Fn() -> reqwest::RequestBuilder + Send,
+{
+    let mut delay = RETRY_MIN_DELAY;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match build().send().await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                let transient = error.is_connect() || error.is_timeout() || error.is_request();
+                if !transient {
+                    return Err(error).with_context(|| format!("connecting to {provider}"));
+                }
+                // Long outages should not look like a hang.
+                if attempt > 3 {
+                    eprintln!(
+                        "{provider} unreachable ({attempt} tries); retrying in {}s · ctrl+c to stop",
+                        delay.as_secs()
+                    );
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_MAX_DELAY);
+            }
+        }
+    }
 }
 
 async fn check_response(response: Response, provider: &str) -> Result<Response> {
