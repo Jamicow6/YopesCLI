@@ -192,7 +192,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         if message.role == Role::Tool {
             let start = lines.len();
-            let framed = tool_result_lines(app, message, inner.width, rows, start);
+            let framed = tool_result_lines(app, message, inner.width, &mut rows, start);
             lines.extend(framed);
             if streaming {
                 if let Some(line) = lines.last_mut() {
