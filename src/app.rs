@@ -279,6 +279,26 @@ pub struct RunningTool {
     pub existed: bool,
 }
 
+/// Filter state of the `/model` popup.
+#[derive(Debug, Clone, Default)]
+pub struct ModelPicker {
+    pub filter: String,
+    pub selected: usize,
+}
+
+/// Saved models matching the picker filter, in stored order.
+fn model_matching<'a>(models: &'a [SavedModel], filter: &str) -> Vec<&'a SavedModel> {
+    let filter = filter.to_ascii_lowercase();
+    models
+        .iter()
+        .filter(|model| {
+            filter.is_empty()
+                || model.name.to_ascii_lowercase().contains(&filter)
+                || model.id.to_ascii_lowercase().contains(&filter)
+        })
+        .collect()
+}
+
 pub struct ToolEvent {
     pub call: ToolCall,
     pub result: std::result::Result<String, String>,
@@ -935,6 +955,8 @@ pub struct App {
     /// Terminal width the cached image rows were rendered for.
     image_width: u16,
     pub approval: Option<ToolApproval>,
+    /// Popup picker opened by `/model` with no argument.
+    pub model_picker: Option<ModelPicker>,
     pub running_tool: Option<RunningTool>,
     /// Diffs for write and edit calls, shown under their results.
     pub changes: HashMap<String, ChangeReport>,
@@ -992,6 +1014,7 @@ impl App {
             image_rows: HashMap::new(),
             image_width: 0,
             approval: None,
+            model_picker: None,
             running_tool: None,
             changes: HashMap::new(),
             expanded: HashSet::new(),
@@ -1191,6 +1214,74 @@ impl App {
         self.spinner = self.spinner.wrapping_add(1);
     }
 
+    pub fn model_matches(&self) -> Vec<&SavedModel> {
+        let filter = self
+            .model_picker
+            .as_ref()
+            .map_or("", |picker| picker.filter.as_str());
+        model_matching(self.backend.saved_models(), filter)
+    }
+
+    /// Rows shown in the `/model` popup for its current filter.
+    pub fn model_picker_count(&self) -> usize {
+        self.model_matches().len()
+    }
+
+    /// `/model` with no argument: a popup over the endpoint's saved models;
+    /// empty lists fall back to the info notice.
+    fn open_model_picker(&mut self) {
+        if self.backend.saved_models().is_empty() {
+            self.info("No saved model list for this endpoint — run /connect to browse models.");
+            return;
+        }
+        self.model_picker = Some(ModelPicker::default());
+    }
+
+    fn handle_model_picker_key(&mut self, key: KeyEvent) -> Action {
+        if key.code == KeyCode::Esc {
+            self.model_picker = None;
+            return Action::None;
+        }
+        let picker = match self.model_picker.as_mut() {
+            Some(picker) => picker,
+            None => return Action::None,
+        };
+        match key.code {
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                let count = model_matching(self.backend.saved_models(), &picker.filter).len();
+                picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Backspace => {
+                picker.filter.pop();
+                picker.selected = 0;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                picker.filter.push(character);
+                picker.selected = 0;
+            }
+            KeyCode::Enter => {
+                let picked = {
+                    let matches = model_matching(self.backend.saved_models(), &picker.filter);
+                    matches
+                        .get(picker.selected.min(matches.len().saturating_sub(1)))
+                        .map(|model| model.id.clone())
+                };
+                self.model_picker = None;
+                if let Some(model) = picked {
+                    self.backend.set_model(model.clone());
+                    self.info(format!("Model changed to {model}"));
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     pub fn handle_paste(&mut self, value: &str) {
         if self.approval.is_some() {
             return;
@@ -1296,6 +1387,9 @@ impl App {
                 self.show_help = false;
             }
             return Action::None;
+        }
+        if self.model_picker.is_some() {
+            return self.handle_model_picker_key(key);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -2367,14 +2461,23 @@ impl App {
             } else {
                 provider.name.clone()
             };
+            let models = provider
+                .models
+                .iter()
+                .map(|(id, model)| config::SavedModel {
+                    id: id.to_owned(),
+                    name: model.name.clone(),
+                })
+                .collect::<Vec<_>>();
             (
                 provider_name,
                 provider.base_url(&provider_id),
                 model_id,
                 provider.env.first().cloned(),
+                models,
             )
         };
-        let (provider_name, base_url, model_id, api_key_env) = plan;
+        let (provider_name, base_url, model_id, api_key_env, models) = plan;
         if base_url.trim().is_empty() {
             if let Some(connect) = self.connect.as_mut() {
                 connect.error = Some(format!("{provider_name} has no API endpoint."));
@@ -2404,7 +2507,7 @@ impl App {
             api_key: entered_key,
             api_key_env,
             auth: AuthKind::Bearer,
-            models: Vec::new(),
+            models: models.clone(),
             custom_provider_id: None,
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
@@ -2415,7 +2518,7 @@ impl App {
             base_url,
             effective_key,
             AuthKind::Bearer,
-            Vec::new(),
+            models,
         );
         self.connect = None;
         if let Err(error) = saved {
@@ -2698,7 +2801,7 @@ impl App {
             "/model" => {
                 let model = parts.collect::<Vec<_>>().join(" ");
                 if model.is_empty() {
-                    self.info(format!("Active model: {}", self.backend.model()));
+                    self.open_model_picker();
                 } else {
                     self.backend.set_model(model.clone());
                     self.info(format!("Model changed to {model}"));
@@ -3313,5 +3416,39 @@ mod tests {
         assert_eq!(rows[0].spans[0].content, "▄");
         assert_eq!(rows[0].spans[0].style.fg, Some(Color::Rgb(255, 0, 0)));
         assert_eq!(rows[0].spans[3].style.fg, Some(Color::Rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn model_matching_filters_on_name_and_id() {
+        use super::model_matching;
+        use crate::config::SavedModel;
+
+        let models = vec![
+            SavedModel {
+                id: "glm-4.7".into(),
+                name: "GLM 4.7".into(),
+            },
+            SavedModel {
+                id: "gpt-5.2".into(),
+                name: String::new(),
+            },
+            SavedModel {
+                id: "claude-haiku".into(),
+                name: "Claude Haiku".into(),
+            },
+        ];
+
+        assert_eq!(
+            model_matching(&models, "").len(),
+            3,
+            "empty filter keeps everything"
+        );
+        let found = model_matching(&models, "GLM");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "glm-4.7");
+        let found = model_matching(&models, "gpt");
+        assert_eq!(found.len(), 1, "matches the id when the name is empty");
+        assert_eq!(found[0].id, "gpt-5.2");
+        assert!(model_matching(&models, "llama").is_empty());
     }
 }

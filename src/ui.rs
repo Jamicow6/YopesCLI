@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
-        Mode, NoticeKind, ToolApproval, format_bytes, format_tokens,
+        Mode, ModelPicker, NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
     catalog::FASFAST_ID,
     diff::{ChangeKind, DiffLine, FileDiff},
@@ -77,7 +77,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let palette = if app.show_help || app.connect_open() || app.approval.is_some() {
+    let picker = app.model_picker.clone();
+    let palette = if app.show_help || app.connect_open() || app.approval.is_some() || picker.is_some()
+    {
         Vec::new()
     } else {
         app.palette_matches()
@@ -87,11 +89,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         (palette.len() as u16).saturating_add(2)
     };
+    let picker_height = if picker.is_some() {
+        // A long list scrolls inside the bordered popup instead of growing.
+        (app.model_picker_count().min(12).max(1) as u16).saturating_add(2)
+    } else {
+        0
+    };
+    let popup_height = palette_height + picker_height;
     let composer_height = composer_height(app, area.width);
 
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(2)];
-    if palette_height > 0 {
-        constraints.push(Constraint::Length(palette_height));
+    if popup_height > 0 {
+        constraints.push(Constraint::Length(popup_height));
     }
     constraints.push(Constraint::Length(1));
     constraints.push(Constraint::Length(composer_height));
@@ -106,8 +115,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_transcript(frame, app, chunks[1]);
 
     let mut index = 2;
-    if palette_height > 0 {
-        draw_palette(frame, app, &palette, chunks[index]);
+    if popup_height > 0 {
+        if let Some(picker) = &picker {
+            draw_model_picker(frame, app, picker, chunks[index]);
+        } else {
+            draw_palette(frame, app, &palette, chunks[index]);
+        }
         index += 1;
     } else {
         draw_separator(frame, chunks[index]);
@@ -386,6 +399,86 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         app.output_rows.push((inner.y.saturating_add(offset), call_id));
+    }
+}
+
+fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ModelPicker, area: Rect) {
+    let width = area.width.saturating_sub(4).min(PALETTE_WIDTH);
+    if width < 20 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y,
+        width,
+        area.height,
+    );
+    let filter_field = if picker.filter.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", picker.filter)
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title_top(Line::styled(
+            format!(" model{filter_field} "),
+            Style::default().fg(MUTED),
+        ))
+        .title_bottom(Line::styled(
+            " ↑↓ move · enter switch · esc cancel ",
+            Style::default().fg(MUTED),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let models = app.model_matches();
+    if models.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matches.").style(Style::default().fg(MUTED)),
+            inner,
+        );
+        return;
+    }
+    let selected = picker.selected.min(models.len() - 1);
+    // The popup shows a window of the list, moving with the selection.
+    let visible = inner.height as usize;
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    for (offset, model) in models
+        .iter()
+        .skip(start)
+        .take(visible)
+        .enumerate()
+    {
+        let index = start + offset;
+        let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
+        let chosen = index == selected;
+        let marker = if chosen { "› " } else { "  " };
+        let title = if model.name.trim().is_empty() {
+            model.id.clone()
+        } else {
+            model.name.clone()
+        };
+        let title_style = if chosen {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        let line = Line::from(vec![
+            Span::styled(marker, Style::default().fg(ACCENT)),
+            Span::styled(
+                format!(
+                    "{title:<width$}  ",
+                    width = inner.width.saturating_sub(30) as usize
+                ),
+                title_style,
+            ),
+            Span::styled(model.id.clone(), Style::default().fg(MUTED)),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
     }
 }
 

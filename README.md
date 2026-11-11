@@ -47,7 +47,7 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 - `/new` — start a fresh session.
 - `/connect` — browse models.dev providers or configure a custom OpenAI-compatible endpoint.
 - `/model <name>` — switch model for subsequent messages.
-- `/model` — show the active model.
+- `/model` — a popup over the endpoint's saved models: type to filter, `↑↓` to move, `Enter` to switch. Falls back to an info notice when the endpoint has no saved model list.
 - `/tools` — show the current tool mode.
 - `/tools on|off|auto|ask` — change how tool calls are approved.
 - `/quit` — save and quit.
