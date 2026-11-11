@@ -868,6 +868,8 @@ pub struct App {
     pub should_quit: bool,
     pub notice: Option<Notice>,
     pub spinner: usize,
+    /// Submitted turn body: the composer prompt flashes for a few ticks.
+    pub send_pulse: Option<usize>,
     pub tools_mode: ToolsMode,
     /// What the current turn is for: applying changes, planning, or chat.
     pub mode: Mode,
@@ -929,6 +931,7 @@ impl App {
             should_quit: false,
             notice: None,
             spinner: 0,
+            send_pulse: None,
             tools_mode: ToolsMode::default(),
             mode: Mode::default(),
             attachments: Vec::new(),
@@ -2452,6 +2455,7 @@ impl App {
         }
 
         self.notice = None;
+        self.send_pulse = Some(self.spinner);
         self.tool_rounds = 0;
         self.session.update_title(prompt);
         if steering {

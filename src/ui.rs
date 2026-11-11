@@ -116,7 +116,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let spinner = app.spinner;
     if let Some(approval) = app.approval.as_mut() {
-        draw_approval(frame, approval, area);
+        draw_approval(frame, approval, spinner, area);
     } else if app.show_help {
         draw_help(frame, area);
     } else if let Some(connect) = app.connect_state() {
@@ -461,7 +461,13 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(inner);
-    let prompt_style = if app.is_busy() {
+    // The prompt flashes briefly after a send: input registered, turn running.
+    let pulse = app
+        .send_pulse
+        .is_some_and(|mark| app.spinner.saturating_sub(mark) < 5);
+    let prompt_style = if pulse {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else if app.is_busy() {
         Style::default().fg(MUTED)
     } else {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -586,7 +592,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A small prompt for a risky command. It only names the command and asks.
-fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
+/// The border pulses on the idle ticker so the dialog pulls the eye.
+fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, spinner: usize, area: Rect) {
     let width = area.width.saturating_sub(4).min(72);
     if width < 30 || area.height < 8 {
         return;
@@ -602,9 +609,17 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, area: Rect) {
     );
     frame.render_widget(Clear, popup);
 
+    let blink = (spinner / 5) % 2 == 0;
+    let border = Style::default()
+        .fg(ACCENT)
+        .add_modifier(if blink {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
+        .border_style(border)
         .title_top(Line::from(vec![Span::styled(
             " run this command? ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
