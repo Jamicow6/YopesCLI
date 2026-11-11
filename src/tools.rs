@@ -25,7 +25,7 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 11] = [
+pub const TOOL_NAMES: [&str; 12] = [
     "list_dir",
     "read_file",
     "glob",
@@ -35,6 +35,7 @@ pub const TOOL_NAMES: [&str; 11] = [
     "multi_edit",
     "run_command",
     "web_search",
+    "web_fetch",
     "todo_write",
     "delegate",
 ];
@@ -84,6 +85,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              it applies every edit in order, and one failure refuses the whole batch. \
              Use web_search for anything newer than your knowledge or that needs current \
              facts, and cite the URL you used. \
+             Use web_fetch to read the text of a specific page, such as one surfaced by \
+             web_search. \
              For multi-step work or when the user asks for a todo list, maintain the \
              checklist with todo_write: send the whole list each call, marking done items. \
              For an independent subtask use delegate: hand the subagent one self-contained \
@@ -331,6 +334,23 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "web_fetch",
+                "description": "Fetch one web page over HTTP GET and return its readable text: scripts, styles and tags are stripped. Use it when search results point at a page worth reading or when the user gives an address.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Absolute http:// or https:// address."
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "todo_write",
                 "description": "Write the workspace task checklist to todo.md. Rewrite the whole list each call: every item is an object with the task text and a done flag. Use it whenever the user asks for a todo list or a multi-step plan.",
                 "parameters": {
@@ -426,6 +446,7 @@ pub fn preview(call: &ToolCall) -> String {
         }
         "run_command" => clip(&string("command"), 160),
         "web_search" => clip(&string("query"), 160),
+        "web_fetch" => clip(&string("url"), 160),
         "todo_write" => {
             let items = arguments
                 .as_ref()
@@ -685,6 +706,7 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
         "multi_edit" => multi_edit(&call.function.arguments),
         "run_command" => run_command(&call.function.arguments),
         "web_search" => web_search(&call.function.arguments, web_key),
+        "web_fetch" => web_fetch(&call.function.arguments),
         "todo_write" => todo_write(&call.function.arguments),
         // Handled by the session loop: the subagent needs the backend.
         "delegate" => bail!("delegate cannot run outside the session loop"),
@@ -1473,6 +1495,151 @@ fn web_search(arguments: &str, api_key: Option<&str>) -> Result<String> {
     Ok(truncate_output(output))
 }
 
+/// How many bytes one `web_fetch` may pull.
+const MAX_FETCH_BYTES: usize = 1_000_000;
+
+#[derive(Deserialize)]
+struct WebFetchArgs {
+    url: String,
+}
+
+/// Fetch one page over HTTP GET and return its text: scripts, styles and
+/// tags are gone, whitespace is squeezed to lines. Blocking, because tool
+/// execution runs on `spawn_blocking`.
+fn web_fetch(arguments: &str) -> Result<String> {
+    let args: WebFetchArgs = parse(arguments)?;
+    let url = args.url.trim();
+    if url.is_empty() {
+        bail!("url cannot be empty");
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        bail!("url must start with http:// or https://");
+    }
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .context("creating the fetch client")?;
+    let response = client
+        .get(url)
+        .header(
+            "user-agent",
+            format!("yopes/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .with_context(|| format!("fetching {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("the server returned {status} for {url}");
+    }
+    let mut body_bytes = Vec::new();
+    response
+        .take((MAX_FETCH_BYTES + 1) as u64)
+        .read_to_end(&mut body_bytes)
+        .context("reading the response body")?;
+    let body = String::from_utf8_lossy(&body_bytes);
+    Ok(truncate_output(strip_html(&body)))
+}
+
+/// The page's text: `<script>` and `<style>` bodies dropped wholesale, all
+/// other tags replaced by a space, the usual entities decoded, blank runs
+/// collapsed. Good enough to read, deliberately not a browser engine.
+fn strip_html(body: &str) -> String {
+    let body = drop_block(body, "script");
+    let body = drop_block(&body, "style");
+    let mut text = String::with_capacity(body.len());
+    let mut at = 0;
+    while at < body.len() {
+        match body[at..].find('<') {
+            None => {
+                text.push_str(&body[at..]);
+                break;
+            }
+            Some(open_rel) => {
+                let open = at + open_rel;
+                text.push_str(&body[at..open]);
+                let Some(close_rel) = body[open..].find('>') else {
+                    break;
+                };
+                // Tags often sit between words; a space keeps them separate.
+                text.push(' ');
+                at = open + close_rel + 1;
+            }
+        }
+    }
+    let text = decode_entities(&text);
+    let mut clean = String::new();
+    let mut blanks = 0;
+    for line in text.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        blanks = if line.is_empty() { blanks + 1 } else { 0 };
+        if blanks <= 1 {
+            clean.push_str(&line);
+            clean.push('\n');
+        }
+    }
+    clean.trim_end().to_owned()
+}
+
+/// Drop `<tag …>…</tag>` blocks: real pages nest scripts and styles everywhere
+/// and their bodies are noise, not content.
+fn drop_block(body: &str, tag: &str) -> String {
+    let open_marker = format!("<{tag}");
+    let close_marker = format!("</{tag}");
+    let mut text = body.to_owned();
+    loop {
+        let lower = text.to_ascii_lowercase();
+        let Some(start) = find_tag(&lower, &open_marker) else {
+            return text;
+        };
+        let Some(close) = find_tag(&lower[start..], &close_marker).map(|rel| start + rel) else {
+            // An unterminated block swallows everything after it.
+            text.truncate(start);
+            return text;
+        };
+        let end = close
+            + close_marker.len()
+            + lower[close + close_marker.len()..]
+                .find('>')
+                .map_or(0, |rel| rel + 1);
+        let mut combined = String::with_capacity(text.len());
+        combined.push_str(&text[..start]);
+        combined.push(' ');
+        combined.push_str(&text[end..]);
+        text = combined;
+    }
+}
+
+/// The offset of `<name` where the next character really opens an element:
+/// `>`, `/` or whitespace, so `<scripts>` is never mistaken for `<script>`.
+fn find_tag(hay: &str, marker: &str) -> Option<usize> {
+    let mut at = 0;
+    while let Some(rel) = hay[at..].find(marker) {
+        let start = at + rel;
+        at = start + marker.len();
+        match hay[at..].chars().next() {
+            Some('>') | Some('/') => return Some(start),
+            Some(c) if c.is_ascii_whitespace() => return Some(start),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn decode_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_owned();
+    }
+    // `&amp;` last, so encoded entities stay encoded.
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
 #[derive(Deserialize)]
 struct TodoItemArgs {
     text: String,
@@ -1723,6 +1890,29 @@ mod tests {
         let empty = ToolCall::new("call_4", "web_search", r#"{"query":"  "}"#);
         let error = execute(&empty, Some("tvly-test")).unwrap_err().to_string();
         assert!(error.contains("query"));
+    }
+
+    #[test]
+    fn web_fetch_guards_urls_and_strips_the_page_noise() {
+        use super::{execute, strip_html};
+        let empty = ToolCall::new("call_30", "web_fetch", r#"{"url":"  "}"#);
+        let error = execute(&empty, None).unwrap_err().to_string();
+        assert!(error.contains("url"), "{error}");
+        let scheme = ToolCall::new("call_31", "web_fetch", r#"{"url":"ftp://example.test"}"#);
+        let error = execute(&scheme, None).unwrap_err().to_string();
+        assert!(error.contains("http"), "{error}");
+
+        assert_eq!(
+            strip_html(
+                "<html><head><script>noise()</script><style>p { color: red; }</style>\
+                 </head><body>Hi &amp; <b>bye</b></body></html>"
+            ),
+            "Hi & bye"
+        );
+        // An unterminated block swallows what follows, and look-alike tags
+        // such as <scripts> are kept as plain text.
+        assert_eq!(strip_html("<p>keep</p><SCRIPT>drop"), "keep");
+        assert_eq!(strip_html("<scripts>x</scripts>"), "x");
     }
 
     #[test]
