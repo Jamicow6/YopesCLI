@@ -1,3 +1,4 @@
+use super::markdown::markdown_lines;
 use super::*;
 
 pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -139,7 +140,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         if !message.content.is_empty() {
-            lines.extend(markdown_lines(&message.content));
+            lines.extend(markdown_lines(&message.content, inner.width));
         }
         // Pasted screenshots show up as pixel art directly under the text.
         for image in &message.images {
