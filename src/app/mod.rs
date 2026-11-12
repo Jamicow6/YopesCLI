@@ -1206,6 +1206,22 @@ impl App {
             .map(|active| active.started.elapsed().as_secs_f64())
     }
 
+    /// True while the active request is summarizing older turns.
+    pub fn compaction_active(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.compacting.is_some())
+    }
+
+    /// The summary streamed so far, shown live in the transcript.
+    pub fn compaction_text(&self) -> Option<&str> {
+        self.active
+            .as_ref()?
+            .compacting
+            .as_ref()
+            .map(|compaction| compaction.text.as_str())
+    }
+
     pub fn stream_tool_progress(&self) -> Option<(String, String, u64)> {
         self.active
             .as_ref()

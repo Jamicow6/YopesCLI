@@ -172,7 +172,10 @@ impl App {
                 self.discard_pending_tools("The response failed before this tool call could run.");
                 self.tool_rounds = 0;
                 self.remove_empty_response();
-                self.error(message);
+                // Providers fail in the reply block, not the footer: the error
+                // belongs where the answer would have been.
+                self.session.messages.push(Message::provider_error(message));
+                self.follow_tail = true;
                 self.save_session();
                 Action::None
             }
@@ -257,6 +260,7 @@ impl App {
                 && message.content.is_empty()
                 && message.reasoning.trim().is_empty()
                 && message.tool_calls.is_none()
+                && message.error.is_none()
         }) {
             self.session.messages.pop();
         }
