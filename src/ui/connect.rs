@@ -44,13 +44,10 @@ pub(super) fn draw_connect(
         return;
     }
 
-    // The logo of the provider being picked is drawn above the list.
+    // The logo of the provider being picked is drawn beside its name in the
+    // list, not in a separate block above it.
     let logo = selected_logo_id(connect).and_then(|id| app.logos.get(id.as_str()));
-    let logo_height = logo.map_or(0, |logo| logo.len() as u16);
     let mut constraints = vec![Constraint::Length(1)];
-    if logo_height > 0 {
-        constraints.push(Constraint::Length(logo_height));
-    }
     constraints.push(Constraint::Min(2));
     constraints.push(Constraint::Length(1));
     let rows = Layout::default()
@@ -72,22 +69,7 @@ pub(super) fn draw_connect(
     frame.render_widget(Paragraph::new(Line::from(spans)), rows[index]);
     index += 1;
 
-    if let Some(logo) = logo {
-        let area = rows[index];
-        // The logo sits in the middle of the width it needs.
-        let width = logo
-            .first()
-            .map_or(0, |line| line.spans.len() as u16)
-            .min(area.width);
-        let left = area.x + area.width.saturating_sub(width) / 2;
-        for (offset, line) in logo.iter().enumerate() {
-            let row = Rect::new(left, area.y + offset as u16, width, 1);
-            frame.render_widget(Paragraph::new(line.clone()), row);
-        }
-        index += 1;
-    }
-
-    draw_connect_list(frame, app, connect, spinner, rows[index]);
+    draw_connect_list(frame, app, connect, spinner, logo, rows[index]);
     draw_connect_hint(frame, connect, rows[index + 1]);
 }
 
@@ -113,6 +95,7 @@ pub(super) fn draw_connect_list(
     app: &App,
     connect: &ConnectState,
     spinner: usize,
+    logo: Option<&[Line<'static>]>,
     area: Rect,
 ) {
     if connect.loading {
@@ -209,13 +192,28 @@ pub(super) fn draw_connect_list(
     let selected_row = selected + extra;
     let start_row = selected_row.saturating_sub(height.saturating_sub(1));
     let start = start_row.min(rows.len().saturating_sub(height));
-    let title_width = usize::from(area.width).saturating_sub(30).max(10);
+    // A logo, when drawn, gets a gutter on the left: the name then reads next
+    // to its provider's artwork instead of under a separate block.
+    let logo_width = logo
+        .and_then(|logo| logo.first())
+        .map_or(0, |line| line.spans.len() as u16);
+    let gutter = if logo_width > 0 && area.width > logo_width.saturating_add(30) {
+        logo_width.saturating_add(2)
+    } else {
+        0
+    };
+    let list = Rect {
+        x: area.x.saturating_add(gutter),
+        width: area.width.saturating_sub(gutter),
+        ..area
+    };
+    let title_width = usize::from(list.width).saturating_sub(30).max(10);
 
     for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
-        let rect = Rect::new(area.x, area.y + offset as u16, area.width, 1);
+        let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
         let Ok(index) = *row else {
             let Err(label) = *row else { unreachable!() };
-            let remaining = usize::from(area.width)
+            let remaining = usize::from(list.width)
                 .saturating_sub(label.chars().count())
                 .saturating_sub(3);
             frame.render_widget(
@@ -268,6 +266,22 @@ pub(super) fn draw_connect_list(
         spans.push(Span::styled(item.detail.clone(), detail_style));
         frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     }
+
+    // The selected provider's artwork sits in the gutter, starting on its row.
+    if let Some(logo) = logo.filter(|_| gutter > 0) {
+        let top = area.y.saturating_add((selected_row - start) as u16);
+        let between = area.y.saturating_add(area.height);
+        for (offset, line) in logo.iter().enumerate() {
+            let y = top.saturating_add(offset as u16);
+            if y >= between {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(line.clone()),
+                Rect::new(area.x, y, logo_width, 1),
+            );
+        }
+    }
 }
 
 pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
@@ -281,6 +295,7 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
             |name| format!("enter continue · esc back · empty uses ${name}"),
         ),
         ConnectStage::Endpoint => "enter continue · esc back".to_owned(),
+        ConnectStage::ModelsEndpoint => "enter continue · blank uses <endpoint>/models".to_owned(),
         ConnectStage::ProviderName => "enter continue · esc close".to_owned(),
         ConnectStage::Auth => "↑↓ choose · enter continue · esc back".to_owned(),
         ConnectStage::CustomToken => "enter continue · esc back".to_owned(),

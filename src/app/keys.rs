@@ -15,6 +15,7 @@ impl App {
                 ConnectStage::Password | ConnectStage::Unlock => connect.password.push_str(&clean),
                 ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
+                ConnectStage::ModelsEndpoint => connect.custom_models_url.push_str(&clean),
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
                 ConnectStage::ModelId => connect.custom_model_id.push_str(&clean),
                 ConnectStage::ModelName => connect.custom_model_name.push_str(&clean),
@@ -64,7 +65,13 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(3),
             MouseEventKind::ScrollDown => self.scroll_down(3),
-            MouseEventKind::Down(MouseButton::Left) => self.toggle_output_at(mouse.row),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.progress_row == Some(mouse.row) {
+                    self.progress_collapsed = !self.progress_collapsed;
+                } else {
+                    self.toggle_output_at(mouse.row);
+                }
+            }
             _ => {}
         }
     }
@@ -151,6 +158,11 @@ impl App {
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 KeyCode::Char('v') => return Action::PasteImage,
                 KeyCode::Char('g') => return Action::ToggleMouseCapture,
+                KeyCode::Char('p') => {
+                    if !self.session.tasks.is_empty() {
+                        self.progress_collapsed = !self.progress_collapsed;
+                    }
+                }
                 _ => {}
             }
             return Action::None;

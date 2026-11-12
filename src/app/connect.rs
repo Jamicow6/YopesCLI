@@ -18,6 +18,7 @@ impl App {
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
             ConnectStage::ProviderName
             | ConnectStage::Endpoint
+            | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName => self.handle_connect_custom_text(key),
@@ -115,6 +116,12 @@ impl App {
     }
 
     pub(crate) fn handle_connect_list_key(&mut self, key: KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('d' | 'D'))
+        {
+            self.disconnect_selected_provider();
+            return Action::None;
+        }
         match key.code {
             KeyCode::Esc => {
                 let cleared_filter = if let Some(connect) = self.connect.as_mut() {
@@ -188,6 +195,32 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    /// Ctrl+D on a provider row: forget the stored key of the ticked provider.
+    fn disconnect_selected_provider(&mut self) {
+        let Some(connect) = self.connect.as_ref() else {
+            return;
+        };
+        let Some(item) = connect.selected_item() else {
+            return;
+        };
+        if !item.active {
+            self.info("Only the connected provider is marked ✓; select it and press ctrl+d.");
+            return;
+        }
+        let Some(endpoint) = connect.selected_endpoint() else {
+            self.info("This row has no saved endpoint to disconnect.");
+            return;
+        };
+        self.disconnect_endpoint(&endpoint);
+        // Reset the selection so the now-unconfigured backend does not keep a
+        // stale active row under the cursor.
+        if let Some(connect) = self.connect.as_mut() {
+            connect.selected = connect
+                .selected
+                .min(connect.items().len().saturating_sub(1));
+        }
     }
 
     pub(crate) fn handle_connect_choice_key(&mut self, key: KeyEvent) -> Action {
@@ -339,7 +372,10 @@ impl App {
         connect.error = None;
         // While editing a saved endpoint, back returns to its model list.
         if connect.custom_provider_id.is_some()
-            && matches!(stage, ConnectStage::Endpoint | ConnectStage::CustomToken)
+            && matches!(
+                stage,
+                ConnectStage::Endpoint | ConnectStage::ModelsEndpoint | ConnectStage::CustomToken
+            )
         {
             connect.stage = ConnectStage::CustomModels;
             connect.selected = 0;
@@ -348,6 +384,10 @@ impl App {
         match stage {
             ConnectStage::Endpoint => {
                 connect.stage = ConnectStage::ProviderName;
+                connect.selected = 0;
+            }
+            ConnectStage::ModelsEndpoint => {
+                connect.stage = ConnectStage::Endpoint;
                 connect.selected = 0;
             }
             ConnectStage::CustomToken => {
@@ -410,15 +450,44 @@ impl App {
                     self.connect_error("Endpoint must start with http:// or https://.");
                     return Action::None;
                 }
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.custom_endpoint = endpoint;
+                    // Editing a saved endpoint returns to its model list; the
+                    // create flow continues on to pick an authorization kind.
+                    if connect.custom_provider_id.is_some() {
+                        connect.stage = ConnectStage::CustomModels;
+                        connect.selected = 0;
+                        connect.error = None;
+                        return Action::None;
+                    }
+                    // The model list almost always lives at <base>/models; the
+                    // field can be changed before continuing.
+                    if connect.custom_models_url.trim().is_empty() {
+                        connect.custom_models_url =
+                            format!("{}/models", connect.custom_endpoint.trim_end_matches('/'));
+                    }
+                    connect.stage = ConnectStage::ModelsEndpoint;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            ConnectStage::ModelsEndpoint => {
+                let url = self
+                    .connect
+                    .as_ref()
+                    .map(|connect| connect.custom_models_url.trim().to_owned())
+                    .unwrap_or_default();
+                if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
+                    self.connect_error("Models endpoint must start with http:// or https://.");
+                    return Action::None;
+                }
                 let auth_index = self
                     .connect
                     .as_ref()
                     .map(ConnectState::auth_index)
                     .unwrap_or(0);
                 if let Some(connect) = self.connect.as_mut() {
-                    connect.custom_endpoint = endpoint;
-                    // Editing a saved endpoint returns to its model list; the
-                    // create flow continues on to pick an authorization kind.
+                    connect.custom_models_url = url;
                     if connect.custom_provider_id.is_some() {
                         connect.stage = ConnectStage::CustomModels;
                         connect.selected = 0;
@@ -441,6 +510,7 @@ impl App {
                     self.connect_error(format!("Enter a token for {}.", auth.label()));
                     return Action::None;
                 }
+                let mut fetch = false;
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_token = token;
                     connect.custom_token_dirty = true;
@@ -450,9 +520,16 @@ impl App {
                         connect.error = None;
                         return Action::None;
                     }
-                    connect.stage = ConnectStage::ModelId;
-                    connect.selected = 0;
-                    connect.error = None;
+                    if connect.custom_models_url.trim().is_empty() {
+                        connect.stage = ConnectStage::ModelId;
+                        connect.selected = 0;
+                        connect.error = None;
+                    } else {
+                        fetch = true;
+                    }
+                }
+                if fetch {
+                    return self.fetch_custom_models();
                 }
             }
             ConnectStage::ModelId => {
@@ -520,6 +597,7 @@ impl App {
                         connect.custom_models.push(SavedModel {
                             id: id.clone(),
                             name,
+                            ..SavedModel::default()
                         });
                     }
                     connect.selected = existing.unwrap_or(connect.custom_models.len() - 1);
@@ -724,11 +802,24 @@ impl App {
         // mutably while a stored key is looked up on disk.
         let config_path = self.config_path.clone();
         let mut finish_now = false;
+        // Fetching needs the whole App (the live key may be reused), so it is
+        // done after the connect state is released.
+        if item.id == FETCH_MODELS_ID
+            && self
+                .connect
+                .as_ref()
+                .is_some_and(|connect| connect.stage == ConnectStage::CustomModels)
+        {
+            return self.fetch_custom_models();
+        }
         let Some(connect) = self.connect.as_mut() else {
             return Action::None;
         };
         match connect.stage {
             ConnectStage::Providers => {
+                if item.id == REFRESH_CATALOG_ID {
+                    return Action::RefreshCatalog;
+                }
                 connect.model_id = None;
                 connect.filter.clear();
                 connect.selected = 0;
@@ -750,6 +841,7 @@ impl App {
                     connect.custom_endpoint = saved.base_url.clone();
                     connect.custom_auth = saved.auth;
                     connect.custom_models = saved.models.clone();
+                    connect.custom_models_url = saved.models_url.clone().unwrap_or_default();
                     connect.custom_token = saved.token.clone().unwrap_or_default();
                     connect.custom_token_dirty = false;
                     connect.custom_model_id.clear();
@@ -785,6 +877,7 @@ impl App {
                     connect.custom_token.clear();
                     connect.custom_token_dirty = false;
                     connect.custom_models.clear();
+                    connect.custom_models_url.clear();
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
                     connect.stage = ConnectStage::ProviderName;
@@ -891,6 +984,12 @@ impl App {
                     connect.custom_token_dirty = true;
                     return Action::None;
                 }
+                if item.id == EDIT_MODELS_URL_ID {
+                    connect.stage = ConnectStage::ModelsEndpoint;
+                    connect.selected = 0;
+                    connect.error = None;
+                    return Action::None;
+                }
                 connect.model_id = Some(item.id);
                 connect.password.clear();
                 connect.selected = 0;
@@ -923,6 +1022,7 @@ impl App {
             ConnectStage::ApiKey
             | ConnectStage::ProviderName
             | ConnectStage::Endpoint
+            | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
@@ -981,6 +1081,8 @@ impl App {
                 .map(|(id, model)| config::SavedModel {
                     id: id.to_owned(),
                     name: model.name.clone(),
+                    input_cost: model.cost.as_ref().map(|cost| cost.input),
+                    output_cost: model.cost.as_ref().map(|cost| cost.output),
                 })
                 .collect::<Vec<_>>();
             (
@@ -1029,6 +1131,7 @@ impl App {
             api_key_env,
             auth: AuthKind::Bearer,
             models: models.clone(),
+            models_url: None,
             custom_provider_id: None,
             provider_id: Some(provider_id),
             reuse_secret,
@@ -1066,6 +1169,94 @@ impl App {
         Action::FetchFasfas(key)
     }
 
+    /// Fetch the model list from the custom provider's models endpoint.
+    fn fetch_custom_models(&mut self) -> Action {
+        let (endpoint, configured, auth, token) = {
+            let Some(connect) = self.connect.as_ref() else {
+                return Action::None;
+            };
+            let endpoint = connect.custom_endpoint.trim_end_matches('/').to_owned();
+            let configured = connect.custom_models_url.trim().to_owned();
+            let typed = connect.custom_token.trim().to_owned();
+            let same_endpoint = self.backend.base_url().trim_end_matches('/') == endpoint;
+            let token = if typed.is_empty() {
+                connect
+                    .unlocked_key
+                    .clone()
+                    .or_else(|| {
+                        connect
+                            .stored_secret
+                            .as_ref()
+                            .and_then(|secret| secret.plaintext().map(str::to_owned))
+                    })
+                    .or_else(|| {
+                        same_endpoint
+                            .then(|| self.backend.api_key().map(str::to_owned))
+                            .flatten()
+                    })
+            } else {
+                Some(typed)
+            };
+            (endpoint, configured, connect.custom_auth, token)
+        };
+        if endpoint.is_empty() {
+            self.connect_error("Enter the completion endpoint first.");
+            return Action::None;
+        }
+        let url = if configured.is_empty() {
+            format!("{endpoint}/models")
+        } else {
+            configured
+        };
+        if let Some(connect) = self.connect.as_mut() {
+            connect.loading = true;
+            connect.error = None;
+        }
+        Action::FetchCustomModels { url, token, auth }
+    }
+
+    /// The custom endpoint's model list arrived: merge it into the manager.
+    pub(crate) fn on_custom_models(&mut self, result: Result<Vec<(String, String)>, String>) {
+        let Some(connect) = self.connect.as_mut() else {
+            return;
+        };
+        connect.loading = false;
+        match result {
+            Err(error) => connect.error = Some(format!("Could not fetch models: {error}")),
+            Ok(models) => {
+                for (id, name) in models {
+                    let id = id.trim().to_owned();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    match connect
+                        .custom_models
+                        .iter_mut()
+                        .find(|model| model.id == id)
+                    {
+                        Some(existing) => {
+                            if !name.is_empty() {
+                                existing.name = name;
+                            }
+                        }
+                        None => connect.custom_models.push(SavedModel {
+                            id,
+                            name,
+                            ..SavedModel::default()
+                        }),
+                    }
+                }
+                connect.stage = ConnectStage::CustomModels;
+                connect.selected = 0;
+                connect.error = if connect.custom_models.is_empty() {
+                    Some("The models endpoint returned no models; add one manually.".to_owned())
+                } else {
+                    None
+                };
+            }
+        }
+    }
+
     pub(crate) fn finish_custom_connect(&mut self, password: Option<String>) -> Action {
         let plan = {
             let Some(connect) = self.connect.as_ref() else {
@@ -1087,9 +1278,23 @@ impl App {
                 },
                 connect.custom_provider_id.clone(),
                 connect.unlocked_key.clone(),
+                {
+                    let url = connect.custom_models_url.trim();
+                    (!url.is_empty()).then(|| url.to_owned())
+                },
             )
         };
-        let (endpoint, model_id, auth, token, models, name, custom_provider_id, unlocked) = plan;
+        let (
+            endpoint,
+            model_id,
+            auth,
+            token,
+            models,
+            name,
+            custom_provider_id,
+            unlocked,
+            models_url,
+        ) = plan;
         let Some(model_id) = model_id else {
             self.connect_error("Choose a model.");
             return Action::None;
@@ -1138,6 +1343,7 @@ impl App {
             api_key_env: None,
             auth,
             models: models.clone(),
+            models_url,
             custom_provider_id,
             provider_id: None,
             reuse_secret,
@@ -1229,12 +1435,17 @@ impl App {
         let Some(connect) = self.connect.as_ref() else {
             return;
         };
+        // Only the provider rows carry model artwork; the model list would
+        // otherwise request /logos/<model-id>.svg for every model on screen.
+        if connect.stage != ConnectStage::Providers {
+            return;
+        }
         let ids: Vec<String> = connect
             .items()
             .into_iter()
             .filter(|item| item.custom_id.is_none())
             .map(|item| item.id)
-            .filter(|id| id != CUSTOM_PROVIDER_ID)
+            .filter(|id| id != CUSTOM_PROVIDER_ID && id != REFRESH_CATALOG_ID)
             .collect();
         for id in ids {
             if self.logos.has(&id) || self.pending_logos.contains(&id) {
