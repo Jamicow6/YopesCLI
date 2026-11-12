@@ -199,7 +199,9 @@ struct MultiEditArgs {
 }
 
 pub(super) fn multi_edit(arguments: &str) -> Result<String> {
-    let edits = serde_json::from_str::<MultiEditArgs>(arguments)?.edits.len();
+    let edits = serde_json::from_str::<MultiEditArgs>(arguments)?
+        .edits
+        .len();
     let updates = multi_edit_replay(arguments)?;
     for (path, _, after) in &updates {
         fs::write(resolve(path), after.as_bytes()).with_context(|| format!("writing {path}"))?;

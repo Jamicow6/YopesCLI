@@ -986,7 +986,7 @@ mod tests {
         // A bad edit refuses the whole batch and leaves every file untouched.
         let broken = json!({
             "edits": [
-                { "path": a, "old_text": "A", "new_text": "X" },
+                { "path": a, "old_text": "A", "new_text": "X", "replace_all": true },
                 { "path": b, "old_text": "absent", "new_text": "?" },
             ]
         });
