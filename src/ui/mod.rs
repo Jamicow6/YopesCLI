@@ -240,7 +240,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(approval) = app.approval.as_mut() {
         draw_approval(frame, approval, sides, spinner, area);
     } else if app.show_help {
-        draw_help(frame, area);
+        draw_help(frame, app, area);
     } else if let Some(connect) = app.connect_state() {
         draw_connect(frame, app, connect, spinner, area);
     }

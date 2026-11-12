@@ -99,7 +99,18 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
             lines.extend(framed);
             if streaming {
-                if let Some(line) = lines.last_mut() {
+                // The frame's bottom border is the last line, so the caret
+                // goes on the last line of the body inside the frame.
+                let target = if lines.last().is_some_and(|line| {
+                    line.spans
+                        .first()
+                        .is_some_and(|span| span.content.starts_with('╰'))
+                }) {
+                    lines.len().saturating_sub(2)
+                } else {
+                    lines.len().saturating_sub(1)
+                };
+                if let Some(line) = lines.get_mut(target) {
                     line.spans.push(Span::styled(
                         format!(" {}", caret(app.spinner)),
                         Style::default().fg(ACCENT),

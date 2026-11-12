@@ -192,7 +192,9 @@ fn collect_agents_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>
         }
         if path.is_dir() {
             collect_agents_files(&path, depth + 1, files);
-        } else if path.extension().is_some_and(|extension| extension == "md") {
+        } else if name == "AGENTS.md" {
+            // Only the instruction file counts. Collecting every Markdown file
+            // would put the README into the system prompt.
             files.push(path);
         }
     }
