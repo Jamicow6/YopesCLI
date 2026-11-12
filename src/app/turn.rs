@@ -116,8 +116,12 @@ impl App {
     /// summarize the older turns first, then send the real request.
     pub(crate) fn begin_turn(&mut self) -> Action {
         let total = Session::estimate_tokens(&self.session.messages);
-        if self.auto_compact && total > COMPACTION_THRESHOLD_TOKENS {
-            if let Some(split) = self.session.compaction_split(COMPACTION_KEEP_TOKENS) {
+        let (threshold, keep) = match self.model_context_window() {
+            Some(window) => (window / COMPACTION_THRESHOLD_FRAC, window / COMPACTION_KEEP_FRAC),
+            None => (COMPACTION_THRESHOLD_DEFAULT, COMPACTION_KEEP_DEFAULT),
+        };
+        if self.auto_compact && total > threshold {
+            if let Some(split) = self.session.compaction_split(keep) {
                 if split > 0 {
                     return self.begin_compaction(split);
                 }
@@ -275,7 +279,11 @@ impl App {
                         self.error("No provider connected. Run /connect to get started.");
                     } else if let Some(split) = self
                         .session
-                        .compaction_split(COMPACTION_KEEP_TOKENS)
+                        .compaction_split(
+                            self.model_context_window()
+                                .map(|w| w / COMPACTION_KEEP_FRAC)
+                                .unwrap_or(COMPACTION_KEEP_DEFAULT),
+                        )
                         .filter(|split| *split > 0)
                     {
                         return self.begin_compaction(split);
