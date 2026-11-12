@@ -107,13 +107,13 @@ pub const COMMANDS: [CommandSpec; 13] = [
         argument: None,
     },
     CommandSpec {
-        name: "/disconnect",
-        description: "Forget a provider's saved key",
-        argument: Some("name"),
+        name: "/cd",
+        description: "Change the working directory",
+        argument: Some("path"),
     },
     CommandSpec {
-        name: "/model",
-        description: "Show or change the active model",
+        name: "/models",
+        description: "Browse models from connected providers",
         argument: Some("name"),
     },
     CommandSpec {
@@ -203,7 +203,7 @@ pub struct ListPicker {
 }
 
 /// Saved models matching the picker filter, in stored order.
-fn model_matching<'a>(models: &'a [SavedModel], filter: &str) -> Vec<&'a SavedModel> {
+fn model_matching<'a>(models: &'a [ModelChoice], filter: &str) -> Vec<&'a ModelChoice> {
     let filter = filter.to_ascii_lowercase();
     models
         .iter()
@@ -211,8 +211,20 @@ fn model_matching<'a>(models: &'a [SavedModel], filter: &str) -> Vec<&'a SavedMo
             filter.is_empty()
                 || model.name.to_ascii_lowercase().contains(&filter)
                 || model.id.to_ascii_lowercase().contains(&filter)
+                || model.provider.to_ascii_lowercase().contains(&filter)
         })
         .collect()
+}
+
+/// One row of the `/models` popup: a model on any connected provider.
+#[derive(Clone, Debug)]
+pub struct ModelChoice {
+    pub provider: String,
+    pub base_url: String,
+    pub id: String,
+    pub name: String,
+    /// True when the row belongs to the provider the session is using now.
+    pub active_provider: bool,
 }
 
 /// One row of the `/sessions` popup: a saved session file with its title.
@@ -282,8 +294,14 @@ const ADD_MODEL_ID: &str = "add-model";
 /// Rows that edit an existing saved endpoint from the model list.
 const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
 const EDIT_TOKEN_ID: &str = "edit-token";
+/// Row that edits the endpoint serving a custom provider's model list.
+const EDIT_MODELS_URL_ID: &str = "edit-models-url";
+/// Row that refetches the model list from that endpoint.
+const FETCH_MODELS_ID: &str = "fetch-models";
 /// Row that replaces the key of a catalog provider from its model list.
 const EDIT_KEY_ID: &str = "edit-key";
+/// Row that forces a models.dev refetch from the provider list.
+const REFRESH_CATALOG_ID: &str = "refresh-catalog";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
@@ -295,6 +313,8 @@ pub enum ConnectStage {
     ApiKey,
     ProviderName,
     Endpoint,
+    /// Optional URL serving the provider's model list; defaults to `<base>/models`.
+    ModelsEndpoint,
     Auth,
     CustomToken,
     ModelId,
@@ -315,6 +335,7 @@ impl ConnectStage {
             Self::ApiKey => "api key",
             Self::ProviderName => "name",
             Self::Endpoint => "endpoint",
+            Self::ModelsEndpoint => "models endpoint",
             Self::Auth => "authorization",
             Self::CustomToken => "token",
             Self::ModelId => "model id",
@@ -400,6 +421,7 @@ pub struct ConnectState {
     custom_provider_id: Option<String>,
     custom_name: String,
     custom_endpoint: String,
+    custom_models_url: String,
     custom_auth: AuthKind,
     custom_token: String,
     /// The token was edited during this visit, so it needs saving again.
@@ -435,6 +457,7 @@ impl ConnectState {
             custom_provider_id: None,
             custom_name: String::new(),
             custom_endpoint: String::new(),
+            custom_models_url: String::new(),
             custom_auth: AuthKind::Bearer,
             custom_token: String::new(),
             custom_token_dirty: false,
@@ -522,6 +545,16 @@ impl ConnectState {
                                 active: is_active(provider.api.as_deref().unwrap_or("")),
                             }),
                     );
+                }
+                if filter.is_empty() || "refresh".contains(filter.as_str()) {
+                    items.push(ConnectItem {
+                        id: REFRESH_CATALOG_ID.to_owned(),
+                        title: "Refresh provider list".to_owned(),
+                        detail: "reload model IDs from models.dev".to_owned(),
+                        logo: "↻",
+                        custom_id: None,
+                        active: false,
+                    });
                 }
                 items
             }
@@ -673,11 +706,38 @@ impl ConnectState {
                         });
                     }
                 }
+                // The model list can be read from any OpenAI-compatible
+                // endpoint; the field defaults to `<base>/models`.
+                if filter.is_empty() || "models endpoint".contains(filter.as_str()) {
+                    items.push(ConnectItem {
+                        id: EDIT_MODELS_URL_ID.to_owned(),
+                        title: "Models endpoint".to_owned(),
+                        detail: if self.custom_models_url.trim().is_empty() {
+                            "default <endpoint>/models".to_owned()
+                        } else {
+                            self.custom_models_url.clone()
+                        },
+                        logo: "✎",
+                        custom_id: None,
+                        active: false,
+                    });
+                }
+                if filter.is_empty() || "fetch models".contains(filter.as_str()) {
+                    items.push(ConnectItem {
+                        id: FETCH_MODELS_ID.to_owned(),
+                        title: "Fetch models".to_owned(),
+                        detail: "read the list from the models endpoint".to_owned(),
+                        logo: "↻",
+                        custom_id: None,
+                        active: false,
+                    });
+                }
                 items
             }
             ConnectStage::ApiKey
             | ConnectStage::ProviderName
             | ConnectStage::Endpoint
+            | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
@@ -698,7 +758,7 @@ impl ConnectState {
         let item = items.get(self.selected.min(items.len().saturating_sub(1)))?;
         if matches!(
             item.id.as_str(),
-            ADD_MODEL_ID | EDIT_ENDPOINT_ID | EDIT_TOKEN_ID
+            ADD_MODEL_ID | EDIT_ENDPOINT_ID | EDIT_TOKEN_ID | EDIT_MODELS_URL_ID | FETCH_MODELS_ID
         ) {
             return None;
         }
@@ -724,6 +784,7 @@ impl ConnectState {
             ConnectStage::Password | ConnectStage::Unlock => &self.password,
             ConnectStage::ProviderName => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
+            ConnectStage::ModelsEndpoint => &self.custom_models_url,
             ConnectStage::CustomToken => &self.custom_token,
             ConnectStage::ModelId => &self.custom_model_id,
             ConnectStage::ModelName => &self.custom_model_name,
@@ -754,6 +815,7 @@ impl ConnectState {
             ConnectStage::ApiKey => "api key",
             ConnectStage::ProviderName => "provider name",
             ConnectStage::Endpoint => "completion endpoint",
+            ConnectStage::ModelsEndpoint => "models endpoint (blank: <endpoint>/models)",
             ConnectStage::Auth => "authorization",
             ConnectStage::CustomToken => "token",
             ConnectStage::ModelId => "model id",
@@ -838,6 +900,34 @@ impl ConnectState {
         items.get(self.selected.min(items.len() - 1)).cloned()
     }
 
+    /// The endpoint of the provider row under the selection, when that row is
+    /// a real provider rather than an action.
+    pub(crate) fn selected_endpoint(&self) -> Option<String> {
+        if self.stage != ConnectStage::Providers {
+            return None;
+        }
+        let item = self.selected_item()?;
+        if item.id == CUSTOM_PROVIDER_ID {
+            return None;
+        }
+        if item.custom_id.is_some() {
+            return self
+                .saved_custom
+                .iter()
+                .find(|provider| provider.id == item.id)
+                .map(|provider| provider.base_url.clone());
+        }
+        if item.id == FASFAST_ID {
+            return Some(catalog::FASFAST_BASE_URL.to_owned());
+        }
+        self.catalog
+            .as_ref()?
+            .providers
+            .get(&item.id)
+            .map(|provider| provider.base_url(&item.id))
+            .filter(|endpoint| !endpoint.trim().is_empty())
+    }
+
     fn move_selection(&mut self, forward: bool) {
         let len = self.items().len();
         if len == 0 {
@@ -865,6 +955,7 @@ fn custom_field_mut(connect: &mut ConnectState, stage: ConnectStage) -> Option<&
     match stage {
         ConnectStage::ProviderName => Some(&mut connect.custom_name),
         ConnectStage::Endpoint => Some(&mut connect.custom_endpoint),
+        ConnectStage::ModelsEndpoint => Some(&mut connect.custom_models_url),
         ConnectStage::CustomToken => Some(&mut connect.custom_token),
         ConnectStage::ModelId => Some(&mut connect.custom_model_id),
         ConnectStage::ModelName => Some(&mut connect.custom_model_name),
@@ -892,8 +983,16 @@ pub enum Action {
     ToggleMouseCapture,
     Quit,
     LoadCatalog,
+    /// Fetch models.dev again, bypassing the cached copy.
+    RefreshCatalog,
     /// Fetch the Fasfas `/v1/models` list with the key entered in /connect.
     FetchFasfas(String),
+    /// Fetch a custom provider's model list from its models endpoint.
+    FetchCustomModels {
+        url: String,
+        token: Option<String>,
+        auth: AuthKind,
+    },
     /// Fetch a provider's logo and draw it.
     FetchLogo(String),
     /// Ask the provider for a short title after the first reply of a session.
@@ -1022,9 +1121,88 @@ impl Input {
     }
 }
 
+/// Session snapshots written off the UI thread.
+///
+/// Encoding and writing a large history can take seconds, which used to block
+/// the event loop on every send and looked like a freeze. Snapshots are queued
+/// here instead; only the newest queued one is written, because everything
+/// older is already stale.
+struct SessionSaver {
+    jobs: std::sync::mpsc::Sender<SaveJob>,
+    errors: std::sync::mpsc::Receiver<String>,
+}
+
+struct SaveJob {
+    path: PathBuf,
+    session: Session,
+    done: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl SessionSaver {
+    fn new() -> Self {
+        let (jobs, queue) = std::sync::mpsc::channel::<SaveJob>();
+        let (error_tx, errors) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            while let Ok(mut job) = queue.recv() {
+                let mut superseded = Vec::new();
+                while let Ok(newer) = queue.try_recv() {
+                    if let Some(done) = job.done.take() {
+                        superseded.push(done);
+                    }
+                    job = newer;
+                }
+                if let Err(error) = job.session.save(&job.path) {
+                    let _ = error_tx.send(format!("{error:#}"));
+                }
+                for done in superseded {
+                    let _ = done.send(());
+                }
+                if let Some(done) = job.done {
+                    let _ = done.send(());
+                }
+            }
+        });
+        Self { jobs, errors }
+    }
+
+    fn save(&self, path: PathBuf, session: Session) {
+        let _ = self.jobs.send(SaveJob {
+            path,
+            session,
+            done: None,
+        });
+    }
+
+    /// Save and wait for the write, for the final snapshot on exit.
+    fn save_and_wait(&self, path: PathBuf, session: Session) -> bool {
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let job = SaveJob {
+            path,
+            session,
+            done: Some(done_tx),
+        };
+        if self.jobs.send(job).is_err() {
+            return false;
+        }
+        done.recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok()
+    }
+
+    /// The last write failure since the previous call, if any.
+    fn take_error(&self) -> Option<String> {
+        let mut last = None;
+        while let Ok(error) = self.errors.try_recv() {
+            last = Some(error);
+        }
+        last
+    }
+}
+
 pub struct App {
     pub session: Session,
     pub backend: Backend,
+    /// Session snapshots are written here, never on the UI thread.
+    session_saver: SessionSaver,
     pub input: Input,
     pub scroll: usize,
     pub input_scroll: usize,
@@ -1059,8 +1237,11 @@ pub struct App {
     /// Terminal width the cached image rows were rendered for.
     image_width: u16,
     pub approval: Option<ToolApproval>,
-    /// Popup picker opened by `/model` with no argument.
+    /// Popup picker opened by `/models` with no argument.
     pub model_picker: Option<ListPicker>,
+    /// The models offered by every connected provider, rebuilt when the
+    /// picker opens.
+    pub model_choices: Vec<ModelChoice>,
     /// Popup picker opened by `/sessions`.
     pub session_picker: Option<ListPicker>,
     pub running_tool: Option<RunningTool>,
@@ -1070,6 +1251,10 @@ pub struct App {
     pub expanded: HashSet<String>,
     /// Screen row of each collapsible tool output, for click detection.
     pub output_rows: Vec<(u16, String)>,
+    /// Whether the Progress checklist is folded to its title row.
+    pub progress_collapsed: bool,
+    /// Screen row of the Progress title, for click-to-fold.
+    pub progress_row: Option<u16>,
     /// Unified or side-by-side diff view, kept across approvals and results.
     pub diff_sides: bool,
     active: Option<ActiveRequest>,
@@ -1112,6 +1297,7 @@ impl App {
         Self {
             session,
             backend,
+            session_saver: SessionSaver::new(),
             input: Input::default(),
             scroll: 0,
             input_scroll: 0,
@@ -1135,11 +1321,14 @@ impl App {
             image_width: 0,
             approval: None,
             model_picker: None,
+            model_choices: Vec::new(),
             session_picker: None,
             running_tool: None,
             changes: HashMap::new(),
             expanded: HashSet::new(),
             output_rows: Vec::new(),
+            progress_collapsed: false,
+            progress_row: None,
             diff_sides: true,
             active: None,
             next_request_id: 0,
@@ -1167,6 +1356,10 @@ impl App {
 
     pub fn tavily_key(&self) -> Option<&str> {
         self.tavily_api_key.as_deref()
+    }
+
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
     }
 
     pub fn connect_open(&self) -> bool {
@@ -1206,6 +1399,22 @@ impl App {
             .map(|active| active.started.elapsed().as_secs_f64())
     }
 
+    /// True while the active request is summarizing older turns.
+    pub fn compaction_active(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.compacting.is_some())
+    }
+
+    /// The summary streamed so far, shown live in the transcript.
+    pub fn compaction_text(&self) -> Option<&str> {
+        self.active
+            .as_ref()?
+            .compacting
+            .as_ref()
+            .map(|compaction| compaction.text.as_str())
+    }
+
     pub fn stream_tool_progress(&self) -> Option<(String, String, u64)> {
         self.active
             .as_ref()
@@ -1221,12 +1430,17 @@ impl App {
         }
     }
 
-    /// Session spend so far, priced from the active model.
+    /// Session spend so far, priced from the active model. A provider catalog
+    /// price wins over the built-in list; an unknown model shows `—`.
     pub fn spent_cost(&self) -> String {
+        let price = self
+            .backend
+            .model_price()
+            .or_else(|| format::known_model_price(self.backend.model()));
         format_cost(
             self.spent_prompt_tokens,
             self.spent_completion_tokens,
-            self.backend.model(),
+            price,
         )
     }
 
@@ -1306,8 +1520,8 @@ mod tests {
                 "/help",
                 "/new",
                 "/connect",
-                "/disconnect",
-                "/model",
+                "/cd",
+                "/models",
                 "/sessions",
                 "/tools",
                 "/system",
@@ -1318,13 +1532,13 @@ mod tests {
                 "/quit",
             ]
         );
-        assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);
-        assert_eq!(command_names("/d"), vec!["/disconnect"]);
-        assert_eq!(command_names("/m"), vec!["/model"]);
+        assert_eq!(command_names("/c"), vec!["/connect", "/cd", "/compact"]);
+        assert_eq!(command_names("/d"), Vec::<&str>::new());
+        assert_eq!(command_names("/m"), vec!["/models"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
         assert_eq!(command_names("/e"), vec!["/effort"]);
         assert_eq!(command_names("/v"), vec!["/version"]);
-        assert_eq!(command_names("/MO"), vec!["/model"]);
+        assert_eq!(command_names("/MO"), vec!["/models"]);
         assert!(command_names("/model gpt").is_empty());
         assert!(command_names("hello").is_empty());
     }
@@ -1333,9 +1547,9 @@ mod tests {
     fn completion_adds_a_space_only_when_arguments_are_expected() {
         let model = COMMANDS
             .iter()
-            .find(|command| command.name == "/model")
+            .find(|command| command.name == "/models")
             .unwrap();
-        assert_eq!(model.completion(), "/model ");
+        assert_eq!(model.completion(), "/models ");
         let help = COMMANDS
             .iter()
             .find(|command| command.name == "/help")
@@ -1358,6 +1572,7 @@ mod tests {
             base_url: "https://example.test/v1".to_owned(),
             auth: AuthKind::Bearer,
             models: Vec::new(),
+            models_url: None,
             token: None,
             encrypted: false,
             secret: crate::config::StoredSecret::default(),
@@ -1395,7 +1610,7 @@ mod tests {
 
     #[test]
     fn delete_removes_only_a_model_row() {
-        use super::{ADD_MODEL_ID, ConnectStage, ConnectState};
+        use super::{ConnectStage, ConnectState, FETCH_MODELS_ID};
         use crate::config::SavedModel;
 
         let mut connect = ConnectState::loading();
@@ -1404,10 +1619,12 @@ mod tests {
             SavedModel {
                 id: "one".to_owned(),
                 name: "One".to_owned(),
+                ..SavedModel::default()
             },
             SavedModel {
                 id: "two".to_owned(),
                 name: "Two".to_owned(),
+                ..SavedModel::default()
             },
         ];
         assert_eq!(connect.remove_selected_model().as_deref(), Some("one"));
@@ -1418,7 +1635,7 @@ mod tests {
         connect.selected = last;
         assert!(connect.remove_selected_model().is_none());
         assert_eq!(connect.custom_models.len(), 1);
-        assert_eq!(connect.items()[last].id, ADD_MODEL_ID);
+        assert_eq!(connect.items()[last].id, FETCH_MODELS_ID);
 
         connect.custom_provider_id = Some("endpoint".to_owned());
         let last = connect.items().len().saturating_sub(1);
@@ -1478,23 +1695,20 @@ mod tests {
     }
 
     #[test]
-    fn model_matching_filters_on_name_and_id() {
-        use super::model_matching;
-        use crate::config::SavedModel;
+    fn model_matching_filters_on_name_id_and_provider() {
+        use super::{ModelChoice, model_matching};
 
+        let choice = |provider: &str, id: &str, name: &str| ModelChoice {
+            provider: provider.to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            id: id.to_owned(),
+            name: name.to_owned(),
+            active_provider: provider == "active",
+        };
         let models = vec![
-            SavedModel {
-                id: "glm-4.7".into(),
-                name: "GLM 4.7".into(),
-            },
-            SavedModel {
-                id: "gpt-5.2".into(),
-                name: String::new(),
-            },
-            SavedModel {
-                id: "claude-haiku".into(),
-                name: "Claude Haiku".into(),
-            },
+            choice("active", "glm-4.7", "GLM 4.7"),
+            choice("active", "gpt-5.2", ""),
+            choice("other", "claude-haiku", "Claude Haiku"),
         ];
 
         assert_eq!(
@@ -1508,6 +1722,9 @@ mod tests {
         let found = model_matching(&models, "gpt");
         assert_eq!(found.len(), 1, "matches the id when the name is empty");
         assert_eq!(found[0].id, "gpt-5.2");
+        let found = model_matching(&models, "other");
+        assert_eq!(found.len(), 1, "filters by provider too");
+        assert_eq!(found[0].id, "claude-haiku");
         assert!(model_matching(&models, "llama").is_empty());
     }
 }

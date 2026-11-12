@@ -12,8 +12,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.session.messages.is_empty() {
-        // The header already says "yopes", so the welcome names the model
-        // instead of repeating the product name.
+        // The welcome names the model; the working view carries no branding.
         let model = app.backend.model();
         let heading = if model.is_empty() {
             app.backend.provider_label().to_owned()
@@ -64,11 +63,22 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines = Vec::new();
     let mut rows: Vec<(u16, String)> = Vec::new();
+    // Copied out: the summary is owned so the session can stay borrowed.
+    let compaction = app.compaction_text().map(str::to_owned);
     for (index, message) in app.session.messages.iter().enumerate() {
-        let has_calls = message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty());
+        let call_name = (message.role == Role::Tool)
+            .then(|| tool_call_name(app, index))
+            .flatten();
+        // A hidden tool leaves no trace in the transcript; its effect shows in
+        // the Progress panel instead.
+        if message.role == Role::Tool && call_name.is_some_and(is_hidden_tool) {
+            continue;
+        }
+        let has_calls = message.tool_calls.as_ref().is_some_and(|calls| {
+            calls
+                .iter()
+                .any(|call| !is_hidden_tool(&call.function.name))
+        });
         let streaming = index + 1 == app.session.messages.len() && app.is_streaming();
         // A reply that only produced reasoning is still shown: dropping it
         // would hide long thinking that ended without a final answer.
@@ -77,6 +87,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             && message.reasoning.trim().is_empty()
             && !has_calls
             && !streaming
+            && message.error.is_none()
         {
             continue;
         }
@@ -89,12 +100,12 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             // The label names the responding model, not the product.
             Role::Assistant => {
                 let model = app.backend.model();
-                (if model.is_empty() { "yopes" } else { model }, ACCENT)
+                (if model.is_empty() { "assistant" } else { model }, ACCENT)
             }
         };
         if message.role == Role::Tool {
             let start = lines.len();
-            let name = tool_call_name(app, index).map(str::to_owned);
+            let name = call_name.map(str::to_owned);
             let framed =
                 tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
             lines.extend(framed);
@@ -123,6 +134,15 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
+        // A failed request shows its provider message here, where the answer
+        // would have been, instead of as a footer notice.
+        if let Some(error) = &message.error {
+            lines.push(Line::styled(
+                format!("✗ {error}"),
+                Style::default().fg(ERROR),
+            ));
+            continue;
+        }
         // Thinking: shown in full while streaming or expanded, otherwise a
         // one-line summary that a click expands like a tool result.
         let reason_key = format!("reason-{index}");
@@ -166,7 +186,10 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         if let Some(calls) = &message.tool_calls {
-            for call in calls {
+            for call in calls
+                .iter()
+                .filter(|call| !is_hidden_tool(&call.function.name))
+            {
                 lines.push(Line::from(vec![
                     Span::styled("→ ", Style::default().fg(ACCENT)),
                     Span::styled(
@@ -187,6 +210,26 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(ACCENT),
                 ));
             }
+        }
+    }
+
+    // Compaction streams into its own buffer: show it live so a long summary
+    // does not look like a frozen screen.
+    if let Some(summary) = compaction {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            "compacting context",
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        ));
+        if summary.trim().is_empty() {
+            lines.push(Line::styled(
+                caret(app.spinner),
+                Style::default().fg(ACCENT),
+            ));
+        } else {
+            lines.extend(markdown_lines(&summary, inner.width));
         }
     }
 

@@ -60,16 +60,29 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
         } else {
             Style::default().fg(TEXT)
         };
+        let detail = if model.active_provider {
+            model.id.clone()
+        } else {
+            format!("{} · {}", model.provider, model.id)
+        };
+        let detail_style = if model.active_provider {
+            Style::default().fg(MUTED)
+        } else {
+            Style::default().fg(ADDED)
+        };
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
             Span::styled(
                 format!(
                     "{title:<width$}  ",
-                    width = inner.width.saturating_sub(30) as usize
+                    width = inner.width.saturating_sub(34) as usize
                 ),
                 title_style,
             ),
-            Span::styled(model.id.clone(), Style::default().fg(MUTED)),
+            Span::styled(
+                truncate(&detail, usize::from(inner.width).saturating_sub(4).max(1)),
+                detail_style,
+            ),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }
