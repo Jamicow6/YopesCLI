@@ -5,6 +5,12 @@ edition = "2024"
 rust-version = "1.85"
 description = "A fast, session-first AI harness for your terminal"
 license = "GPL-3.0-only"
+repository = "https://github.com/Jamicow6/YopesCLI"
+homepage = "https://github.com/Jamicow6/YopesCLI"
+readme = "README.md"
+keywords = ["cli", "tui", "ai", "agent", "coding-assistant"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["docs/", ".github/"]
 
 [dependencies]
 anyhow = "1.0"
