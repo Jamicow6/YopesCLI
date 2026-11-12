@@ -6,6 +6,7 @@ mod credentials;
 mod diff;
 mod session;
 mod skills;
+mod temp;
 mod tools;
 mod ui;
 mod update;
@@ -165,7 +166,6 @@ async fn run() -> Result<()> {
                         app.set_focused(false);
                     }
                     Some(Ok(Event::Resize(_, _))) => redraw_now = true,
-                    Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(error).context("reading terminal event"),
                     None => return Err(anyhow::anyhow!("terminal event stream closed")),
                 }

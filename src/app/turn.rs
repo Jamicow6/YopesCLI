@@ -341,22 +341,42 @@ impl App {
         } else {
             let wanted = name.to_ascii_lowercase();
             let connected = config::load_connected_providers(&self.config_path);
-            let custom = self
-                .custom_providers
-                .iter()
-                .find(|provider| provider.name.to_ascii_lowercase() == wanted)
-                .map(|provider| provider.base_url.clone());
-            match connected
-                .into_iter()
-                .find(|provider| provider.name.to_ascii_lowercase() == wanted)
-                .map(|provider| provider.base_url)
-                .or(custom)
-            {
-                Some(base_url) => base_url,
-                None => {
-                    self.error(format!("No connected provider named {name}."));
-                    return;
+            // A provider can be named by its display name or its catalog id.
+            let found = connected.into_iter().find(|provider| {
+                provider.name.to_ascii_lowercase() == wanted
+                    || provider
+                        .provider_id
+                        .as_deref()
+                        .is_some_and(|id| id.to_ascii_lowercase() == wanted)
+            });
+            let custom = self.custom_providers.iter().find(|provider| {
+                provider.name.to_ascii_lowercase() == wanted
+                    || provider.id.to_ascii_lowercase() == wanted
+            });
+            match found {
+                Some(provider) => {
+                    if !provider.has_key {
+                        self.info(format!(
+                            "{} is connected but has no saved key.",
+                            provider.name
+                        ));
+                        return;
+                    }
+                    if provider.encrypted {
+                        self.info(format!(
+                            "{} was encrypted; its key is removed now.",
+                            provider.name
+                        ));
+                    }
+                    provider.base_url
                 }
+                None => match custom.map(|provider| provider.base_url.clone()) {
+                    Some(base_url) => base_url,
+                    None => {
+                        self.error(format!("No connected provider named {name}."));
+                        return;
+                    }
+                },
             }
         };
         if target.trim().is_empty() {
