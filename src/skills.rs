@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn parses_frontmatter_quotes_and_booleans() {
-        let (fields, body) = fields(
+        let (fields, body) = frontmatter(
             "---\nname: deploy\n\"description\": Deploys the app\ndisable-model-invocation: YES\nuser-invocable: off\n---\nBody notes.",
         );
         assert_eq!(fields.name.as_deref(), Some("deploy"));
@@ -307,17 +307,17 @@ mod tests {
         assert!(!fields.user_invocable);
         assert_eq!(body, "Body notes.");
 
-        let (fields, _) = fields("---\ndescription: 'quoted ones'\n---\n.");
+        let (fields, _) = frontmatter("---\ndescription: 'quoted ones'\n---\n.");
         assert_eq!(fields.description.as_deref(), Some("quoted ones"));
 
         // No frontmatter marker: everything is content, defaults hold.
-        let (fields, body) = fields("Plain content.");
+        let (fields, body) = frontmatter("Plain content.");
         assert!(fields.name.is_none());
         assert!(fields.user_invocable);
         assert_eq!(body, "Plain content.");
 
         // An unclosed marker means the whole file is content too.
-        let (fields, body) = fields("---\nname: never");
+        let (fields, body) = frontmatter("---\nname: never");
         assert!(fields.name.is_none());
         assert_eq!(body, "---\nname: never");
     }
