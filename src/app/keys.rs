@@ -197,7 +197,7 @@ impl App {
                 Action::None
             }
             KeyCode::End => {
-                self.follow_tail = true;
+                self.input.cursor = self.input.value.len();
                 Action::None
             }
             KeyCode::Up if self.palette_open() => {
@@ -206,6 +206,14 @@ impl App {
             }
             KeyCode::Down if self.palette_open() => {
                 self.palette_move(true);
+                Action::None
+            }
+            KeyCode::Up if self.input.value.contains('\n') => {
+                self.input.move_vertical(false);
+                Action::None
+            }
+            KeyCode::Down if self.input.value.contains('\n') => {
+                self.input.move_vertical(true);
                 Action::None
             }
             KeyCode::Up => {

@@ -865,6 +865,36 @@ impl Input {
             });
     }
 
+    /// Move vertically while preserving the cursor's character column.
+    fn move_vertical(&mut self, down: bool) {
+        let before = &self.value[..self.cursor];
+        let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+        let column = before[line_start..].chars().count();
+        let line_end = self.value[line_start..]
+            .find('\n')
+            .map_or(self.value.len(), |n| line_start + n);
+        let target_start = if down {
+            if line_end == self.value.len() {
+                return;
+            }
+            line_end + 1
+        } else {
+            if line_start == 0 {
+                return;
+            }
+            self.value[..line_start - 1]
+                .rfind('\n')
+                .map_or(0, |n| n + 1)
+        };
+        let target_end = self.value[target_start..]
+            .find('\n')
+            .map_or(self.value.len(), |n| target_start + n);
+        self.cursor = self.value[target_start..target_end]
+            .char_indices()
+            .nth(column)
+            .map_or(target_end, |(offset, _)| target_start + offset);
+    }
+
     fn delete_word(&mut self) {
         let before = &self.value[..self.cursor];
         let without_space = before.trim_end();

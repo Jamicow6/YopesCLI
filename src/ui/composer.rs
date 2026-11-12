@@ -15,7 +15,7 @@ pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     if app.context_tokens() > 0 {
         right.push_str(&format!(" · ctx {}", format_tokens(app.context_tokens())));
     }
-    let right_width = (right.chars().count() as u16).min(inner.width / 2);
+    let right_width = (UnicodeWidthStr::width(right.as_str()) as u16).min(inner.width / 2);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(4), Constraint::Length(right_width)])

@@ -221,7 +221,7 @@ pub(super) fn frame_lines(
     // cap, and one separating space leave over.
     let total = inner_width + 4;
     let label = truncate(&label, total.saturating_sub(6));
-    let head = "╭─ ".chars().count() + label.chars().count() + 1;
+    let head = UnicodeWidthStr::width("╭─ ") + UnicodeWidthStr::width(label.as_str()) + 1;
     lines.push(Line::from(vec![
         Span::styled(format!("╭─ {label} "), Style::default().fg(border)),
         Span::styled(
@@ -237,7 +237,7 @@ pub(super) fn frame_lines(
             .map(|span| span.content.as_ref())
             .collect::<String>();
         let clipped = truncate(&content, inner_width);
-        let used = clipped.chars().count();
+        let used = UnicodeWidthStr::width(clipped.as_str());
         let style = line
             .spans
             .first()

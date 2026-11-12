@@ -139,9 +139,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         if !message.content.is_empty() {
-            for content_line in message.content.split('\n') {
-                lines.push(message_line(content_line));
-            }
+            lines.extend(markdown_lines(&message.content));
         }
         // Pasted screenshots show up as pixel art directly under the text.
         for image in &message.images {
