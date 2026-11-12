@@ -78,7 +78,7 @@ pub fn command_risk(arguments: &str) -> bool {
 pub fn system_prompt(tools_enabled: bool) -> String {
     let cwd = env::current_dir().map_or_else(|_| ".".to_owned(), |path| path.display().to_string());
     let os = env::consts::OS;
-    if tools_enabled {
+    let base = if tools_enabled {
         format!(
             "You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
@@ -105,12 +105,50 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
-        format!(
-            "You are yopes, a coding assistant running in the user's terminal.\n\
+        format!("You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Operating system: {os}\n\
-             Keep responses short and concrete."
-        )
+             Keep responses short and concrete.")
+    };
+    let project_instructions = load_agents_instructions(&env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    if project_instructions.is_empty() { base } else { format!("{base}\n\nProject instructions (AGENTS.md):\n{project_instructions}") }
+}
+
+fn load_agents_instructions(root: &Path) -> String {
+    const MAX_FILES: usize = 32;
+    const MAX_TOTAL_CHARS: usize = 24_000;
+    const MAX_FILE_CHARS: usize = 8_000;
+    let mut files = Vec::new();
+    collect_agents_files(root, 0, &mut files);
+    files.sort_by(|a, b| {
+        let depth_a = a.parent().map_or(0, |p| p.strip_prefix(root).unwrap_or(p).components().count());
+        let depth_b = b.parent().map_or(0, |p| p.strip_prefix(root).unwrap_or(p).components().count());
+        depth_a.cmp(&depth_b).then_with(|| a.cmp(b))
+    });
+    let mut output = String::new();
+    for path in files.into_iter().take(MAX_FILES) {
+        if output.len() >= MAX_TOTAL_CHARS { break; }
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let content: String = content.chars().take(MAX_FILE_CHARS).collect();
+        let relative = path.strip_prefix(root).unwrap_or(&path).display();
+        let remaining = MAX_TOTAL_CHARS.saturating_sub(output.len());
+        output.push_str(&format!("\n--- {} ---\n", relative));
+        output.push_str(&content.chars().take(remaining).collect::<String>());
+        output.push('\n');
+    }
+    output
+}
+
+fn collect_agents_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>) {
+    if depth > 12 || files.len() >= 64 { return; }
+    let Ok(entries) = fs::read_dir(directory) else { return };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path(); let name = entry.file_name();
+        if name == ".git" || name == "target" || name == "node_modules" || name == ".venv" { continue; }
+        if path.is_dir() { collect_agents_files(&path, depth + 1, files); }
+        else if name == "AGENTS.md" { files.push(path); }
     }
 }
 
