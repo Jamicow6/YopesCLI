@@ -45,7 +45,7 @@ use crate::{
     config::{Cli, Command, Config, load_session},
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("yopes: {error:#}");
