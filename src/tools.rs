@@ -111,7 +111,7 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Keep responses short and concrete.")
     };
     let project_instructions = load_agents_instructions(&env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    if project_instructions.is_empty() { base } else { format!("{base}\n\nProject instructions (AGENTS.md):\n{project_instructions}") }
+    if project_instructions.is_empty() { base } else { format!("{base}\n\nProject Markdown context (AGENTS.md files contain instructions):\n{project_instructions}") }
 }
 
 fn load_agents_instructions(root: &Path) -> String {
@@ -148,7 +148,7 @@ fn collect_agents_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>
         let path = entry.path(); let name = entry.file_name();
         if name == ".git" || name == "target" || name == "node_modules" || name == ".venv" { continue; }
         if path.is_dir() { collect_agents_files(&path, depth + 1, files); }
-        else if name == "AGENTS.md" { files.push(path); }
+        else if path.extension().is_some_and(|extension| extension == "md") { files.push(path); }
     }
 }
 
