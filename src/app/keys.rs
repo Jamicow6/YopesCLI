@@ -157,7 +157,6 @@ impl App {
                 }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 KeyCode::Char('v') => return Action::PasteImage,
-                KeyCode::Char('g') => return Action::ToggleMouseCapture,
                 KeyCode::Char('p') if !self.session.tasks.is_empty() => {
                     self.progress_collapsed = !self.progress_collapsed;
                 }
