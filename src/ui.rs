@@ -212,7 +212,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     if app.context_tokens() > 0 {
         right.push_str(&format!(" · ctx {}", format_tokens(app.context_tokens())));
     }
-    let right_width = (right.chars().count() as u16).min(inner.width / 2);
+    let right_width = (UnicodeWidthStr::width(right.as_str()) as u16).min(inner.width / 2);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(4), Constraint::Length(right_width)])
@@ -1098,7 +1098,7 @@ fn frame_lines(
     // cap, and one separating space leave over.
     let total = inner_width + 4;
     let label = truncate(&label, total.saturating_sub(6));
-    let head = "╭─ ".chars().count() + label.chars().count() + 1;
+    let head = UnicodeWidthStr::width("╭─ ") + UnicodeWidthStr::width(label.as_str()) + 1;
     lines.push(Line::from(vec![
         Span::styled(format!("╭─ {label} "), Style::default().fg(border)),
         Span::styled(
@@ -1114,7 +1114,7 @@ fn frame_lines(
             .map(|span| span.content.as_ref())
             .collect::<String>();
         let clipped = truncate(&content, inner_width);
-        let used = clipped.chars().count();
+        let used = UnicodeWidthStr::width(clipped.as_str());
         let style = line
             .spans
             .first()
@@ -1621,15 +1621,17 @@ fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
 }
 
 fn truncate(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
+    if width == 0 { return String::new(); }
+    if UnicodeWidthStr::width(text) <= width { return text.to_owned(); }
+    let mut result = String::new();
+    let mut used = 0usize;
+    for grapheme in text.graphemes(true) {
+        let cells = UnicodeWidthStr::width(grapheme);
+        if used + cells + 1 > width { break; }
+        result.push_str(grapheme);
+        used += cells;
     }
-    let mut characters = text.chars();
-    let mut result = characters.by_ref().take(width).collect::<String>();
-    if characters.next().is_some() {
-        result.pop();
-        result.push('…');
-    }
+    result.push('…');
     result
 }
 
