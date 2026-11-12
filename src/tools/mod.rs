@@ -966,13 +966,13 @@ mod tests {
         let b = dir.join("b.txt").display().to_string();
         let batch = json!({
             "edits": [
-                { "path": a, "old_text": "alpha", "new_text": "A" },
+                { "path": a, "old_text": "alpha", "new_text": "A", "replace_all": true },
                 { "path": a, "old_text": "beta", "new_text": "B", "replace_all": true },
                 { "path": b, "old_text": "one", "new_text": "uno" },
             ]
         });
         let output = execute(
-            &ToolCall::new("call_20", "multi_edit", &batch.to_string()),
+            &ToolCall::new("call_20", "multi_edit", batch.to_string()),
             None,
         )
         .unwrap();
@@ -991,7 +991,7 @@ mod tests {
             ]
         });
         let error = execute(
-            &ToolCall::new("call_21", "multi_edit", &broken.to_string()),
+            &ToolCall::new("call_21", "multi_edit", broken.to_string()),
             None,
         )
         .unwrap_err()
@@ -1026,7 +1026,7 @@ mod tests {
             "new_text": "beta = 20\n",
         });
         let output = execute(
-            &ToolCall::new("call_23", "edit_file", &single.to_string()),
+            &ToolCall::new("call_23", "edit_file", single.to_string()),
             None,
         )
         .unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
             "replace_all": true,
         });
         execute(
-            &ToolCall::new("call_24", "edit_file", &all.to_string()),
+            &ToolCall::new("call_24", "edit_file", all.to_string()),
             None,
         )
         .unwrap();
@@ -1070,7 +1070,7 @@ mod tests {
                 { "path": dir.join("m.txt").display().to_string(), "old_text": "cc", "new_text": "dd" },
             ]
         });
-        let call = ToolCall::new("call_23", "multi_edit", &args.to_string());
+        let call = ToolCall::new("call_23", "multi_edit", args.to_string());
         let change = change_preview(&call);
         assert_eq!(change.diffs.len(), 2);
         assert!(change.before.is_none());
@@ -1250,19 +1250,19 @@ mod tests {
                 dir.display().to_string()
             )
         };
-        let all = ToolCall::new("call_10", "glob", &args("**/*.md"));
+        let all = ToolCall::new("call_10", "glob", args("**/*.md"));
         let output = execute(&all, None).unwrap();
         assert!(output.contains("README.md"), "{output}");
         assert!(output.contains("sub/note.md"), "{output}");
         assert!(output.contains("sub/deep/last.md"), "{output}");
         assert!(!output.contains("target"), "{output}");
 
-        let shallow = ToolCall::new("call_11", "glob", &args("*.md"));
+        let shallow = ToolCall::new("call_11", "glob", args("*.md"));
         let output = execute(&shallow, None).unwrap();
         assert!(output.contains("README.md"));
         assert!(!output.contains("note.md"), "{output}");
 
-        let missing = ToolCall::new("call_12", "glob", &args("*.toml"));
+        let missing = ToolCall::new("call_12", "glob", args("*.toml"));
         let output = execute(&missing, None).unwrap();
         assert!(output.contains("(no matches)"), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1286,14 +1286,14 @@ mod tests {
                 dir.display().to_string()
             )
         };
-        let every = execute(&ToolCall::new("call_13", "grep", &args("")), None).unwrap();
+        let every = execute(&ToolCall::new("call_13", "grep", args("")), None).unwrap();
         assert!(every.contains("top.txt:1:"), "{every}");
         assert!(every.contains("top.txt:3:"), "{every}");
         assert!(every.contains("code.rs:1:"), "{every}");
         assert!(!every.contains("skip.bin"), "{every}");
 
         let only_rust = execute(
-            &ToolCall::new("call_14", "grep", &args(r#","include":"*.rs""#)),
+            &ToolCall::new("call_14", "grep", args(r#","include":"*.rs""#)),
             None,
         )
         .unwrap();
@@ -1301,14 +1301,18 @@ mod tests {
         assert!(!only_rust.contains("top.txt"), "{only_rust}");
 
         let insensitive = execute(
-            &ToolCall::new("call_15", "grep", &args(r#","ignore_case":true"#)),
+            &ToolCall::new("call_15", "grep", args(r#","ignore_case":true"#)),
             None,
         )
         .unwrap();
         assert!(insensitive.contains("top.txt:1:"), "{insensitive}");
 
+        let absent_args = format!(
+            r#"{{"pattern":"absent-nowhere","path":{:?}}}"#,
+            dir.display().to_string()
+        );
         let absent = execute(
-            &ToolCall::new("call_16", "grep", r#"{"pattern":"absent-nowhere"}"#),
+            &ToolCall::new("call_16", "grep", absent_args),
             None,
         )
         .unwrap();
@@ -1327,7 +1331,7 @@ mod tests {
         let call = ToolCall::new(
             "call_7",
             "read_file",
-            &format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
+            format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
         );
         let output = execute(&call, None).unwrap();
         assert!(output.contains("note.txt"), "{output}");

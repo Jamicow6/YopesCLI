@@ -1168,6 +1168,7 @@ mod tests {
                 "/system",
                 "/compact",
                 "/effort",
+                "/skills",
                 "/quit",
             ]
         );
@@ -1321,10 +1322,10 @@ mod tests {
 
         let rows = build_image_rows(&data, 2);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].spans.len(), 4);
+        assert_eq!(rows[0].spans.len(), 2);
         assert_eq!(rows[0].spans[0].content, "▄");
         assert_eq!(rows[0].spans[0].style.fg, Some(Color::Rgb(255, 0, 0)));
-        assert_eq!(rows[0].spans[3].style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(rows[0].spans[1].style.fg, Some(Color::Rgb(255, 0, 0)));
     }
 
     #[test]

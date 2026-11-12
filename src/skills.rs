@@ -180,8 +180,9 @@ fn frontmatter(text: &str) -> (Fields, String) {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
+            let key = unquote(key.trim());
             let value = unquote(value.trim());
-            match key.trim().to_ascii_lowercase().as_str() {
+            match key.to_ascii_lowercase().as_str() {
                 "name" if !value.is_empty() => fields.name = Some(value),
                 "description" if !value.is_empty() => fields.description = Some(value),
                 "when_to_use" if !value.is_empty() => fields.when_to_use = Some(value),

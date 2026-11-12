@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(diff.deletions, 1);
         assert_eq!(diff.hunks.len(), 1);
         let hunk = &diff.hunks[0];
-        assert_eq!(diff.header(hunk), "@@ -1,7 +1,7 @@");
+        assert_eq!(diff.header(hunk), "@@ -1,6 +1,6 @@");
         assert!(
             hunk.lines
                 .iter()

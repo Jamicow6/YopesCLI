@@ -1032,13 +1032,12 @@ mod tests {
         // stays so the running session is untouched.
         let saved: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            saved["models"]
+        assert!(
+            !saved["models"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|model| model["id"] == "one"),
-            false
+                .any(|model| model["id"] == "one")
         );
         assert_eq!(saved["model"], "one");
         let _ = fs::remove_file(&path);

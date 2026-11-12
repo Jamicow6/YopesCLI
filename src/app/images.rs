@@ -23,6 +23,7 @@ pub(super) fn build_image_rows(encoded: &str, cols: u16) -> Vec<Line<'static>> {
     // so two pixels per cell in both directions keep the aspect square.
     let row_pairs = ((u64::from(height) * cols as u64) / u64::from(width) / 2).clamp(1, 18) as u32;
     let scaled = image::imageops::thumbnail(&rendered, (cols * 2) as u32, row_pairs * 2);
+    let row_pairs = scaled.height().div_ceil(2);
     let mut rows = Vec::with_capacity(row_pairs as usize);
     for pair in 0..row_pairs {
         let top_y = (pair * 2).min(scaled.height() - 1);

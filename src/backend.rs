@@ -895,7 +895,7 @@ mod tests {
             &mut state,
         )
         .unwrap();
-        assert_eq!(done, false);
+        assert!(!done);
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedEvent::Delta(text) => assert_eq!(text, "Hello"),
@@ -1106,7 +1106,7 @@ mod tests {
             &mut state,
         )
         .unwrap();
-        assert_eq!(done, false);
+        assert!(!done);
         assert_eq!(
             events,
             vec![ParsedEvent::Usage {
@@ -1127,7 +1127,7 @@ mod tests {
     fn reasoning_stays_apart_from_content() {
         let mut state = OpenAiState::default();
         let (events, _) = parse_openai_line(
-            r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think...","content":"So the"}}"],"usage":{"prompt_tokens":3,"completion_tokens":9}}"#,
+            r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think...","content":"So the"}}],"usage":{"prompt_tokens":3,"completion_tokens":9}}"#,
             &mut state,
         )
         .unwrap();
@@ -1183,17 +1183,20 @@ mod tests {
             );
         }
         let big = format!(
-            "{{\"path\":\"test.html\",\"content\":\"{}\"}}",
+            r#"{{"path":"test.html","content":"{}"}}"#,
             "x".repeat(2048)
         );
-        let big = big.replace('"', "\\\"");
-        let (events, _) = parse_openai_line(
-            &format!(
-                r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"function":{{"arguments":"{big}"}}}}]}}}}]}}""#
-            ),
-            &mut state,
-        )
-        .unwrap();
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": big }
+                    }]
+                }
+            }]
+        });
+        let (events, _) = parse_openai_line(&format!("data: {chunk}"), &mut state).unwrap();
         assert!(
             events.iter().any(
                 |event| matches!(event, ParsedEvent::ToolProgress { bytes, .. } if *bytes > 0)
