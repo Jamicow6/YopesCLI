@@ -50,10 +50,14 @@ const MAX_TOOL_ROUNDS: usize = 100;
 /// The choices the /effort command accepts, printed in its messages.
 const EFFORT_CHOICES: &str = "Usage: /effort off|none|low|medium|high|xhigh";
 
-/// Estimated prompt tokens that trigger compaction of older turns.
-const COMPACTION_THRESHOLD_TOKENS: u64 = 32_000;
-/// Tokens of recent history kept intact when compaction runs.
-const COMPACTION_KEEP_TOKENS: u64 = 12_000;
+/// Fraction of the model context window at which compaction triggers.
+const COMPACTION_THRESHOLD_FRAC: u64 = 3; // fire at ~1/3 of window
+/// Fraction of the model context window kept intact after compaction.
+const COMPACTION_KEEP_FRAC: u64 = 8; // keep ~1/8 of window
+/// Fallback compaction threshold when no catalog context size is known.
+const COMPACTION_THRESHOLD_DEFAULT: u64 = 32_000;
+/// Fallback keep-tokens when no catalog context size is known.
+const COMPACTION_KEEP_DEFAULT: u64 = 12_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoticeKind {
@@ -1440,6 +1444,12 @@ impl App {
     /// Estimated tokens the next request would send, the context window load.
     pub fn context_tokens(&self) -> u64 {
         Session::estimate_tokens(&self.session.messages)
+    }
+
+    /// Context-window size of the active model from the catalog, if known.
+    pub fn model_context_window(&self) -> Option<u64> {
+        let catalog = self.connect.as_ref()?.catalog.as_ref()?;
+        catalog::context_window(catalog, self.backend.model())
     }
 
     pub fn tick(&mut self) {
