@@ -77,28 +77,63 @@ const TEXT: Color = Color::Reset;
 /// Rows of command text shown in the approval prompt before it stops.
 const MAX_APPROVAL_LINES: usize = 4;
 /// The startup mascot: a small cat, drawn only on the welcome screen, with a
-/// yarn ball that rolls beneath it on the idle ticker, one step every ~200ms.
-const CAT_BASE: [&str; 6] = [
+/// ball of yarn that rolls beneath it.
+const CAT_ROWS: [&str; 6] = [
     "  /\\_/\\  ",
     "+ ( o.o ) +",
     "  #> ^ <#  ",
     "  /| . |\\  ",
-    " (_|   |_) ",
-    "   \"   \"   ",
+    " (_|   |_)",
+    "   \"   \"  ",
 ];
-/// One row below the cat: the ball drifts right and gives back one step.
-const YARN_ROLL: [&str; 6] = [
-    " o         ",
-    "    o      ",
-    "      o    ",
-    "        o  ",
-    "         o ",
-    "        o  ",
-];
+/// The tail flicks through these positions.
+const TAILS: [&str; 4] = ["", "\\", "\\\\", "\\~"];
+/// How wide the whole mascot is, so every row lines up.
+const MASCOT_WIDTH: usize = 15;
+/// The ball of yarn rolls this many steps out and back.
+const YARN_TRAVEL: usize = 6;
 /// Tool output rows shown before the rest is collapsed.
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PALETTE_WIDTH: u16 = 60;
+
+/// One frame of the welcome mascot.
+///
+/// The cat blinks now and then, its tail flicks, and the ball of yarn rolls
+/// out and back with the thread trailing behind it.
+fn mascot_frame(step: usize) -> Vec<Line<'static>> {
+    let mut rows: Vec<String> = CAT_ROWS.iter().map(|row| (*row).to_owned()).collect();
+    rows[4].push_str(TAILS[(step / 4) % TAILS.len()]);
+    // The cat blinks every few seconds.
+    if step % 40 == 39 {
+        rows[1] = rows[1].replace("o.o", "-.-");
+    }
+    // The ball rolls out and back; the thread trails behind it.
+    let travel = (step / 2) % (YARN_TRAVEL * 2);
+    let (position, trailing_left) = if travel < YARN_TRAVEL {
+        (travel, true)
+    } else {
+        (YARN_TRAVEL * 2 - travel, false)
+    };
+    let mut yarn = String::new();
+    if trailing_left {
+        yarn.push_str(&"~".repeat(position));
+        yarn.push_str("(o)");
+        yarn.push_str(&" ".repeat(MASCOT_WIDTH - position - 3));
+    } else {
+        yarn.push_str(&" ".repeat(position));
+        yarn.push_str("(o)");
+        yarn.push_str(&"~".repeat(MASCOT_WIDTH - position - 3));
+    }
+    rows.push(yarn);
+    rows.into_iter()
+        .map(|row| {
+            let mut row = row;
+            row.push_str(&" ".repeat(MASCOT_WIDTH.saturating_sub(row.chars().count())));
+            Line::styled(row, Style::default().fg(ACCENT))
+        })
+        .collect()
+}
 
 /// The streaming caret alternates on a ~300ms cadence driven by the 100ms
 /// ticker, so a quiet stretch of tokens still reads as alive.
@@ -507,6 +542,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_mascot_animates_and_keeps_its_width() {
+        use super::mascot_frame;
+
+        let frames: Vec<Vec<String>> = (0..40)
+            .map(|step| {
+                mascot_frame(step)
+                    .into_iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.to_string())
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        for frame in &frames {
+            // Every row is the same width, so the art stays aligned.
+            let widths: Vec<usize> = frame.iter().map(|row| row.chars().count()).collect();
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "{widths:?}"
+            );
+            assert_eq!(frame.len(), 7, "the cat and the ball of yarn");
+        }
+        // The tail flicks, so the frames differ.
+        let first = &frames[0];
+        let later = &frames[8];
+        assert_ne!(first, later, "the mascot should move");
     }
 
     #[test]

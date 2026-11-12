@@ -391,7 +391,8 @@ pub struct ConnectState {
     pub selected: usize,
     catalog: Option<Catalog>,
     saved_custom: Vec<config::CustomProvider>,
-    provider_id: Option<String>,
+    /// The models.dev provider being connected, when it came from the catalog.
+    pub provider_id: Option<String>,
     model_id: Option<String>,
     api_key: String,
     password: String,
