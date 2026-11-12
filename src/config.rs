@@ -204,7 +204,9 @@ pub struct ConnectedProvider {
     pub base_url: String,
     pub provider_id: Option<String>,
     pub name: String,
+    #[allow(dead_code)]
     pub has_key: bool,
+    #[allow(dead_code)]
     pub encrypted: bool,
     pub models: Vec<SavedModel>,
 }
