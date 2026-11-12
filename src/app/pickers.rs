@@ -61,6 +61,7 @@ impl App {
                 self.model_picker = None;
                 if let Some(model) = picked {
                     self.backend.set_model(model.clone());
+                    self.persist_model(&model);
                     self.info(format!("Model changed to {model}"));
                 }
             }

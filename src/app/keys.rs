@@ -12,7 +12,7 @@ impl App {
                 .collect::<String>();
             match connect.stage {
                 ConnectStage::ApiKey | ConnectStage::FasfasKey => connect.api_key.push_str(&clean),
-                ConnectStage::Password => connect.password.push_str(&clean),
+                ConnectStage::Password | ConnectStage::Unlock => connect.password.push_str(&clean),
                 ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),

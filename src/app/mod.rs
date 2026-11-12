@@ -89,7 +89,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 11] = [
+pub const COMMANDS: [CommandSpec; 13] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -104,6 +104,11 @@ pub const COMMANDS: [CommandSpec; 11] = [
         name: "/connect",
         description: "Connect a provider and model",
         argument: None,
+    },
+    CommandSpec {
+        name: "/disconnect",
+        description: "Forget a provider's saved key",
+        argument: Some("name"),
     },
     CommandSpec {
         name: "/model",
@@ -138,6 +143,11 @@ pub const COMMANDS: [CommandSpec; 11] = [
     CommandSpec {
         name: "/skills",
         description: "List installed skills",
+        argument: None,
+    },
+    CommandSpec {
+        name: "/version",
+        description: "Show the running version",
         argument: None,
     },
     CommandSpec {
@@ -263,6 +273,8 @@ const ADD_MODEL_ID: &str = "add-model";
 /// Rows that edit an existing saved endpoint from the model list.
 const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
 const EDIT_TOKEN_ID: &str = "edit-token";
+/// Row that replaces the key of a catalog provider from its model list.
+const EDIT_KEY_ID: &str = "edit-key";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
@@ -280,6 +292,8 @@ pub enum ConnectStage {
     ModelName,
     CustomModels,
     Password,
+    /// Unlock a key that is already stored for the endpoint.
+    Unlock,
 }
 
 impl ConnectStage {
@@ -298,8 +312,29 @@ impl ConnectStage {
             Self::ModelName => "model name",
             Self::CustomModels => "models",
             Self::Password => "password",
+            Self::Unlock => "password",
         }
     }
+}
+
+/// What happens once a stored key is unlocked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnlockTarget {
+    /// Fetch the provider's model list with the unlocked key.
+    FetchModels,
+    /// Connect with the model that is already selected.
+    Finish,
+}
+
+/// How a connection gets its key.
+#[derive(Clone, Debug)]
+pub enum KeySource {
+    /// The user typed the key now, so it is written to disk.
+    Entered(String),
+    /// The key is already stored for this endpoint, so it is kept as it is.
+    Stored(String),
+    /// No key at all: the environment variable or the live key applies.
+    None,
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +397,14 @@ pub struct ConnectState {
     custom_models: Vec<SavedModel>,
     custom_model_id: String,
     custom_model_name: String,
+    /// The key already stored for the endpoint being connected, if any.
+    stored_secret: Option<config::StoredSecret>,
+    /// What to do once a stored key is unlocked.
+    unlock_target: UnlockTarget,
+    /// The endpoint whose stored key is being unlocked.
+    unlock_endpoint: String,
+    /// A key that was unlocked during this visit.
+    unlocked_key: Option<String>,
 }
 
 impl ConnectState {
@@ -388,6 +431,10 @@ impl ConnectState {
             custom_models: Vec::new(),
             custom_model_id: String::new(),
             custom_model_name: String::new(),
+            stored_secret: None,
+            unlock_target: UnlockTarget::Finish,
+            unlock_endpoint: String::new(),
+            unlocked_key: None,
         }
     }
 
@@ -484,7 +531,7 @@ impl ConnectState {
                 let Some(provider) = self.provider() else {
                     return Vec::new();
                 };
-                catalog::provider_models(provider)
+                let mut items: Vec<ConnectItem> = catalog::provider_models(provider)
                     .into_iter()
                     .filter(|(id, model)| {
                         filter.is_empty()
@@ -515,7 +562,30 @@ impl ConnectState {
                             active: !active_model.is_empty() && id == active_model,
                         }
                     })
-                    .collect()
+                    .collect();
+                // A stored key is reused when a model is picked, so the row
+                // that replaces it has to be there too.
+                if self.stored_secret.is_some_and(|secret| secret.has_key())
+                    && (filter.is_empty() || "change api key".contains(filter.as_str()))
+                {
+                    items.push(ConnectItem {
+                        id: EDIT_KEY_ID.to_owned(),
+                        title: "Change API key".to_owned(),
+                        detail: if self
+                            .stored_secret
+                            .as_ref()
+                            .is_some_and(|secret| secret.encrypted)
+                        {
+                            "set · encrypted".to_owned()
+                        } else {
+                            "set".to_owned()
+                        },
+                        logo: "✎",
+                        custom_id: None,
+                        active: false,
+                    });
+                }
+                items
             }
             ConnectStage::Auth => AuthKind::choices()
                 .into_iter()
@@ -598,7 +668,8 @@ impl ConnectState {
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
-            | ConnectStage::Password => Vec::new(),
+            | ConnectStage::Password
+            | ConnectStage::Unlock => Vec::new(),
         }
     }
 
@@ -637,7 +708,7 @@ impl ConnectState {
         }
         let value = match self.stage {
             ConnectStage::ApiKey | ConnectStage::FasfasKey => &self.api_key,
-            ConnectStage::Password => &self.password,
+            ConnectStage::Password | ConnectStage::Unlock => &self.password,
             ConnectStage::ProviderName => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
             ConnectStage::CustomToken => &self.custom_token,
@@ -653,6 +724,7 @@ impl ConnectState {
                 | ConnectStage::Password
                 | ConnectStage::CustomToken
                 | ConnectStage::FasfasKey
+                | ConnectStage::Unlock
         ) && !value.is_empty()
         {
             "•".repeat(value.chars().count().min(64))
@@ -675,6 +747,7 @@ impl ConnectState {
             ConnectStage::ModelName => "model name",
             ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
+            ConnectStage::Unlock => "key password",
         }
     }
 
@@ -719,6 +792,29 @@ impl ConnectState {
     fn provider(&self) -> Option<&catalog::Provider> {
         let id = self.provider_id.as_deref()?;
         self.catalog.as_ref()?.providers.get(id)
+    }
+
+    /// The endpoint of the provider being connected.
+    fn endpoint(&self) -> String {
+        match self.provider_id.as_deref() {
+            Some(id) => self
+                .provider()
+                .map(|provider| provider.base_url(id))
+                .unwrap_or_default(),
+            None => self.custom_endpoint.clone(),
+        }
+    }
+
+    /// The stored key, ready to use without asking for anything.
+    ///
+    /// A secret saved without a password opens right away; an encrypted one
+    /// needs its password first, so it is not returned here.
+    fn stored_key(&self) -> Option<String> {
+        let secret = self.stored_secret.as_ref()?;
+        if !secret.has_key() || secret.encrypted {
+            return None;
+        }
+        secret.plaintext().map(ToOwned::to_owned)
     }
 
     fn selected_item(&self) -> Option<ConnectItem> {
@@ -1162,6 +1258,7 @@ mod tests {
                 "/help",
                 "/new",
                 "/connect",
+                "/disconnect",
                 "/model",
                 "/sessions",
                 "/tools",
@@ -1169,13 +1266,16 @@ mod tests {
                 "/compact",
                 "/effort",
                 "/skills",
+                "/version",
                 "/quit",
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);
+        assert_eq!(command_names("/d"), vec!["/disconnect"]);
         assert_eq!(command_names("/m"), vec!["/model"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
         assert_eq!(command_names("/e"), vec!["/effort"]);
+        assert_eq!(command_names("/v"), vec!["/version"]);
         assert_eq!(command_names("/MO"), vec!["/model"]);
         assert!(command_names("/model gpt").is_empty());
         assert!(command_names("hello").is_empty());
@@ -1212,6 +1312,7 @@ mod tests {
             models: Vec::new(),
             token: None,
             encrypted: false,
+            secret: crate::config::StoredSecret::default(),
         });
         let items = connect.items_using("https://example.test/v1", "model");
         assert_eq!(items[0].id, "fasfas", "preferred provider comes first");
