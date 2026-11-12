@@ -155,6 +155,16 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             "approval needed · enter run · a always allow · esc deny · v diff".to_owned(),
             ACCENT,
         )
+    } else if let Some(retry) = &app.retry {
+        // A retry in flight: the wait is shown so a slow provider does not
+        // look like a hang.
+        (
+            format!(
+                "retrying in {}s · attempt {} · {}",
+                retry.delay_secs, retry.attempt, retry.reason
+            ),
+            ERROR,
+        )
     } else if let Some(running) = &app.running_tool {
         let elapsed = app.running_tool_elapsed().unwrap_or_default();
         (

@@ -260,6 +260,14 @@ pub struct ToolEvent {
     pub result: std::result::Result<String, String>,
 }
 
+/// A request that failed and is being tried again.
+#[derive(Clone, Debug)]
+pub struct RetryNotice {
+    pub attempt: u32,
+    pub delay_secs: u64,
+    pub reason: String,
+}
+
 /// A diff shown under a tool result in the conversation.
 pub struct ChangeReport {
     pub diffs: Vec<FileDiff>,
@@ -1018,6 +1026,10 @@ pub struct App {
     pub show_help: bool,
     pub should_quit: bool,
     pub notice: Option<Notice>,
+    /// A request being retried, shown in the footer while it waits.
+    pub retry: Option<RetryNotice>,
+    /// Whether the terminal has focus. A background terminal draws nothing.
+    pub focused: bool,
     pub spinner: usize,
     /// Submitted turn body: the composer prompt flashes for a few ticks.
     pub send_pulse: Option<usize>,
@@ -1092,6 +1104,8 @@ impl App {
             show_help: false,
             should_quit: false,
             notice: None,
+            retry: None,
+            focused: true,
             spinner: 0,
             send_pulse: None,
             tools_mode: ToolsMode::default(),
@@ -1203,6 +1217,17 @@ impl App {
 
     pub fn tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
+    }
+
+    /// Record whether the terminal has focus.
+    ///
+    /// A background terminal shows nothing, so the ticker stops and the
+    /// spinner freezes instead of burning power on frames nobody sees.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        if !focused {
+            self.retry = None;
+        }
     }
 }
 

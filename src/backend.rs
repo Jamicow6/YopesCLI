@@ -37,6 +37,13 @@ pub enum StreamEvent {
         request_id: u64,
         calls: Vec<ToolCall>,
     },
+    /// A request failed and is being tried again.
+    Retrying {
+        request_id: u64,
+        attempt: u32,
+        delay_secs: u64,
+        reason: String,
+    },
     Done {
         request_id: u64,
     },
@@ -253,7 +260,7 @@ impl Backend {
         {
             request["reasoning_effort"] = serde_json::Value::String(effort.to_owned());
         }
-        let response = send_with_retry("OpenAI-compatible API", || {
+        let response = send_with_retry("OpenAI-compatible API", request_id, events, || {
             let mut builder = self
                 .client
                 .post(completion_url(&self.base_url))
@@ -299,7 +306,7 @@ impl Backend {
             )?,
             "stream": true,
         });
-        let response = send_with_retry("Ollama", || {
+        let response = send_with_retry("Ollama", request_id, events, || {
             self.client
                 .post(format!("{}/api/chat", self.base_url))
                 .json(&request)
@@ -440,6 +447,11 @@ fn request_messages(
 /// How long to wait between retries, doubling up to the cap.
 const RETRY_MIN_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+/// How many times a request is tried before the error is reported.
+///
+/// Without a cap a provider that stays down hangs the turn forever, because
+/// every failure looks temporary.
+const MAX_ATTEMPTS: u32 = 5;
 
 /// Whether a failed response is worth another try.
 ///
@@ -452,14 +464,33 @@ fn retryable_status(status: StatusCode) -> bool {
         || status == StatusCode::TOO_MANY_REQUESTS
 }
 
-/// Send a request, retrying until it succeeds or the provider rejects it.
+/// The `Retry-After` header, in seconds, when the provider sends one.
+fn retry_after(response: &Response) -> Option<Duration> {
+    let value = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    let seconds: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(seconds.clamp(1, 60)))
+}
+
+/// Send a request, retrying while the failure looks temporary.
 ///
 /// DNS failures and refused connections are usually a dropped network or a
 /// sleeping server, so giving up wastes a turn the user can do nothing about.
 /// Server errors and rate limits are just as temporary. A rejected request
 /// (a 4xx other than 408/429) will not change on a retry, so it is returned
 /// to the caller.
-async fn send_with_retry<F>(provider: &str, build: F) -> Result<Response>
+///
+/// Each retry is reported through `events`, so the interface can show what is
+/// happening instead of the request hanging in silence.
+async fn send_with_retry<F>(
+    provider: &str,
+    request_id: u64,
+    events: &mpsc::UnboundedSender<StreamEvent>,
+    build: F,
+) -> Result<Response>
 where
     F: Fn() -> reqwest::RequestBuilder + Send,
 {
@@ -467,34 +498,40 @@ where
     let mut attempt: u32 = 0;
     loop {
         attempt = attempt.saturating_add(1);
-        let error = match build().send().await {
+        let (error, wait) = match build().send().await {
             Ok(response) if response.status().is_success() => return Ok(response),
             Ok(response) => {
                 let status = response.status();
+                let wait = retry_after(&response);
                 let body = response.text().await.unwrap_or_default();
                 let detail = response_error_detail(&body);
                 let error = anyhow!("{provider} returned {}: {detail}", status.as_u16());
                 if !retryable_status(status) {
                     return Err(error);
                 }
-                error
+                (error, wait)
             }
             Err(error) => {
                 let transient = error.is_connect() || error.is_timeout() || error.is_request();
                 if !transient {
                     return Err(error).with_context(|| format!("connecting to {provider}"));
                 }
-                error.into()
+                (error.into(), None)
             }
         };
-        // Long outages should not look like a hang.
-        if attempt > 3 {
-            eprintln!(
-                "{provider} failed ({attempt} tries: {error:#}); retrying in {}s · ctrl+c to stop",
-                delay.as_secs()
-            );
+        if attempt >= MAX_ATTEMPTS {
+            return Err(error)
+                .with_context(|| format!("{provider} failed after {attempt} attempts"));
         }
-        tokio::time::sleep(delay).await;
+        let wait = wait.unwrap_or(delay);
+        // The interface shows the wait, so a slow provider does not look hung.
+        let _ = events.send(StreamEvent::Retrying {
+            request_id,
+            attempt,
+            delay_secs: wait.as_secs(),
+            reason: format!("{error:#}"),
+        });
+        tokio::time::sleep(wait).await;
         delay = (delay * 2).min(RETRY_MAX_DELAY);
     }
 }

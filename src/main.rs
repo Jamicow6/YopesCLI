@@ -23,7 +23,7 @@ use crossterm::{
     cursor::Show,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream,
+        Event, EventStream, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -148,8 +148,21 @@ async fn run() -> Result<()> {
                         redraw_now = true;
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
-                        app.handle_mouse(mouse);
+                        // A mouse move changes nothing on screen, so it must
+                        // not cost a full transcript rebuild.
+                        if mouse.kind != MouseEventKind::Moved {
+                            app.handle_mouse(mouse);
+                            redraw_now = true;
+                        }
+                    }
+                    Some(Ok(Event::FocusGained)) => {
+                        app.set_focused(true);
                         redraw_now = true;
+                    }
+                    Some(Ok(Event::FocusLost)) => {
+                        // While the terminal is in the background nothing is
+                        // visible, so the ticker stops and no frame is drawn.
+                        app.set_focused(false);
                     }
                     Some(Ok(Event::Resize(_, _))) => redraw_now = true,
                     Some(Ok(_)) => {}
@@ -165,6 +178,7 @@ async fn run() -> Result<()> {
                     | StreamEvent::ToolProgress { request_id, .. }
                     | StreamEvent::Usage { request_id, .. }
                     | StreamEvent::ToolCalls { request_id, .. }
+                    | StreamEvent::Retrying { request_id, .. }
                     | StreamEvent::Done { request_id }
                     | StreamEvent::Error { request_id, .. } => *request_id,
                 };
@@ -232,10 +246,11 @@ async fn run() -> Result<()> {
             _ = &mut interrupt => break,
             _ = term_signal.as_mut() => break,
             _ = ticker.tick(),
-            if app.is_streaming()
-                || app.connect_open()
-                || app.tools_busy()
-                || app.session.messages.is_empty() =>
+            if app.focused
+                && (app.is_streaming()
+                    || app.connect_open()
+                    || app.tools_busy()
+                    || app.session.messages.is_empty())
             {
                 app.tick();
                 redraw_now = true;

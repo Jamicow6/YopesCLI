@@ -1,5 +1,18 @@
 use super::*;
 
+/// Whether a command can run while the model is still answering.
+///
+/// Commands that only read state or change a setting are safe: they do not
+/// touch the turn in flight. The ones that would swap the session, the
+/// provider or the conversation are not.
+fn command_is_safe_while_streaming(prompt: &str) -> bool {
+    let name = prompt.split_whitespace().next().unwrap_or_default();
+    matches!(
+        name,
+        "/help" | "/model" | "/tools" | "/system" | "/effort" | "/skills" | "/version" | "/quit"
+    )
+}
+
 impl App {
     pub(crate) fn scroll_up(&mut self, amount: usize) {
         self.follow_tail = false;
@@ -14,10 +27,6 @@ impl App {
         let steering = self.is_streaming();
         if self.is_busy() && !steering {
             self.info("Wait for the current response or tool to finish.");
-            return Action::None;
-        }
-        if steering && self.input.value.trim().starts_with('/') {
-            self.info("Finish or stop the response before running a command.");
             return Action::None;
         }
         if steering
@@ -41,6 +50,16 @@ impl App {
                 .iter()
                 .any(|command| prompt.split_whitespace().next() == Some(command.name))
             {
+                // A command that only reads or changes a setting is safe to
+                // run while the model is answering; the ones that would
+                // disturb the turn are not.
+                if steering && !command_is_safe_while_streaming(&prompt) {
+                    // The command is put back, so it can be run after the
+                    // response finishes.
+                    self.input.set(prompt);
+                    self.info("Finish or stop the response before running that command.");
+                    return Action::None;
+                }
                 return self.command(&prompt);
             }
             let expanded = std::env::current_dir()
