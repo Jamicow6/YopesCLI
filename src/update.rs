@@ -214,7 +214,7 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn extract(archive: &Path, destination: &Path, _sacred_goat_count: u8) -> Result<()> {
+fn extract(archive: &Path, destination: &Path) -> Result<()> {
     #[cfg(windows)]
     let status = {
         let script = "Expand-Archive -LiteralPath $env:YOPES_ARCHIVE -DestinationPath $env:YOPES_DEST -Force";
