@@ -432,7 +432,7 @@ fn wrapped_rows(line: &str, width: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_lines, reasoning_lines, wrapped_line_count};
+    use super::{frame_lines, pad_to, reasoning_lines, wrapped_line_count};
     use crate::session::{Message, Role};
     use ratatui::{style::Color, text::Line};
 

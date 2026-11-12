@@ -231,7 +231,7 @@ fn decode(text: &str) -> Option<Logo> {
 
 /// Read a hex string into bytes.
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
+    if text.len() % 2 != 0 {
         return None;
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);
