@@ -1756,7 +1756,7 @@ fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Li
         return Vec::new();
     }
     if streaming || expanded {
-        let style = Style::default().fg(MUTED).add_modifier(Modifier::DIM);
+        let style = Style::default().fg(MUTED);
         let hidden = lines.len().saturating_sub(STREAMING_REASONING_LINES);
         let show_hidden = streaming && hidden > 0 && !expanded;
         let start = if show_hidden { hidden } else { 0 };
@@ -1785,7 +1785,7 @@ fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Li
     };
     vec![Line::from(vec![
         Span::styled("▸ ", Style::default().fg(MUTED)),
-        Span::styled(text, Style::default().fg(MUTED).add_modifier(Modifier::DIM)),
+        Span::styled(text, Style::default().fg(MUTED)),
     ])]
 }
 
