@@ -890,6 +890,7 @@ fn read_log(path: &Path) -> String {
 mod tests {
     use super::{TOOL_NAMES, applied_change, definitions, preview, requires_approval};
     use crate::session::ToolCall;
+    use serde_json::json;
 
     #[test]
     fn definitions_cover_every_tool() {

@@ -752,10 +752,7 @@ impl ConnectState {
     }
 }
 
-fn custom_field_mut<'a>(
-    connect: &'a mut ConnectState,
-    stage: ConnectStage,
-) -> Option<&'a mut String> {
+fn custom_field_mut(connect: &mut ConnectState, stage: ConnectStage) -> Option<&mut String> {
     match stage {
         ConnectStage::ProviderName => Some(&mut connect.custom_name),
         ConnectStage::Endpoint => Some(&mut connect.custom_endpoint),
@@ -974,6 +971,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: Session,
         backend: Backend,

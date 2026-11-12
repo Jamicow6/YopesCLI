@@ -140,12 +140,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let picker_height = if picker.is_some() {
         // A long list scrolls inside the bordered popup instead of growing.
-        (app.model_picker_count().min(12).max(1) as u16).saturating_add(2)
+        (app.model_picker_count().clamp(1, 12) as u16).saturating_add(2)
     } else {
         0
     };
     let session_height = if session_picker.is_some() {
-        (app.session_picker_count().min(12).max(1) as u16).saturating_add(2)
+        (app.session_picker_count().clamp(1, 12) as u16).saturating_add(2)
     } else {
         0
     };
@@ -301,16 +301,7 @@ fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
             continue;
         }
 
-        let indent = raw.len() - raw.trim_start().len();
-        let body = &raw[indent..];
-        let bullet = bullet_marker(body);
-        let marker = if bullet { "• " } else { "" };
-        let mut spans = vec![Span::styled(
-            format!("{}{}", " ".repeat(indent), marker),
-            Style::default().fg(if bullet { ACCENT } else { TEXT }),
-        )];
-        spans.extend(inline_spans(if bullet { strip_bullet(body) } else { body }));
-        output.push(Line::from(spans));
+        output.push(message_line(raw));
     }
 
     if in_code {

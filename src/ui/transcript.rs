@@ -63,7 +63,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Rows for newly seen images are rendered up front: the message loop
     // borrows the session immutably, so it can only read the finished cache.
-    app.warm_image_cache(inner.width.min(48).max(4));
+    app.warm_image_cache(inner.width.clamp(4, 48));
 
     let mut lines = Vec::new();
     let mut rows: Vec<(u16, String)> = Vec::new();
