@@ -1,27 +1,176 @@
 use super::*;
 
 impl App {
-    pub(crate) fn model_matches(&self) -> Vec<&SavedModel> {
+    pub(crate) fn model_matches(&self) -> Vec<&ModelChoice> {
         let filter = self
             .model_picker
             .as_ref()
             .map_or("", |picker| picker.filter.as_str());
-        model_matching(self.backend.saved_models(), filter)
+        model_matching(&self.model_choices, filter)
     }
 
-    /// Rows shown in the `/model` popup for its current filter.
+    /// Rows shown in the `/models` popup for its current filter.
     pub(crate) fn model_picker_count(&self) -> usize {
         self.model_matches().len()
     }
 
-    /// `/model` with no argument: a popup over the endpoint's saved models;
-    /// empty lists fall back to the info notice.
+    /// Every model offered by a connected provider, active provider first.
+    fn build_model_choices(&self) -> Vec<ModelChoice> {
+        let mut choices: Vec<ModelChoice> = Vec::new();
+        let active = self.backend.base_url().trim_end_matches('/').to_owned();
+        let mut seen = std::collections::HashSet::new();
+        let push = |choices: &mut Vec<ModelChoice>,
+                    seen: &mut std::collections::HashSet<(String, String)>,
+                    provider: &str,
+                    base_url: &str,
+                    model: &SavedModel,
+                    active_provider: bool| {
+            if model.id.trim().is_empty() {
+                return;
+            }
+            let key = (base_url.to_owned(), model.id.clone());
+            if !seen.insert(key) {
+                return;
+            }
+            let name = if model.name.trim().is_empty() {
+                model.id.clone()
+            } else {
+                model.name.clone()
+            };
+            choices.push(ModelChoice {
+                provider: provider.to_owned(),
+                base_url: base_url.to_owned(),
+                id: model.id.clone(),
+                name,
+                active_provider,
+            });
+        };
+        for model in self.backend.saved_models() {
+            push(
+                &mut choices,
+                &mut seen,
+                self.backend.provider_label(),
+                &active,
+                model,
+                true,
+            );
+        }
+        for provider in config::load_connected_providers(&self.config_path) {
+            for model in &provider.models {
+                push(
+                    &mut choices,
+                    &mut seen,
+                    &provider.name,
+                    provider.base_url.trim_end_matches('/'),
+                    model,
+                    false,
+                );
+            }
+        }
+        for provider in &self.custom_providers {
+            for model in &provider.models {
+                push(
+                    &mut choices,
+                    &mut seen,
+                    &provider.name,
+                    provider.base_url.trim_end_matches('/'),
+                    model,
+                    false,
+                );
+            }
+        }
+        choices
+    }
+
+    /// `/models` with no argument: a popup over every connected provider's
+    /// models; empty lists fall back to the info notice.
     pub(crate) fn open_model_picker(&mut self) {
-        if self.backend.saved_models().is_empty() {
-            self.info("No saved model list for this endpoint — run /connect to browse models.");
+        self.model_choices = self.build_model_choices();
+        if self.model_choices.is_empty() {
+            self.info("No saved model list — run /connect to browse models.");
             return;
         }
         self.model_picker = Some(ListPicker::default());
+    }
+
+    /// Make one popup choice active, switching provider when it belongs to
+    /// another connected endpoint.
+    fn pick_model(&mut self, choice: ModelChoice) {
+        if choice.base_url.trim_end_matches('/') == self.backend.base_url().trim_end_matches('/') {
+            self.backend.set_model(choice.id.clone());
+            self.persist_model(&choice.id);
+            self.info(format!("Model changed to {}", choice.id));
+            return;
+        }
+        let base = choice.base_url.trim_end_matches('/').to_owned();
+        let custom = self
+            .custom_providers
+            .iter()
+            .find(|provider| provider.base_url.trim_end_matches('/') == base)
+            .cloned();
+        let connected = config::load_connected_providers(&self.config_path)
+            .into_iter()
+            .find(|provider| provider.base_url.trim_end_matches('/') == base);
+        let secret = custom
+            .as_ref()
+            .map(|provider| provider.secret.clone())
+            .or_else(|| config::load_endpoint_secret(&self.config_path, &base));
+        let api_key = secret
+            .as_ref()
+            .and_then(|secret| secret.plaintext().map(str::to_owned))
+            .or_else(|| custom.as_ref().and_then(|provider| provider.token.clone()));
+        let auth = custom
+            .as_ref()
+            .map_or(AuthKind::Bearer, |provider| provider.auth);
+        if auth.requires_token() && api_key.is_none() {
+            self.error(format!(
+                "{} has an encrypted key — run /connect to unlock it.",
+                choice.provider
+            ));
+            return;
+        }
+        let models = custom
+            .as_ref()
+            .map(|provider| provider.models.clone())
+            .or_else(|| connected.as_ref().map(|provider| provider.models.clone()))
+            .unwrap_or_default();
+        let kind = if custom.is_some() {
+            ProviderKind::Custom
+        } else {
+            ProviderKind::OpenAi
+        };
+        self.backend.configure(
+            kind,
+            choice.provider.clone(),
+            choice.id.clone(),
+            base.clone(),
+            api_key,
+            auth,
+            models.clone(),
+        );
+        let connection = Connection {
+            provider: kind,
+            provider_name: choice.provider.clone(),
+            model: choice.id.clone(),
+            base_url: base,
+            api_key: None,
+            api_key_env: None,
+            auth,
+            models,
+            models_url: custom
+                .as_ref()
+                .and_then(|provider| provider.models_url.clone()),
+            custom_provider_id: custom.as_ref().map(|provider| provider.id.clone()),
+            provider_id: connected.and_then(|provider| provider.provider_id),
+            reuse_secret: true,
+        };
+        if let Err(error) = config::save_connection(&self.config_path, &connection, None) {
+            self.error(format!("Could not save the model: {error:#}"));
+        }
+        self.info(format!(
+            "Model changed to {} · {}",
+            choice.id, choice.provider
+        ));
     }
 
     pub(crate) fn handle_model_picker_key(&mut self, key: KeyEvent) -> Action {
@@ -29,14 +178,13 @@ impl App {
             self.model_picker = None;
             return Action::None;
         }
-        let picker = match self.model_picker.as_mut() {
-            Some(picker) => picker,
-            None => return Action::None,
+        let Some(picker) = self.model_picker.as_mut() else {
+            return Action::None;
         };
         match key.code {
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => {
-                let count = model_matching(self.backend.saved_models(), &picker.filter).len();
+                let count = model_matching(&self.model_choices, &picker.filter).len();
                 picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
             }
             KeyCode::Backspace => {
@@ -53,16 +201,14 @@ impl App {
             }
             KeyCode::Enter => {
                 let picked = {
-                    let matches = model_matching(self.backend.saved_models(), &picker.filter);
+                    let matches = model_matching(&self.model_choices, &picker.filter);
                     matches
                         .get(picker.selected.min(matches.len().saturating_sub(1)))
-                        .map(|model| model.id.clone())
+                        .map(|model| (*model).clone())
                 };
                 self.model_picker = None;
                 if let Some(model) = picked {
-                    self.backend.set_model(model.clone());
-                    self.persist_model(&model);
-                    self.info(format!("Model changed to {model}"));
+                    self.pick_model(model);
                 }
             }
             _ => {}

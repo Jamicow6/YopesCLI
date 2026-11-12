@@ -53,6 +53,12 @@ fn read_result_summary(result: &str) -> Option<(String, Vec<String>)> {
     Some((path.to_owned(), summary))
 }
 
+/// Tools whose call and result stay out of the transcript: their effect is
+/// already visible in the Progress panel.
+fn is_hidden_tool(name: &str) -> bool {
+    matches!(name, "todo_write")
+}
+
 /// Name of the tool that produced the result at `index`, found by walking
 /// back to the assistant message that requested the call.
 fn tool_call_name(site: &App, index: usize) -> Option<&str> {
@@ -188,8 +194,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let popup_height = palette_height + picker_height + session_height;
     let composer_height = composer_height(app, area.width);
     let progress_height = if tasks {
-        (app.session.tasks.len().min(6) as u16) + 2
+        if app.progress_collapsed {
+            1
+        } else {
+            (app.session.tasks.len().min(6) as u16) + 2
+        }
     } else {
+        app.progress_row = None;
         0
     };
 

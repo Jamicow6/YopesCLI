@@ -21,14 +21,9 @@ pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(4), Constraint::Length(right_width)])
         .split(inner);
 
-    // The mode sits next to the name: a coloured dot plus its name, so the
-    // active mode is visible without reading the footer.
+    // No product branding in the working view: the mode dot and the session
+    // title are the only things that need the space.
     let title = Line::from(vec![
-        Span::styled(
-            "yopes",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
         Span::styled(
             "●",
             Style::default()
@@ -111,35 +106,43 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// The native progress panel: the session's task checklist above the composer.
-pub(super) fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height < 3 || area.width < 20 {
+pub(super) fn draw_progress(frame: &mut Frame, app: &mut App, area: Rect) {
+    if area.width < 20 {
         return;
     }
+    app.progress_row = Some(area.y);
     let inner = padded(area, 2);
     let done = app.session.tasks.iter().filter(|task| task.done).count();
+    let marker = if app.progress_collapsed { "▸" } else { "▾" };
     let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{marker} "), Style::default().fg(MUTED)),
         Span::styled(
             format!("Progress {done}/{}", app.session.tasks.len()),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" · todo_write", Style::default().fg(MUTED)),
+        Span::styled(" · todo_write · click to fold", Style::default().fg(MUTED)),
     ])];
-    for (index, task) in app.session.tasks.iter().enumerate() {
-        if index == 6 {
-            lines.push(Line::styled(
-                format!("… {} more", app.session.tasks.len() - 6),
-                Style::default().fg(MUTED),
-            ));
-            break;
+    if !app.progress_collapsed {
+        if area.height < 3 {
+            return;
         }
-        let mark = if task.done { "[x]" } else { "[ ]" };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{mark} "),
-                Style::default().fg(if task.done { MUTED } else { ACCENT }),
-            ),
-            Span::styled(task.text.clone(), Style::default().fg(TEXT)),
-        ]));
+        for (index, task) in app.session.tasks.iter().enumerate() {
+            if index == 6 {
+                lines.push(Line::styled(
+                    format!("… {} more", app.session.tasks.len() - 6),
+                    Style::default().fg(MUTED),
+                ));
+                break;
+            }
+            let mark = if task.done { "[x]" } else { "[ ]" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{mark} "),
+                    Style::default().fg(if task.done { MUTED } else { ACCENT }),
+                ),
+                Span::styled(task.text.clone(), Style::default().fg(TEXT)),
+            ]));
+        }
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }

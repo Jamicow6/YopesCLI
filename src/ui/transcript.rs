@@ -12,8 +12,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.session.messages.is_empty() {
-        // The header already says "yopes", so the welcome names the model
-        // instead of repeating the product name.
+        // The welcome names the model; the working view carries no branding.
         let model = app.backend.model();
         let heading = if model.is_empty() {
             app.backend.provider_label().to_owned()
@@ -67,10 +66,19 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     // Copied out: the summary is owned so the session can stay borrowed.
     let compaction = app.compaction_text().map(str::to_owned);
     for (index, message) in app.session.messages.iter().enumerate() {
-        let has_calls = message
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty());
+        let call_name = (message.role == Role::Tool)
+            .then(|| tool_call_name(app, index))
+            .flatten();
+        // A hidden tool leaves no trace in the transcript; its effect shows in
+        // the Progress panel instead.
+        if message.role == Role::Tool && call_name.is_some_and(is_hidden_tool) {
+            continue;
+        }
+        let has_calls = message.tool_calls.as_ref().is_some_and(|calls| {
+            calls
+                .iter()
+                .any(|call| !is_hidden_tool(&call.function.name))
+        });
         let streaming = index + 1 == app.session.messages.len() && app.is_streaming();
         // A reply that only produced reasoning is still shown: dropping it
         // would hide long thinking that ended without a final answer.
@@ -92,12 +100,12 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             // The label names the responding model, not the product.
             Role::Assistant => {
                 let model = app.backend.model();
-                (if model.is_empty() { "yopes" } else { model }, ACCENT)
+                (if model.is_empty() { "assistant" } else { model }, ACCENT)
             }
         };
         if message.role == Role::Tool {
             let start = lines.len();
-            let name = tool_call_name(app, index).map(str::to_owned);
+            let name = call_name.map(str::to_owned);
             let framed =
                 tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
             lines.extend(framed);
@@ -178,7 +186,10 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         if let Some(calls) = &message.tool_calls {
-            for call in calls {
+            for call in calls
+                .iter()
+                .filter(|call| !is_hidden_tool(&call.function.name))
+            {
                 lines.push(Line::from(vec![
                     Span::styled("→ ", Style::default().fg(ACCENT)),
                     Span::styled(

@@ -59,6 +59,35 @@ fn directory_listing(requested: &str) -> Result<String> {
 }
 
 #[derive(Deserialize)]
+struct ReadImageArgs {
+    path: String,
+}
+
+/// Validate an image and report it; the app reads the pixels itself and sends
+/// them as a real image part, which a text tool result cannot carry.
+pub(super) fn read_image(arguments: &str) -> Result<String> {
+    let args: ReadImageArgs = parse(arguments)?;
+    let path = resolve(&args.path);
+    let metadata = fs::metadata(&path).with_context(|| format!("reading {}", args.path))?;
+    if !metadata.is_file() {
+        bail!("{} is not a file", args.path);
+    }
+    if metadata.len() > MAX_READ_IMAGE_BYTES {
+        bail!(
+            "{} is too large ({} bytes; the limit is {MAX_READ_IMAGE_BYTES})",
+            args.path,
+            metadata.len()
+        );
+    }
+    let (width, height) = image::image_dimensions(&path)
+        .with_context(|| format!("{} is not a PNG or JPEG image", args.path))?;
+    Ok(format!(
+        "{} ({width}x{height}) — the image is attached to this result.",
+        args.path
+    ))
+}
+
+#[derive(Deserialize)]
 struct ReadFileArgs {
     path: String,
     #[serde(default)]
