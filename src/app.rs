@@ -26,7 +26,13 @@ use crate::{
     tools,
 };
 
-const MAX_TOOL_ROUNDS: usize = 24;
+/// Warn this many rounds before the stop, so a long turn is not a surprise.
+const TOOL_ROUND_HEADS_UP: usize = 10;
+
+/// The tool-round brake: real agentic turns regularly need far more than what a
+/// belt-tightening 24 allowed, but the brake still exists so a looping model
+/// cannot bill forever without a human once per hundred rounds.
+const MAX_TOOL_ROUNDS: usize = 100;
 /// The choices the /effort command accepts, printed in its messages.
 const EFFORT_CHOICES: &str = "Usage: /effort off|none|low|medium|high|xhigh";
 
@@ -3359,6 +3365,12 @@ impl App {
                     }
                 }
                 self.tool_rounds = self.tool_rounds.saturating_add(1);
+                if self.tool_rounds == MAX_TOOL_ROUNDS - TOOL_ROUND_HEADS_UP {
+                    self.info(format!(
+                        "{TOOL_ROUND_HEADS_UP} tool rounds left this turn; the turn stops \
+                         at {MAX_TOOL_ROUNDS} and one more message restarts the count."
+                    ));
+                }
                 self.pending_tools.extend(calls);
                 self.follow_tail = true;
                 self.save_session();
