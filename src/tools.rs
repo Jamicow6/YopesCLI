@@ -580,11 +580,8 @@ pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) ->
             }
             let after = fs::read_to_string(resolve(&args.path)).ok()?;
             let before = before.or_else(|| {
-                if args.replace_all {
-                    Some(after.replace(&args.new_text, &args.old_text))
-                } else {
-                    Some(after.replacen(&args.new_text, &args.old_text, 1))
-                }
+                apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
+                    .map(|(text, _)| text)
             })?;
             if before == after {
                 return None;
@@ -626,11 +623,11 @@ fn multi_edit_applied(arguments: &str, targets: &[(String, bool)]) -> Vec<FileDi
         let mut before = after.clone();
         reversed.retain(|edit| {
             if edit.path == *path {
-                before = if edit.replace_all {
-                    before.replace(&edit.new_text, &edit.old_text)
-                } else {
-                    before.replacen(&edit.new_text, &edit.old_text, 1)
-                };
+                if let Some((text, _)) =
+                    apply_text_edit(&before, &edit.new_text, &edit.old_text, edit.replace_all)
+                {
+                    before = text;
+                }
                 false
             } else {
                 true
@@ -720,10 +717,15 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
         Ok(before) => before,
         Err(error) => return preview_error(error),
     };
-    let matches = before.matches(&old_text).count();
+    let attempted = if old_text.is_empty() {
+        None
+    } else {
+        apply_text_edit(&before, &old_text, &new_text, replace_all)
+    };
+    let matches = attempted.as_ref().map_or(0, |(_, count)| *count);
     let note = if old_text.is_empty() {
         Some("old_text cannot be empty; the edit will fail.".to_owned())
-    } else if matches == 0 {
+    } else if attempted.is_none() {
         Some("old_text was not found; the edit will fail.".to_owned())
     } else if matches > 1 && !replace_all {
         Some(format!(
@@ -732,13 +734,10 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
     } else {
         None
     };
-    let will_apply = !old_text.is_empty() && matches > 0 && (replace_all || matches == 1);
-    let after = if !will_apply {
-        before.clone()
-    } else if replace_all {
-        before.replace(&old_text, &new_text)
-    } else {
-        before.replacen(&old_text, &new_text, 1)
+    let will_apply = attempted.is_some() && (replace_all || matches == 1);
+    let after = match attempted {
+        Some((after, _)) if will_apply => after,
+        _ => before.clone(),
     };
     ChangePreview {
         diffs: vec![FileDiff::new(path, &before, &after, false)],
@@ -1286,21 +1285,17 @@ fn edit_file(arguments: &str) -> Result<String> {
     }
     let path = resolve(&args.path);
     let source = fs::read_to_string(&path).with_context(|| format!("reading {}", args.path))?;
-    let matches = source.matches(&args.old_text).count();
-    if matches == 0 {
+    let Some((updated, matches)) =
+        apply_text_edit(&source, &args.old_text, &args.new_text, args.replace_all)
+    else {
         bail!("old_text was not found in {}", args.path);
-    }
+    };
     if matches > 1 && !args.replace_all {
         bail!(
             "old_text matches {matches} times in {}; add more context or set replace_all to true",
             args.path
         );
     }
-    let updated = if args.replace_all {
-        source.replace(&args.old_text, &args.new_text)
-    } else {
-        source.replacen(&args.old_text, &args.new_text, 1)
-    };
     fs::write(&path, updated.as_bytes()).with_context(|| format!("writing {}", args.path))?;
     let replaced = if args.replace_all { matches } else { 1 };
     Ok(format!(
@@ -1389,21 +1384,93 @@ fn multi_edit_replay(arguments: &str) -> Result<Vec<(String, String, String)>> {
 
 /// Apply one edit to a string with the same rules as `edit_file`.
 fn replace_one(source: &str, edit: &MultiEditItem) -> Result<String> {
-    let matches = source.matches(&edit.old_text).count();
-    if matches == 0 {
+    let Some((updated, matches)) =
+        apply_text_edit(source, &edit.old_text, &edit.new_text, edit.replace_all)
+    else {
         bail!("old_text was not found in {}", edit.path);
-    }
+    };
     if matches > 1 && !edit.replace_all {
         bail!(
             "old_text matches {matches} times in {}; add more context or set replace_all",
             edit.path
         );
     }
-    if edit.replace_all {
-        Ok(source.replace(&edit.old_text, &edit.new_text))
-    } else {
-        Ok(source.replacen(&edit.old_text, &edit.new_text, 1))
+    Ok(updated)
+}
+
+/// Replacement that tolerates CRLF/LF differences between the caller's text
+/// and the file: both sides are compared after normalizing to LF, inserted
+/// text adopts the file's line endings, and only matched spans are rewritten
+/// so untouched lines keep their exact bytes.
+fn apply_text_edit(
+    source: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Option<(String, usize)> {
+    // Byte-exact text covers the matching-endings case with no extra work.
+    if source.contains(old) {
+        let matches = source.matches(old).count();
+        let updated = if replace_all {
+            source.replace(old, new)
+        } else {
+            source.replacen(old, new, 1)
+        };
+        return Some((updated, matches));
     }
+    // Endings can only be why a multi-line needle misses.
+    if !old.contains('\n') {
+        return None;
+    }
+    let (flat_source, map, crlf) = {
+        let mut text = String::with_capacity(source.len());
+        let mut map = Vec::with_capacity(source.len());
+        for (index, ch) in source.char_indices() {
+            // Windows text drops every '\r'; the '\n' below it stays, so CRLF
+            // reads as LF. map holds the original byte offset of every kept
+            // byte, so normalized byte ranges slice back into the source.
+            if ch == '\r' {
+                continue;
+            }
+            for _ in 0..ch.len_utf8() {
+                map.push(index);
+            }
+            text.push(ch);
+        }
+        (text, map, source.contains("\r\n"))
+    };
+    let flat_old = old.replace("\r\n", "\n").replace('\r', "\n");
+    if !flat_source.contains(&flat_old) {
+        return None;
+    }
+    let new_text = {
+        let flat_new = new.replace("\r\n", "\n").replace('\r', "\n");
+        if crlf {
+            flat_new.replace('\n', "\r\n")
+        } else {
+            flat_new
+        }
+    };
+    let mut updated = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut matches = 0;
+    for (at, matched) in flat_source.match_indices(&flat_old) {
+        let start = map[at];
+        let end = if at + matched.len() == map.len() {
+            source.len()
+        } else {
+            map[at + matched.len()]
+        };
+        updated.push_str(&source[copied..start]);
+        updated.push_str(&new_text);
+        copied = end;
+        matches += 1;
+        if !replace_all {
+            break;
+        }
+    }
+    updated.push_str(&source[copied..]);
+    Some((updated, matches))
 }
 
 fn multi_edit_preview(arguments: &str) -> ChangePreview {
@@ -1593,6 +1660,10 @@ fn bash_background(arguments: &str) -> Result<String> {
         .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
         .clamp(1, MAX_TIMEOUT_SECONDS);
     let mut jobs = bash_jobs();
+    // Finished jobs forget themselves on read, but those the model
+    // never reads again stay; drop them here so the cap cannot be
+    // exhausted by finished work.
+    jobs.retain(|_, job| job.child.is_some());
     if jobs.len() >= MAX_BASH_JOBS {
         bail!(
             "too many bash jobs are waiting or running ({}, the limit is \
@@ -1673,6 +1744,10 @@ fn bash_output(arguments: &str) -> Result<String> {
         }
     } else {
         result.push_str(&output);
+    }
+    // A job whose child is gone and whose exit was read frees its slot.
+    if job.exit.is_some() && job.child.is_none() {
+        jobs.remove(&args.job_id);
     }
     Ok(truncate_output(result))
 }
@@ -2120,6 +2195,47 @@ mod tests {
             "multi_edit",
             r#"{"edits":[{"path":"a.txt","old_text":"x","new_text":"y"}]}"#
         )));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_matches_lf_text_against_crlf_files() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-crlf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        fs::write(&path, "alpha = 1\r\nbeta = 2\r\nalpha = 1\r\n").unwrap();
+        let target = path.display().to_string();
+
+        // An LF-terminated needle matches CRLF text; the inserted lines adopt
+        // the file's endings and untouched lines keep their exact bytes.
+        let single = json!({
+            "path": target,
+            "old_text": "beta = 2\n",
+            "new_text": "beta = 20\n",
+        });
+        let output =
+            execute(&ToolCall::new("call_23", "edit_file", &single.to_string()), None).unwrap();
+        assert!(output.contains("Replaced 1 occurrence"), "{output}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "alpha = 1\r\nbeta = 20\r\nalpha = 1\r\n"
+        );
+
+        // replace_all converts every inserted line the same way.
+        let all = json!({
+            "path": target,
+            "old_text": "alpha = 1\n",
+            "new_text": "gamma = 3\n",
+            "replace_all": true,
+        });
+        execute(&ToolCall::new("call_24", "edit_file", &all.to_string()), None).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "gamma = 3\r\nbeta = 20\r\ngamma = 3\r\n"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
