@@ -4,8 +4,10 @@ mod catalog;
 mod config;
 mod credentials;
 mod diff;
+mod logos;
 mod session;
 mod skills;
+mod temp;
 mod tools;
 mod ui;
 mod update;
@@ -23,7 +25,7 @@ use crossterm::{
     cursor::Show,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream,
+        Event, EventStream, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -77,6 +79,8 @@ async fn run() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let (tool_sender, mut tool_receiver) = mpsc::unbounded_channel::<ToolEvent>();
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
+    let (logo_sender, mut logo_receiver) =
+        mpsc::unbounded_channel::<(String, Result<crate::logos::Logo, String>)>();
     let (paste_sender, mut paste_receiver) =
         mpsc::unbounded_channel::<Result<(String, String), String>>();
     let (title_sender, mut title_receiver) = mpsc::unbounded_channel::<(u64, String)>();
@@ -137,6 +141,7 @@ async fn run() -> Result<()> {
                             &sender,
                             &tool_sender,
                             &catalog_sender,
+                            &logo_sender,
                             &paste_sender,
                             &title_sender,
                             &mut active_task,
@@ -148,11 +153,23 @@ async fn run() -> Result<()> {
                         redraw_now = true;
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
-                        app.handle_mouse(mouse);
+                        // A mouse move changes nothing on screen, so it must
+                        // not cost a full transcript rebuild.
+                        if mouse.kind != MouseEventKind::Moved {
+                            app.handle_mouse(mouse);
+                            redraw_now = true;
+                        }
+                    }
+                    Some(Ok(Event::FocusGained)) => {
+                        app.set_focused(true);
                         redraw_now = true;
                     }
+                    Some(Ok(Event::FocusLost)) => {
+                        // While the terminal is in the background nothing is
+                        // visible, so the ticker stops and no frame is drawn.
+                        app.set_focused(false);
+                    }
                     Some(Ok(Event::Resize(_, _))) => redraw_now = true,
-                    Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(error).context("reading terminal event"),
                     None => return Err(anyhow::anyhow!("terminal event stream closed")),
                 }
@@ -165,6 +182,7 @@ async fn run() -> Result<()> {
                     | StreamEvent::ToolProgress { request_id, .. }
                     | StreamEvent::Usage { request_id, .. }
                     | StreamEvent::ToolCalls { request_id, .. }
+                    | StreamEvent::Retrying { request_id, .. }
                     | StreamEvent::Done { request_id }
                     | StreamEvent::Error { request_id, .. } => *request_id,
                 };
@@ -188,6 +206,7 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
+                            &logo_sender,
                     &paste_sender,
                     &title_sender,
                     &mut active_task,
@@ -207,6 +226,7 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
+                            &logo_sender,
                     &paste_sender,
                     &title_sender,
                     &mut active_task,
@@ -217,6 +237,24 @@ async fn run() -> Result<()> {
                 if let Some(result) = result {
                     app.on_catalog(result);
                 }
+                for provider_id in app.take_pending_logos() {
+                    dispatch(
+                        Action::FetchLogo(provider_id),
+                        &mut app,
+                        &sender,
+                        &tool_sender,
+                        &catalog_sender,
+                        &logo_sender,
+                        &paste_sender,
+                        &title_sender,
+                        &mut active_task,
+                    );
+                }
+                redraw_now = true;
+            }
+            result = logo_receiver.recv() => {
+                let Some((provider_id, result)) = result else { break; };
+                app.on_logo(provider_id, result);
                 redraw_now = true;
             }
             result = paste_receiver.recv() => {
@@ -232,10 +270,11 @@ async fn run() -> Result<()> {
             _ = &mut interrupt => break,
             _ = term_signal.as_mut() => break,
             _ = ticker.tick(),
-            if app.is_streaming()
-                || app.connect_open()
-                || app.tools_busy()
-                || app.session.messages.is_empty() =>
+            if app.focused
+                && (app.is_streaming()
+                    || app.connect_open()
+                    || app.tools_busy()
+                    || app.session.messages.is_empty()) =>
             {
                 app.tick();
                 redraw_now = true;
@@ -257,6 +296,7 @@ fn dispatch(
     events: &mpsc::UnboundedSender<StreamEvent>,
     tool_events: &mpsc::UnboundedSender<ToolEvent>,
     catalog_events: &mpsc::UnboundedSender<FetchResult>,
+    logo_events: &mpsc::UnboundedSender<(String, Result<crate::logos::Logo, String>)>,
     paste_sender: &mpsc::UnboundedSender<Result<(String, String), String>>,
     title_sender: &mpsc::UnboundedSender<(u64, String)>,
     active_task: &mut Option<(u64, JoinHandle<()>)>,
@@ -293,6 +333,14 @@ fn dispatch(
                 };
                 let _ = sender.send(read);
             });
+        }
+        Action::ToggleMouseCapture => {
+            app.mouse_capture = !app.mouse_capture;
+            if app.mouse_capture {
+                let _ = execute!(io::stdout(), EnableMouseCapture);
+            } else {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+            }
         }
         Action::RunTool { call } => {
             let sender = tool_events.clone();
@@ -348,6 +396,15 @@ fn dispatch(
                     .await
                     .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
+            });
+        }
+        Action::FetchLogo(provider_id) => {
+            let sender = logo_events.clone();
+            tokio::spawn(async move {
+                let result = crate::logos::fetch(&provider_id)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send((provider_id, result));
             });
         }
         Action::NameSession { task } => {

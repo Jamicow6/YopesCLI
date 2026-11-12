@@ -150,9 +150,7 @@ async fn install_release(release: &Release) -> Result<()> {
         bail!("checksum mismatch for {asset_name}");
     }
 
-    let temporary = env::temp_dir().join(format!("yopes-update-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&temporary);
-    fs::create_dir_all(&temporary).with_context(|| format!("creating {}", temporary.display()))?;
+    let temporary = crate::temp::unique_dir("yopes-update");
 
     let archive_path = temporary.join(&asset_name);
     fs::write(&archive_path, &archive)

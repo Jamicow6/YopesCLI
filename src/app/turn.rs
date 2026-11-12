@@ -1,5 +1,18 @@
 use super::*;
 
+/// Whether a command can run while the model is still answering.
+///
+/// Commands that only read state or change a setting are safe: they do not
+/// touch the turn in flight. The ones that would swap the session, the
+/// provider or the conversation are not.
+fn command_is_safe_while_streaming(prompt: &str) -> bool {
+    let name = prompt.split_whitespace().next().unwrap_or_default();
+    matches!(
+        name,
+        "/help" | "/model" | "/tools" | "/system" | "/effort" | "/skills" | "/version" | "/quit"
+    )
+}
+
 impl App {
     pub(crate) fn scroll_up(&mut self, amount: usize) {
         self.follow_tail = false;
@@ -14,10 +27,6 @@ impl App {
         let steering = self.is_streaming();
         if self.is_busy() && !steering {
             self.info("Wait for the current response or tool to finish.");
-            return Action::None;
-        }
-        if steering && self.input.value.trim().starts_with('/') {
-            self.info("Finish or stop the response before running a command.");
             return Action::None;
         }
         if steering
@@ -41,6 +50,16 @@ impl App {
                 .iter()
                 .any(|command| prompt.split_whitespace().next() == Some(command.name))
             {
+                // A command that only reads or changes a setting is safe to
+                // run while the model is answering; the ones that would
+                // disturb the turn are not.
+                if steering && !command_is_safe_while_streaming(&prompt) {
+                    // The command is put back, so it can be run after the
+                    // response finishes.
+                    self.input.set(prompt);
+                    self.info("Finish or stop the response before running that command.");
+                    return Action::None;
+                }
                 return self.command(&prompt);
             }
             let expanded = std::env::current_dir()
@@ -169,8 +188,16 @@ impl App {
                     self.open_model_picker();
                 } else {
                     self.backend.set_model(model.clone());
+                    self.persist_model(&model);
                     self.info(format!("Model changed to {model}"));
                 }
+            }
+            "/version" => {
+                self.info(format!("yopes {}", crate::update::current_version()));
+            }
+            "/disconnect" => {
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                self.disconnect(rest.trim());
             }
             "/sessions" => self.open_session_picker(),
             "/system" => {
@@ -298,6 +325,91 @@ impl App {
                 .to_owned()
         });
         self.info(message);
+    }
+
+    /// Drop a provider's key so it is asked for again next time.
+    ///
+    /// With no argument the active provider is disconnected; with a name the
+    /// matching saved provider is.
+    pub(crate) fn disconnect(&mut self, name: &str) {
+        if self.is_busy() {
+            self.info("Finish the current turn before disconnecting.");
+            return;
+        }
+        let target = if name.is_empty() {
+            self.backend.base_url().to_owned()
+        } else {
+            let wanted = name.to_ascii_lowercase();
+            let connected = config::load_connected_providers(&self.config_path);
+            // A provider can be named by its display name or its catalog id.
+            let found = connected.into_iter().find(|provider| {
+                provider.name.to_ascii_lowercase() == wanted
+                    || provider
+                        .provider_id
+                        .as_deref()
+                        .is_some_and(|id| id.to_ascii_lowercase() == wanted)
+            });
+            let custom = self.custom_providers.iter().find(|provider| {
+                provider.name.to_ascii_lowercase() == wanted
+                    || provider.id.to_ascii_lowercase() == wanted
+            });
+            match found {
+                Some(provider) => {
+                    if !provider.has_key {
+                        self.info(format!(
+                            "{} is connected but has no saved key.",
+                            provider.name
+                        ));
+                        return;
+                    }
+                    if provider.encrypted {
+                        self.info(format!(
+                            "{} was encrypted; its key is removed now.",
+                            provider.name
+                        ));
+                    }
+                    provider.base_url
+                }
+                None => match custom.map(|provider| provider.base_url.clone()) {
+                    Some(base_url) => base_url,
+                    None => {
+                        self.error(format!("No connected provider named {name}."));
+                        return;
+                    }
+                },
+            }
+        };
+        if target.trim().is_empty() {
+            self.error("No provider is connected.");
+            return;
+        }
+        match config::disconnect_provider(&self.config_path, &target) {
+            Ok(()) => {
+                // The active connection goes with it.
+                if self.backend.base_url().trim_end_matches('/') == target.trim_end_matches('/') {
+                    self.backend.configure(
+                        ProviderKind::Unconfigured,
+                        "not connected".to_owned(),
+                        String::new(),
+                        String::new(),
+                        None,
+                        AuthKind::Bearer,
+                        Vec::new(),
+                    );
+                }
+                self.custom_providers = config::load_custom_providers(&self.config_path);
+                self.info("Disconnected. The key is asked for again next time.");
+            }
+            Err(error) => self.error(format!("Could not disconnect: {error:#}")),
+        }
+    }
+
+    /// Store the model of the active connection, so the choice survives a
+    /// restart.
+    pub(crate) fn persist_model(&mut self, model: &str) {
+        if let Err(error) = config::save_model(&self.config_path, model) {
+            self.error(format!("Could not save the model: {error:#}"));
+        }
     }
 
     pub(crate) fn begin_connect(&mut self) -> Action {

@@ -24,14 +24,17 @@ futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "native-tls"] }
+resvg = { version = "0.50", default-features = false }
 semver = "1.0.28"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 textwrap = "0.16"
+tiny-skia = "0.12"
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
+usvg = { version = "0.50", default-features = false }
 
 [profile.release]
 lto = "thin"

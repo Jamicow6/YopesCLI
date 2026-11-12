@@ -20,6 +20,7 @@ use crate::{
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
+    logos::Logos,
     session::{self, ImageAttachment, Message, Role, Session, TaskState, ToolCall},
     skills, tools,
 };
@@ -89,7 +90,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 11] = [
+pub const COMMANDS: [CommandSpec; 13] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -106,6 +107,11 @@ pub const COMMANDS: [CommandSpec; 11] = [
         argument: None,
     },
     CommandSpec {
+        name: "/disconnect",
+        description: "Forget a provider's saved key",
+        argument: Some("name"),
+    },
+    CommandSpec {
         name: "/model",
         description: "Show or change the active model",
         argument: Some("name"),
@@ -117,7 +123,7 @@ pub const COMMANDS: [CommandSpec; 11] = [
     },
     CommandSpec {
         name: "/tools",
-        description: "Set tool mode: on, off, auto, ask",
+        description: "Set tool mode: on, off, auto, ask (deprecated)",
         argument: Some("mode"),
     },
     CommandSpec {
@@ -138,6 +144,11 @@ pub const COMMANDS: [CommandSpec; 11] = [
     CommandSpec {
         name: "/skills",
         description: "List installed skills",
+        argument: None,
+    },
+    CommandSpec {
+        name: "/version",
+        description: "Show the running version",
         argument: None,
     },
     CommandSpec {
@@ -250,6 +261,14 @@ pub struct ToolEvent {
     pub result: std::result::Result<String, String>,
 }
 
+/// A request that failed and is being tried again.
+#[derive(Clone, Debug)]
+pub struct RetryNotice {
+    pub attempt: u32,
+    pub delay_secs: u64,
+    pub reason: String,
+}
+
 /// A diff shown under a tool result in the conversation.
 pub struct ChangeReport {
     pub diffs: Vec<FileDiff>,
@@ -263,6 +282,8 @@ const ADD_MODEL_ID: &str = "add-model";
 /// Rows that edit an existing saved endpoint from the model list.
 const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
 const EDIT_TOKEN_ID: &str = "edit-token";
+/// Row that replaces the key of a catalog provider from its model list.
+const EDIT_KEY_ID: &str = "edit-key";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
@@ -280,6 +301,8 @@ pub enum ConnectStage {
     ModelName,
     CustomModels,
     Password,
+    /// Unlock a key that is already stored for the endpoint.
+    Unlock,
 }
 
 impl ConnectStage {
@@ -298,8 +321,29 @@ impl ConnectStage {
             Self::ModelName => "model name",
             Self::CustomModels => "models",
             Self::Password => "password",
+            Self::Unlock => "password",
         }
     }
+}
+
+/// What happens once a stored key is unlocked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnlockTarget {
+    /// Fetch the provider's model list with the unlocked key.
+    FetchModels,
+    /// Connect with the model that is already selected.
+    Finish,
+}
+
+/// How a connection gets its key.
+#[derive(Clone, Debug)]
+pub enum KeySource {
+    /// The user typed the key now, so it is written to disk.
+    Entered(String),
+    /// The key is already stored for this endpoint, so it is kept as it is.
+    Stored(String),
+    /// No key at all: the environment variable or the live key applies.
+    None,
 }
 
 #[derive(Clone, Debug)]
@@ -347,7 +391,8 @@ pub struct ConnectState {
     pub selected: usize,
     catalog: Option<Catalog>,
     saved_custom: Vec<config::CustomProvider>,
-    provider_id: Option<String>,
+    /// The models.dev provider being connected, when it came from the catalog.
+    pub provider_id: Option<String>,
     model_id: Option<String>,
     api_key: String,
     password: String,
@@ -362,6 +407,14 @@ pub struct ConnectState {
     custom_models: Vec<SavedModel>,
     custom_model_id: String,
     custom_model_name: String,
+    /// The key already stored for the endpoint being connected, if any.
+    stored_secret: Option<config::StoredSecret>,
+    /// What to do once a stored key is unlocked.
+    unlock_target: UnlockTarget,
+    /// The endpoint whose stored key is being unlocked.
+    unlock_endpoint: String,
+    /// A key that was unlocked during this visit.
+    unlocked_key: Option<String>,
 }
 
 impl ConnectState {
@@ -388,6 +441,10 @@ impl ConnectState {
             custom_models: Vec::new(),
             custom_model_id: String::new(),
             custom_model_name: String::new(),
+            stored_secret: None,
+            unlock_target: UnlockTarget::Finish,
+            unlock_endpoint: String::new(),
+            unlocked_key: None,
         }
     }
 
@@ -484,7 +541,7 @@ impl ConnectState {
                 let Some(provider) = self.provider() else {
                     return Vec::new();
                 };
-                catalog::provider_models(provider)
+                let mut items: Vec<ConnectItem> = catalog::provider_models(provider)
                     .into_iter()
                     .filter(|(id, model)| {
                         filter.is_empty()
@@ -515,7 +572,33 @@ impl ConnectState {
                             active: !active_model.is_empty() && id == active_model,
                         }
                     })
-                    .collect()
+                    .collect();
+                // A stored key is reused when a model is picked, so the row
+                // that replaces it has to be there too.
+                if self
+                    .stored_secret
+                    .as_ref()
+                    .is_some_and(|secret| secret.has_key())
+                    && (filter.is_empty() || "change api key".contains(filter.as_str()))
+                {
+                    items.push(ConnectItem {
+                        id: EDIT_KEY_ID.to_owned(),
+                        title: "Change API key".to_owned(),
+                        detail: if self
+                            .stored_secret
+                            .as_ref()
+                            .is_some_and(|secret| secret.encrypted)
+                        {
+                            "set · encrypted".to_owned()
+                        } else {
+                            "set".to_owned()
+                        },
+                        logo: "✎",
+                        custom_id: None,
+                        active: false,
+                    });
+                }
+                items
             }
             ConnectStage::Auth => AuthKind::choices()
                 .into_iter()
@@ -598,7 +681,8 @@ impl ConnectState {
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
-            | ConnectStage::Password => Vec::new(),
+            | ConnectStage::Password
+            | ConnectStage::Unlock => Vec::new(),
         }
     }
 
@@ -637,7 +721,7 @@ impl ConnectState {
         }
         let value = match self.stage {
             ConnectStage::ApiKey | ConnectStage::FasfasKey => &self.api_key,
-            ConnectStage::Password => &self.password,
+            ConnectStage::Password | ConnectStage::Unlock => &self.password,
             ConnectStage::ProviderName => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
             ConnectStage::CustomToken => &self.custom_token,
@@ -653,6 +737,7 @@ impl ConnectState {
                 | ConnectStage::Password
                 | ConnectStage::CustomToken
                 | ConnectStage::FasfasKey
+                | ConnectStage::Unlock
         ) && !value.is_empty()
         {
             "•".repeat(value.chars().count().min(64))
@@ -675,6 +760,7 @@ impl ConnectState {
             ConnectStage::ModelName => "model name",
             ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
+            ConnectStage::Unlock => "key password",
         }
     }
 
@@ -719,6 +805,29 @@ impl ConnectState {
     fn provider(&self) -> Option<&catalog::Provider> {
         let id = self.provider_id.as_deref()?;
         self.catalog.as_ref()?.providers.get(id)
+    }
+
+    /// The endpoint of the provider being connected.
+    fn endpoint(&self) -> String {
+        match self.provider_id.as_deref() {
+            Some(id) => self
+                .provider()
+                .map(|provider| provider.base_url(id))
+                .unwrap_or_default(),
+            None => self.custom_endpoint.clone(),
+        }
+    }
+
+    /// The stored key, ready to use without asking for anything.
+    ///
+    /// A secret saved without a password opens right away; an encrypted one
+    /// needs its password first, so it is not returned here.
+    fn stored_key(&self) -> Option<String> {
+        let secret = self.stored_secret.as_ref()?;
+        if !secret.has_key() || secret.encrypted {
+            return None;
+        }
+        secret.plaintext().map(ToOwned::to_owned)
     }
 
     fn selected_item(&self) -> Option<ConnectItem> {
@@ -778,10 +887,15 @@ pub enum Action {
     },
     /// Read the clipboard on Ctrl+V and attach an image when it holds one.
     PasteImage,
+    /// Turn mouse capture off so the terminal's own text selection works,
+    /// or back on to keep the app interactive.
+    ToggleMouseCapture,
     Quit,
     LoadCatalog,
     /// Fetch the Fasfas `/v1/models` list with the key entered in /connect.
     FetchFasfas(String),
+    /// Fetch a provider's logo and draw it.
+    FetchLogo(String),
     /// Ask the provider for a short title after the first reply of a session.
     NameSession {
         task: String,
@@ -917,8 +1031,17 @@ pub struct App {
     pub transcript_height: u16,
     pub follow_tail: bool,
     pub show_help: bool,
+    /// How far the help popup is scrolled down.
+    pub help_scroll: usize,
+    /// Whether the app captures the mouse; off, the terminal's own text
+    /// selection and copy work.
+    pub mouse_capture: bool,
     pub should_quit: bool,
     pub notice: Option<Notice>,
+    /// A request being retried, shown in the footer while it waits.
+    pub retry: Option<RetryNotice>,
+    /// Whether the terminal has focus. A background terminal draws nothing.
+    pub focused: bool,
     pub spinner: usize,
     /// Submitted turn body: the composer prompt flashes for a few ticks.
     pub send_pulse: Option<usize>,
@@ -959,6 +1082,10 @@ pub struct App {
     sessions_dir: Option<PathBuf>,
     config_path: PathBuf,
     custom_providers: Vec<config::CustomProvider>,
+    /// The provider logos, drawn from the models.dev artwork.
+    pub logos: Logos,
+    /// The logos that still have to be fetched.
+    pending_logos: Vec<String>,
     /// Tavily key for the web_search tool.
     tavily_api_key: Option<String>,
     palette_index: usize,
@@ -991,8 +1118,12 @@ impl App {
             transcript_height: 10,
             follow_tail: true,
             show_help: false,
+            help_scroll: 0,
+            mouse_capture: true,
             should_quit: false,
             notice: None,
+            retry: None,
+            focused: true,
             spinner: 0,
             send_pulse: None,
             tools_mode: ToolsMode::default(),
@@ -1017,8 +1148,10 @@ impl App {
             tool_rounds: 0,
             session_path,
             sessions_dir,
-            config_path,
+            config_path: config_path.clone(),
             custom_providers,
+            logos: Logos::new(crate::logos::cache_dir(&config_path)),
+            pending_logos: Vec::new(),
             tavily_api_key,
             palette_index: 0,
             palette_hidden: false,
@@ -1105,6 +1238,17 @@ impl App {
     pub fn tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
     }
+
+    /// Record whether the terminal has focus.
+    ///
+    /// A background terminal shows nothing, so the ticker stops and the
+    /// spinner freezes instead of burning power on frames nobody sees.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        if !focused {
+            self.retry = None;
+        }
+    }
 }
 
 fn matching_commands(value: &str) -> Vec<&'static CommandSpec> {
@@ -1162,6 +1306,7 @@ mod tests {
                 "/help",
                 "/new",
                 "/connect",
+                "/disconnect",
                 "/model",
                 "/sessions",
                 "/tools",
@@ -1169,13 +1314,16 @@ mod tests {
                 "/compact",
                 "/effort",
                 "/skills",
+                "/version",
                 "/quit",
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);
+        assert_eq!(command_names("/d"), vec!["/disconnect"]);
         assert_eq!(command_names("/m"), vec!["/model"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
         assert_eq!(command_names("/e"), vec!["/effort"]);
+        assert_eq!(command_names("/v"), vec!["/version"]);
         assert_eq!(command_names("/MO"), vec!["/model"]);
         assert!(command_names("/model gpt").is_empty());
         assert!(command_names("hello").is_empty());
@@ -1212,6 +1360,7 @@ mod tests {
             models: Vec::new(),
             token: None,
             encrypted: false,
+            secret: crate::config::StoredSecret::default(),
         });
         let items = connect.items_using("https://example.test/v1", "model");
         assert_eq!(items[0].id, "fasfas", "preferred provider comes first");

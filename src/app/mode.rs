@@ -71,6 +71,18 @@ impl Mode {
         }
     }
 
+    /// The colour of the mode's dot in the header.
+    ///
+    /// Build is purple, chat is a yellow-brown, and plan is a brighter brown,
+    /// so the mode reads at a glance without reading the word.
+    pub const fn color(self) -> ratatui::style::Color {
+        match self {
+            Self::Build => ratatui::style::Color::Rgb(175, 122, 255),
+            Self::Chat => ratatui::style::Color::Rgb(214, 168, 84),
+            Self::Plan => ratatui::style::Color::Rgb(196, 132, 90),
+        }
+    }
+
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Build => Self::Plan,
