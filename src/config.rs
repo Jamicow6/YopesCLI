@@ -106,6 +106,9 @@ pub struct SavedModel {
     /// Dollars per million output tokens, when models.dev lists a price.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_cost: Option<f64>,
+    /// Manually set context-window size in tokens (e.g. 128000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Parser)]
@@ -707,6 +710,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
             name: model.name.trim().to_owned(),
             input_cost: model.input_cost,
             output_cost: model.output_cost,
+            context_window: model.context_window,
         });
     }
     let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);

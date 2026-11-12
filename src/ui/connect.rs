@@ -314,7 +314,10 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
             }
         }
         ConnectStage::ModelName => {
-            "enter add model · empty uses the model id · esc back".to_owned()
+            "enter continue · empty uses the model id · esc back".to_owned()
+        }
+        ConnectStage::ModelContextWindow => {
+            "enter add model · blank skips · esc back".to_owned()
         }
         ConnectStage::CustomModels => "↑↓ choose · enter use · d delete · esc back".to_owned(),
         ConnectStage::Password => {
