@@ -45,7 +45,7 @@ pub(super) fn draw_connect(
     }
 
     // The logo of the provider being picked is drawn above the list.
-    let logo = selected_logo_id(connect).and_then(|id| app.logos.get(id));
+    let logo = selected_logo_id(connect).and_then(|id| app.logos.get(id.as_str()));
     let logo_height = logo.map_or(0, |logo| logo.len() as u16);
     let mut constraints = vec![Constraint::Length(1)];
     if logo_height > 0 {
