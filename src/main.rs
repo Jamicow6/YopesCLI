@@ -250,7 +250,7 @@ async fn run() -> Result<()> {
                 && (app.is_streaming()
                     || app.connect_open()
                     || app.tools_busy()
-                    || app.session.messages.is_empty())
+                    || app.session.messages.is_empty()) =>
             {
                 app.tick();
                 redraw_now = true;
