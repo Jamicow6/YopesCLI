@@ -42,6 +42,10 @@ The [wiki](https://github.com/Jamicow6/YopesCLI/wiki) holds the detail:
 
 In the checkout: [Architecture](docs/ARCHITECTURE.md), [Adding a tool](docs/ADDING-A-TOOL.md), [Changelog](CHANGELOG.md), [Security policy](SECURITY.md).
 
+## Tests
+
+Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` before a pull request; CI runs the same checks on Linux and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md#tests).
+
 ## License
 
 Distributed under GPL-3.0-only. See [LICENSE](LICENSE).

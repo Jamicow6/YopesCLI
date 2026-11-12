@@ -123,3 +123,35 @@ impl Mode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Mode;
+
+    #[test]
+    fn the_mode_cycle_and_denials_match_the_labels() {
+        assert_eq!(Mode::default(), Mode::Build);
+        assert_eq!(Mode::Build.next(), Mode::Plan);
+        assert_eq!(Mode::Plan.next(), Mode::Chat);
+        assert_eq!(Mode::Chat.next(), Mode::Build);
+        assert!(!Mode::Build.denied("write_file"));
+        assert!(!Mode::Plan.denied("read_file"));
+        assert!(!Mode::Plan.denied("web_search"));
+        assert!(Mode::Plan.denied("write_file"));
+        assert!(Mode::Plan.denied("edit_file"));
+        assert!(Mode::Plan.denied("multi_edit"));
+        assert!(Mode::Plan.denied("run_command"));
+        assert!(Mode::Plan.denied("bash_background"));
+        assert!(Mode::Chat.denied("read_file"));
+        assert!(
+            Mode::Plan
+                .instruction()
+                .is_some_and(|note| note.contains("PLAN"))
+        );
+        assert!(
+            Mode::Build
+                .instruction()
+                .is_some_and(|note| note.contains("BUILD"))
+        );
+    }
+}

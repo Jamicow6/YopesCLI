@@ -72,3 +72,16 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{format_bytes, format_tokens};
+
+    #[test]
+    fn formats_keep_tokens_and_bytes_compact() {
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1200), "1.2k");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2150), "2.1 KB");
+    }
+}
