@@ -23,6 +23,7 @@ use crate::{
     session::{
         self, ImageAttachment, Message, Role, Session, TaskState, ToolCall,
     },
+    skills,
     tools,
 };
 
@@ -76,7 +77,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 10] = [
+pub const COMMANDS: [CommandSpec; 11] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -121,6 +122,11 @@ pub const COMMANDS: [CommandSpec; 10] = [
         name: "/effort",
         description: "Show or set reasoning effort",
         argument: Some("level"),
+    },
+    CommandSpec {
+        name: "/skills",
+        description: "List installed skills",
+        argument: None,
     },
     CommandSpec {
         name: "/quit",
@@ -3026,14 +3032,27 @@ impl App {
             self.info("Wait for compaction to finish.");
             return Action::None;
         }
-        let value = self.input.take();
+        let mut value = self.input.take();
         self.reset_palette();
-        let prompt = value.trim();
+        let prompt = value.trim().to_owned();
         if prompt.is_empty() && self.attachments.is_empty() {
             return Action::None;
         }
         if prompt.starts_with('/') {
-            return self.command(prompt);
+            // Builtins never lose their name to a skill of the same spelling.
+            if COMMANDS.iter().any(|command| {
+                prompt.split_whitespace().next() == Some(command.name)
+            }) {
+                return self.command(&prompt);
+            }
+            let expanded =
+                std::env::current_dir().ok().and_then(|cwd| skills::expand(&prompt, &cwd));
+            match expanded {
+                // A skill invocation becomes a normal turn that carries the
+                // skill body, so it works with tools off too.
+                Some(expanded) => value = expanded,
+                None => return self.command(&prompt),
+            }
         }
         if !self.backend.is_configured() {
             self.error("No provider connected. Run /connect to get started.");
@@ -3043,7 +3062,7 @@ impl App {
         self.notice = None;
         self.send_pulse = Some(self.spinner);
         self.tool_rounds = 0;
-        self.session.update_title(prompt);
+        self.session.update_title(&prompt);
         if steering {
             // Drop the blank reply the interrupted request left behind, then
             // fold the steer into the conversation and restart the turn.
@@ -3254,6 +3273,7 @@ impl App {
                     self.error(format!("Usage: {EFFORT_CHOICES}"));
                 }
             }
+            "/skills" => self.show_skills(),
             "/quit" => {
                 self.should_quit = true;
                 return Action::Quit;
@@ -3263,6 +3283,18 @@ impl App {
             )),
         }
         Action::None
+    }
+
+    /// List what is installed, one line per skill, including where it came
+    /// from. Nothing here reads files; discovery only checks names.
+    fn show_skills(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let message = skills::summary(&cwd).unwrap_or_else(|| {
+            "No skills installed · add Skill.md files under ~/.yopes/skills/<name>/ \
+             or .yopes/skills/<name>/"
+                .to_owned()
+        });
+        self.info(message);
     }
 
     fn begin_connect(&mut self) -> Action {

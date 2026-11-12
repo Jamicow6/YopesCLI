@@ -5,6 +5,7 @@ mod config;
 mod credentials;
 mod diff;
 mod session;
+mod skills;
 mod tools;
 mod ui;
 mod update;
