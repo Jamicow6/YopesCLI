@@ -92,9 +92,9 @@ pub(super) fn draw_connect(
 }
 
 /// The provider whose logo is shown above the list.
-fn selected_logo_id(connect: &ConnectState) -> Option<&str> {
+fn selected_logo_id(connect: &ConnectState) -> Option<String> {
     match connect.stage {
-        ConnectStage::Models => connect.provider_id.as_deref(),
+        ConnectStage::Models => connect.provider_id.clone(),
         ConnectStage::Providers => {
             let items = connect.items();
             let item = items.get(connect.selected.min(items.len().saturating_sub(1)))?;
@@ -102,7 +102,7 @@ fn selected_logo_id(connect: &ConnectState) -> Option<&str> {
             if item.custom_id.is_some() || item.id == CUSTOM_PROVIDER_ID {
                 return None;
             }
-            Some(item.id.as_str())
+            Some(item.id.clone())
         }
         _ => None,
     }
