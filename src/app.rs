@@ -20,7 +20,9 @@ use crate::{
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
-    session::{self, ImageAttachment, Message, Role, Session, ToolCall},
+    session::{
+        self, ImageAttachment, Message, Role, Session, TaskState, ToolCall,
+    },
     tools,
 };
 
@@ -3420,6 +3422,23 @@ impl App {
         let existed = running.existed;
         let content = match event.result {
             Ok(output) => {
+                if event.call.function.name == "todo_write" {
+                    if let Ok(tasks) = serde_json::from_str::<Vec<TaskState>>(&output) {
+                        let done = tasks.iter().filter(|task| task.done).count();
+                        let count = tasks.len();
+                        self.session.tasks = tasks;
+                        self.record_tool_result(
+                            event.call.id,
+                            format!(
+                                "Stored {count} task{} ({done} done); the Progress panel shows them.",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                        );
+                        self.follow_tail = true;
+                        self.save_session();
+                        return self.advance_tools();
+                    }
+                }
                 let diffs = tools::applied_change_all(
                     &event.call,
                     before,
