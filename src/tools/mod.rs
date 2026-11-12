@@ -39,9 +39,10 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 16] = [
+pub const TOOL_NAMES: [&str; 17] = [
     "list_dir",
     "read_file",
+    "multi_read",
     "read_image",
     "glob",
     "grep",
@@ -106,6 +107,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              do not read whole directories blindly. \
              For several replacements in one or more files, batch them with multi_edit: \
              it applies every edit in order, and one failure refuses the whole batch. \
+             To read several files in one call, batch them with multi_read: \
+             with `all: true` it reads every file directly inside each folder in `paths`. \
              Use web_search for anything newer than your knowledge or that needs current \
              facts, and cite the URL you used. \
              Use web_fetch to read the text of a specific page, such as one surfaced by \
@@ -244,6 +247,30 @@ pub fn definitions() -> Value {
                         }
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "multi_read",
+                "description": "Read several UTF-8 text files in one call, in order. With all=true every entry in paths is a folder and every file directly inside it is read. Read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "description": "File paths (or folder paths when all is true), relative to the working directory.",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "all": {
+                            "type": "boolean",
+                            "description": "Read every file directly inside each folder in paths instead of the paths themselves."
+                        }
+                    },
+                    "required": ["paths"]
                 }
             }
         },
@@ -597,6 +624,23 @@ pub fn preview(call: &ToolCall) -> String {
             }
         }
         "read_file" => string("path"),
+        "multi_read" => {
+            let all = arguments
+                .as_ref()
+                .and_then(|value| value.get("all"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let count = arguments
+                .as_ref()
+                .and_then(|value| value.get("paths"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if all {
+                format!("all files in {count} folders")
+            } else {
+                format!("{count} paths")
+            }
+        }
         "read_image" => string("path"),
         "glob" => clip(&string("pattern"), 160),
         "grep" => clip(&string("pattern"), 160),
@@ -814,6 +858,7 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
         "list_dir" => files::list_dir(&call.function.arguments),
         "read_file" => files::read_file(&call.function.arguments),
+        "multi_read" => files::multi_read(&call.function.arguments),
         "read_image" => files::read_image(&call.function.arguments),
         "glob" => search::glob(&call.function.arguments),
         "grep" => search::grep(&call.function.arguments),
@@ -1359,6 +1404,46 @@ mod tests {
         let ranged = ToolCall::new("call_9", "read_file", r#"{"path":".","start_line":2}"#);
         let error = execute(&ranged, None).unwrap_err().to_string();
         assert!(error.contains("directory"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_read_reads_files_and_expands_folders() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-multiread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "alpha").unwrap();
+        fs::write(dir.join("b.txt"), "beta").unwrap();
+        // A file that is not valid UTF-8 is reported per file, not fatal.
+        fs::write(dir.join("skip.bin"), [0u8, 159, 146, 150]).unwrap();
+
+        let both = ToolCall::new(
+            "call_21",
+            "multi_read",
+            format!(
+                r#"{{"paths":[{:?},{:?}]}}"#,
+                dir.join("a.txt").display().to_string(),
+                dir.join("b.txt").display().to_string()
+            ),
+        );
+        let output = execute(&both, None).unwrap();
+        assert!(output.contains("alpha"), "{output}");
+        assert!(output.contains("beta"), "{output}");
+
+        let folder = ToolCall::new(
+            "call_22",
+            "multi_read",
+            format!(r#"{{"paths":[{:?}],"all":true}}"#, dir.display().to_string()),
+        );
+        let all = execute(&folder, None).unwrap();
+        assert!(all.contains("alpha"), "{all}");
+        assert!(all.contains("beta"), "{all}");
+        assert!(all.contains("skip.bin"), "{all}");
+
+        let empty = ToolCall::new("call_23", "multi_read", r#"{"paths":[]}"#);
+        assert!(execute(&empty, None).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
