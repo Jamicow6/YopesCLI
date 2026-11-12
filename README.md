@@ -15,7 +15,7 @@ A better coding CLI, Built with Rust, Ratatui, and Tokio.
 
 ## Install
 
-Download the latest build for your platform from [Releases](https://github.com/Jamicow6/YopesCLI/releases), install it with PowerShell on Windows:
+Download the latest build for your platform from [Releases](https://github.com/Jamicow6/YopesCLI/releases): `yopes-Windows-X64.zip` (Windows), `yopes-Linux-X64.tar.gz` (Linux), or `yopes-macOS-ARM64.tar.gz` (Apple Silicon macOS), then install it with PowerShell on Windows:
 
 ```powershell
 irm https://raw.githubusercontent.com/Jamicow6/YopesCLI/main/install.ps1 | iex
