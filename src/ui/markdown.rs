@@ -195,7 +195,11 @@ fn heading(line: &str) -> Option<(usize, &str)> {
     let trailing_hashes = title.chars().rev().take_while(|ch| *ch == '#').count();
     let title = if trailing_hashes > 0 {
         let before_hashes = &title[..title.len() - trailing_hashes];
-        if before_hashes.chars().next_back().is_some_and(char::is_whitespace) {
+        if before_hashes
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+        {
             before_hashes.trim_end()
         } else {
             title
@@ -830,8 +834,8 @@ fn closing_marker(text: &str, marker: &str) -> Option<usize> {
         if rest.starts_with(marker) && !is_escaped(text, search) {
             let before = text[..search].chars().next_back();
             let after = text[search + marker.len()..].chars().next();
-            let not_adjacent = marker.len() != 1
-                || (before != Some(marker_char) && after != Some(marker_char));
+            let not_adjacent =
+                marker.len() != 1 || (before != Some(marker_char) && after != Some(marker_char));
             if not_adjacent && before.is_some_and(|ch| !ch.is_whitespace()) {
                 return Some(search);
             }
@@ -1052,5 +1056,4 @@ mod tests {
                 && span.style.add_modifier.contains(Modifier::ITALIC)
         }));
     }
-
 }

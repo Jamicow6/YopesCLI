@@ -1311,11 +1311,7 @@ mod tests {
             r#"{{"pattern":"absent-nowhere","path":{:?}}}"#,
             dir.display().to_string()
         );
-        let absent = execute(
-            &ToolCall::new("call_16", "grep", absent_args),
-            None,
-        )
-        .unwrap();
+        let absent = execute(&ToolCall::new("call_16", "grep", absent_args), None).unwrap();
         assert!(absent.contains("(no matches)"), "{absent}");
         let _ = fs::remove_dir_all(&dir);
     }
