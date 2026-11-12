@@ -260,6 +260,7 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }
+        ConnectStage::Unlock => "enter unlock · esc back".to_owned(),
     };
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(MUTED)), area);
 }

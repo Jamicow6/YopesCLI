@@ -23,7 +23,95 @@ impl App {
             | ConnectStage::ModelName => self.handle_connect_custom_text(key),
             ConnectStage::Auth | ConnectStage::CustomModels => self.handle_connect_choice_key(key),
             ConnectStage::Password => self.handle_connect_password(key),
+            ConnectStage::Unlock => self.handle_connect_unlock(key),
         }
+    }
+
+    /// Unlock a key that is already stored for the endpoint.
+    ///
+    /// Only the password is asked for: the key itself never has to be typed
+    /// again.
+    pub(crate) fn handle_connect_unlock(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(connect) = self.connect.as_mut() {
+                    // Back to where the key was asked for.
+                    connect.stage = if connect.custom_flow {
+                        ConnectStage::CustomModels
+                    } else {
+                        ConnectStage::Models
+                    };
+                    connect.password.clear();
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            KeyCode::Enter => {
+                let (password, endpoint, target) = {
+                    let Some(connect) = self.connect.as_ref() else {
+                        return Action::None;
+                    };
+                    (
+                        connect.password.clone(),
+                        connect.unlock_endpoint.clone(),
+                        connect.unlock_target,
+                    )
+                };
+                let Some(secret) = self.stored_secret_for(&endpoint) else {
+                    self.connect_error("That key is no longer stored.");
+                    return Action::None;
+                };
+                let api_key = match secret.unlock(&password) {
+                    Ok(api_key) => api_key,
+                    Err(error) => {
+                        self.connect_error(format!("Could not unlock the key: {error:#}"));
+                        return Action::None;
+                    }
+                };
+                match target {
+                    UnlockTarget::FetchModels => {
+                        if let Some(connect) = self.connect.as_mut() {
+                            connect.api_key = api_key.clone();
+                            connect.unlocked_key = Some(api_key.clone());
+                            connect.password.clear();
+                        }
+                        return self.fetch_fasfas_models(api_key);
+                    }
+                    UnlockTarget::Finish => {
+                        // A custom endpoint keeps the unlocked key aside, so it
+                        // can be used without being written again.
+                        let custom_flow = self
+                            .connect
+                            .as_ref()
+                            .is_some_and(|connect| connect.custom_flow);
+                        if custom_flow {
+                            if let Some(connect) = self.connect.as_mut() {
+                                connect.unlocked_key = Some(api_key);
+                                connect.password.clear();
+                            }
+                            return self.finish_custom_connect(None);
+                        }
+                        return self.finish_connect_with(KeySource::Stored(api_key), None);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.password.pop();
+                }
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.password.push(character);
+                }
+            }
+            _ => {}
+        }
+        Action::None
     }
 
     pub(crate) fn handle_connect_list_key(&mut self, key: KeyEvent) -> Action {
@@ -465,6 +553,34 @@ impl App {
                     .map(|connect| connect.api_key.trim().to_owned())
                     .unwrap_or_default();
                 if api_key.is_empty() {
+                    // A key already stored for this endpoint is reused, so the
+                    // preferred provider does not ask for its key twice.
+                    if let Some(secret) = self
+                        .connect
+                        .as_ref()
+                        .and_then(|connect| connect.stored_secret.clone())
+                    {
+                        if secret.has_key() {
+                            if secret.encrypted {
+                                // Only the password is needed to unlock it.
+                                if let Some(connect) = self.connect.as_mut() {
+                                    connect.unlock_endpoint = catalog::FASFAST_BASE_URL.to_owned();
+                                    connect.unlock_target = UnlockTarget::FetchModels;
+                                    connect.password.clear();
+                                    connect.stage = ConnectStage::Unlock;
+                                    connect.error = None;
+                                }
+                                return Action::None;
+                            }
+                            if let Some(key) = secret.plaintext() {
+                                let key = key.to_owned();
+                                if let Some(connect) = self.connect.as_mut() {
+                                    connect.api_key = key.clone();
+                                }
+                                return self.fetch_fasfas_models(key);
+                            }
+                        }
+                    }
                     self.connect_error("Enter a Fasfas key from Discord.");
                     return Action::None;
                 }
@@ -504,6 +620,11 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                // A key already stored for this endpoint is used as it is, so
+                // coming back to a provider does not ask for it again.
+                if let Some(key) = self.connect.as_ref().and_then(ConnectState::stored_key) {
+                    return self.finish_connect_with(KeySource::Stored(key), None);
+                }
                 let api_key = self
                     .connect
                     .as_ref()
@@ -599,6 +720,9 @@ impl App {
         };
         let backend_base = self.backend.base_url().trim_end_matches('/').to_owned();
         let backend_has_key = self.backend.api_key().is_some();
+        // The config path is cloned so the connect state can be borrowed
+        // mutably while a stored key is looked up on disk.
+        let config_path = self.config_path.clone();
         let mut finish_now = false;
         let Some(connect) = self.connect.as_mut() else {
             return Action::None;
@@ -630,6 +754,10 @@ impl App {
                     connect.custom_token_dirty = false;
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
+                    // The endpoint keeps its own key, so coming back to it
+                    // does not ask for the key again.
+                    connect.stored_secret = Some(saved.secret.clone());
+                    connect.unlock_endpoint = saved.base_url.clone();
                     // Land on the manager so the endpoint, key and models can be
                     // edited; the token is one of its rows.
                     connect.stage = ConnectStage::CustomModels;
@@ -641,6 +769,10 @@ impl App {
                     connect.filter.clear();
                     connect.selected = 0;
                     connect.error = None;
+                    // The Discord key stays with this endpoint, so a second
+                    // visit reuses it instead of asking again.
+                    connect.stored_secret =
+                        config::load_endpoint_secret(&config_path, catalog::FASFAST_BASE_URL);
                     // Show where the key comes from; Enter on the notice row
                     // or on this list both move to the key input.
                     connect.stage = ConnectStage::FasfasNotice;
@@ -659,6 +791,10 @@ impl App {
                 } else {
                     connect.provider_id = Some(item.id);
                     connect.custom_flow = false;
+                    // A catalog provider keeps its key under its own endpoint,
+                    // so coming back to it does not ask for the key again.
+                    let endpoint = connect.endpoint();
+                    connect.stored_secret = config::load_endpoint_secret(&config_path, &endpoint);
                     connect.stage = ConnectStage::Models;
                 }
             }
@@ -669,6 +805,15 @@ impl App {
                 connect.stage = ConnectStage::FasfasKey;
             }
             ConnectStage::Models => {
+                if item.id == EDIT_KEY_ID {
+                    // Replace the stored key: the key field opens empty.
+                    connect.stored_secret = None;
+                    connect.api_key.clear();
+                    connect.stage = ConnectStage::ApiKey;
+                    connect.selected = 0;
+                    connect.error = None;
+                    return Action::None;
+                }
                 connect.model_id = Some(item.id);
                 connect.password.clear();
                 connect.selected = 0;
@@ -682,6 +827,25 @@ impl App {
                         return Action::None;
                     }
                     return self.finish_connect(Some(key), None);
+                }
+                // A key already stored for this endpoint is used as it is. The
+                // user is only asked when there is nothing to reuse.
+                let stored = connect.stored_key();
+                let locked = connect
+                    .stored_secret
+                    .as_ref()
+                    .is_some_and(|secret| secret.encrypted && secret.has_key());
+                if let Some(key) = stored {
+                    return self.finish_connect_with(KeySource::Stored(key), None);
+                }
+                // An encrypted key needs its password before it can be used,
+                // so ask for that instead of the key.
+                if locked {
+                    connect.unlock_endpoint = connect.endpoint();
+                    connect.unlock_target = UnlockTarget::Finish;
+                    connect.password.clear();
+                    connect.stage = ConnectStage::Unlock;
+                    return Action::None;
                 }
                 connect.api_key.clear();
                 connect.stage = ConnectStage::ApiKey;
@@ -745,8 +909,15 @@ impl App {
                     });
                 if reuse_secret {
                     finish_now = true;
-                } else {
+                } else if connect.custom_token_dirty {
                     connect.stage = ConnectStage::Password;
+                } else {
+                    // The stored token is encrypted: only its password is
+                    // asked for, never the token itself.
+                    connect.unlock_endpoint = connect.custom_endpoint.clone();
+                    connect.unlock_target = UnlockTarget::Finish;
+                    connect.password.clear();
+                    connect.stage = ConnectStage::Unlock;
                 }
             }
             ConnectStage::ApiKey
@@ -767,6 +938,22 @@ impl App {
     pub(crate) fn finish_connect(
         &mut self,
         api_key: Option<String>,
+        password: Option<String>,
+    ) -> Action {
+        let source = match api_key.filter(|api_key| !api_key.trim().is_empty()) {
+            Some(api_key) => KeySource::Entered(api_key),
+            None => KeySource::None,
+        };
+        self.finish_connect_with(source, password)
+    }
+
+    /// Connect with a key that was typed now or is already stored.
+    ///
+    /// A stored key is not written again: whatever is on disk for the endpoint
+    /// stays, so an encrypted key stays encrypted.
+    pub(crate) fn finish_connect_with(
+        &mut self,
+        source: KeySource,
         password: Option<String>,
     ) -> Action {
         let plan = {
@@ -801,16 +988,21 @@ impl App {
                 model_id,
                 provider.env.first().cloned(),
                 models,
+                provider_id,
             )
         };
-        let (provider_name, base_url, model_id, api_key_env, models) = plan;
+        let (provider_name, base_url, model_id, api_key_env, models, provider_id) = plan;
         if base_url.trim().is_empty() {
             if let Some(connect) = self.connect.as_mut() {
                 connect.error = Some(format!("{provider_name} has no API endpoint."));
             }
             return Action::None;
         }
-        let entered_key = api_key.filter(|api_key| !api_key.trim().is_empty());
+        let entered_key = match &source {
+            KeySource::Entered(api_key) => Some(api_key.clone()),
+            KeySource::Stored(api_key) => Some(api_key.clone()),
+            KeySource::None => None,
+        };
         let effective_key = entered_key
             .clone()
             .or_else(|| {
@@ -825,6 +1017,8 @@ impl App {
                     .then(|| self.backend.api_key().map(str::to_owned))
                     .flatten()
             });
+        // A stored key is already on disk, so it is not written a second time.
+        let reuse_secret = matches!(source, KeySource::Stored(_));
         let connection = Connection {
             provider: ProviderKind::OpenAi,
             provider_name: provider_name.clone(),
@@ -835,6 +1029,8 @@ impl App {
             auth: AuthKind::Bearer,
             models: models.clone(),
             custom_provider_id: None,
+            provider_id: Some(provider_id),
+            reuse_secret,
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
         self.backend.configure(
@@ -853,6 +1049,20 @@ impl App {
             self.info(format!("Connected to {provider_name} · {model_id}"));
         }
         Action::None
+    }
+
+    /// The secret already stored for an endpoint, if the user connected it.
+    fn stored_secret_for(&self, base_url: &str) -> Option<config::StoredSecret> {
+        config::load_endpoint_secret(&self.config_path, base_url)
+    }
+
+    /// Fetch the Fasfas model list with a key.
+    fn fetch_fasfas_models(&mut self, key: String) -> Action {
+        if let Some(connect) = self.connect.as_mut() {
+            connect.loading = true;
+            connect.error = None;
+        }
+        Action::FetchFasfas(key)
     }
 
     pub(crate) fn finish_custom_connect(&mut self, password: Option<String>) -> Action {
@@ -875,9 +1085,10 @@ impl App {
                     connect.custom_name.trim().to_owned()
                 },
                 connect.custom_provider_id.clone(),
+                connect.unlocked_key.clone(),
             )
         };
-        let (endpoint, model_id, auth, token, models, name, custom_provider_id) = plan;
+        let (endpoint, model_id, auth, token, models, name, custom_provider_id, unlocked) = plan;
         let Some(model_id) = model_id else {
             self.connect_error("Choose a model.");
             return Action::None;
@@ -899,7 +1110,7 @@ impl App {
         // endpoint, reuse the live key so switching models never asks for the
         // encryption password again.
         let runtime_key = if auth.requires_token() {
-            stored_key.clone().or_else(|| {
+            stored_key.clone().or(unlocked).or_else(|| {
                 (self.backend.base_url().trim_end_matches('/') == endpoint.trim_end_matches('/'))
                     .then(|| self.backend.api_key().map(str::to_owned))
                     .flatten()
@@ -914,6 +1125,9 @@ impl App {
             }
             return Action::None;
         }
+        // An unlocked key is already on disk: it is not written again, so an
+        // encrypted token stays encrypted.
+        let reuse_secret = stored_key.is_none() && unlocked.is_some();
         let connection = Connection {
             provider: ProviderKind::Custom,
             provider_name: name.clone(),
@@ -924,6 +1138,8 @@ impl App {
             auth,
             models: models.clone(),
             custom_provider_id,
+            provider_id: None,
+            reuse_secret,
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
         self.backend.configure(
