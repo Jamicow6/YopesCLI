@@ -105,7 +105,7 @@ pub(super) fn tool_result_lines(
     let mut quiet = false;
     // A read stays quiet: its header and range replace the contents, and
     // clicking the frame still reveals everything it returned.
-    if !failed && call_name == Some("read_file") {
+    if !failed && matches!(call_name, Some("read_file") | Some("multi_read")) {
         if let Some((path, summary)) = read_result_summary(&message.content) {
             quiet = true;
             label = Some(path);

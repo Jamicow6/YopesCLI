@@ -348,10 +348,11 @@ impl App {
         self.approved_tools.clear();
     }
 
-    /// After the first completed reply of an unnamed session, ask the model
-    /// for a short title; it lands back through on_session_title.
+    /// After the first completed reply, ask the model for a short title;
+    /// it replaces the prompt-derived fallback and lands back through
+    /// on_session_title.
     pub(crate) fn maybe_name_session(&mut self) -> Action {
-        if self.session.title != "New session" || !self.backend.is_configured() {
+        if !self.backend.is_configured() || self.session.auto_named {
             return Action::None;
         }
         let excerpt = |text: &str| -> String {
@@ -378,6 +379,8 @@ impl App {
         else {
             return Action::None;
         };
+        // Sent exactly once: a failed request is never retried.
+        self.session.auto_named = true;
         Action::NameSession {
             task: format!(
                 "Name this conversation with a title of at most five words, capitalized, \
@@ -392,7 +395,7 @@ impl App {
     /// Result of the background naming request, handled in the main loop.
     /// The id keeps a fast `/sessions` switch from stealing another session's name.
     pub(crate) fn on_session_title(&mut self, session_id: u64, raw: String) {
-        if self.session.id != session_id || self.session.title != "New session" {
+        if self.session.id != session_id {
             return;
         }
         let title: String = raw

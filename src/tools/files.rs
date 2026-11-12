@@ -133,7 +133,9 @@ fn read_regular_file(
     let lines = source.lines().collect::<Vec<_>>();
     let total = lines.len();
     let start = start_line.unwrap_or(1).max(1);
-    let limit = limit.unwrap_or(MAX_READ_LINES).clamp(1, MAX_READ_LINE_LIMIT);
+    let limit = limit
+        .unwrap_or(MAX_READ_LINES)
+        .clamp(1, MAX_READ_LINE_LIMIT);
     if start > total && total > 0 {
         bail!("start_line {start} is past the end of {path} ({total} lines)");
     }
@@ -162,10 +164,20 @@ pub(super) fn multi_read(arguments: &str) -> Result<String> {
         bail!("paths cannot be empty");
     }
     let mut output = String::new();
+    // Enforce the output cap while accumulating so a large directory does
+    // not allocate a result proportional to its file count.
+    let mut budget = MAX_OUTPUT_CHARS;
+    let mut stopped = false;
     for requested in &args.paths {
         if !args.all {
             match read_regular_file(requested, None, None) {
-                Ok(content) => output.push_str(&content),
+                Ok(content) => {
+                    push_bounded(&mut output, &mut budget, &content);
+                    if budget == 0 {
+                        stopped = true;
+                        break;
+                    }
+                }
                 Err(error) => output.push_str(&format!("{requested}: {error}\n")),
             }
             continue;
@@ -174,7 +186,7 @@ pub(super) fn multi_read(arguments: &str) -> Result<String> {
             Ok(entries) => {
                 let mut names = entries
                     .filter_map(|entry| entry.ok())
-                    .filter(|entry| entry.file_type().map_or(false, |kind| kind.is_file()))
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
                     .map(|entry| entry.file_name().to_string_lossy().to_string())
                     .collect::<Vec<_>>();
                 names.sort_by_key(|name| name.to_ascii_lowercase());
@@ -192,12 +204,34 @@ pub(super) fn multi_read(arguments: &str) -> Result<String> {
         for name in names {
             let display = format!("{requested}/{name}");
             match read_regular_file(&display, None, None) {
-                Ok(content) => output.push_str(&content),
+                Ok(content) => {
+                    push_bounded(&mut output, &mut budget, &content);
+                    if budget == 0 {
+                        stopped = true;
+                        break;
+                    }
+                }
                 Err(error) => output.push_str(&format!("{display}: {error}\n")),
             }
         }
+        if stopped {
+            break;
+        }
+    }
+    if stopped {
+        output.push_str("\n… output truncated");
     }
     Ok(truncate_output(output))
+}
+
+/// Append up to the remaining output budget; a full budget drops the text.
+fn push_bounded(output: &mut String, budget: &mut usize, text: &str) {
+    if *budget == 0 {
+        return;
+    }
+    let taken: String = text.chars().take(*budget).collect();
+    *budget -= taken.chars().count();
+    output.push_str(&taken);
 }
 
 #[derive(Deserialize)]

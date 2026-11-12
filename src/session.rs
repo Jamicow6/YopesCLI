@@ -161,6 +161,10 @@ pub struct Session {
     /// The todo checklist from todo_write, native instead of `todo.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<TaskState>,
+    /// In-memory only: the model already named (or tried to name) this
+    /// session, so naming fires once per run instead of every turn.
+    #[serde(skip)]
+    pub auto_named: bool,
 }
 
 impl Default for Session {
@@ -181,6 +185,7 @@ impl Session {
             messages: Vec::new(),
             summary: None,
             tasks: Vec::new(),
+            auto_named: false,
         }
     }
 

@@ -617,7 +617,9 @@ impl App {
                     match raw_window.parse::<u64>() {
                         Ok(n) => Some(n),
                         Err(_) => {
-                            self.connect_error("Context window must be a number (e.g. 128000), or leave blank.");
+                            self.connect_error(
+                                "Context window must be a number (e.g. 128000), or leave blank.",
+                            );
                             return Action::None;
                         }
                     }
@@ -629,7 +631,10 @@ impl App {
                         .position(|model| model.id == id);
                     if let Some(index) = existing {
                         connect.custom_models[index].name = name;
-                        connect.custom_models[index].context_window = context_window;
+                        // Blank keeps the limit already saved for this model.
+                        if !raw_window.is_empty() {
+                            connect.custom_models[index].context_window = context_window;
+                        }
                     } else {
                         connect.custom_models.push(SavedModel {
                             id: id.clone(),

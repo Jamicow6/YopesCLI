@@ -19,7 +19,9 @@ impl App {
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
                 ConnectStage::ModelId => connect.custom_model_id.push_str(&clean),
                 ConnectStage::ModelName => connect.custom_model_name.push_str(&clean),
-                ConnectStage::ModelContextWindow => connect.custom_model_context_window.push_str(&clean),
+                ConnectStage::ModelContextWindow => {
+                    connect.custom_model_context_window.push_str(&clean)
+                }
                 ConnectStage::Providers | ConnectStage::Models => {
                     connect.filter.push_str(&clean);
                     connect.selected = 0;

@@ -117,7 +117,10 @@ impl App {
     pub(crate) fn begin_turn(&mut self) -> Action {
         let total = Session::estimate_tokens(&self.session.messages);
         let (threshold, keep) = match self.model_context_window() {
-            Some(window) => (window / COMPACTION_THRESHOLD_FRAC, window / COMPACTION_KEEP_FRAC),
+            Some(window) => (
+                window / COMPACTION_THRESHOLD_FRAC,
+                window / COMPACTION_KEEP_FRAC,
+            ),
             None => (COMPACTION_THRESHOLD_DEFAULT, COMPACTION_KEEP_DEFAULT),
         };
         if self.auto_compact && total > threshold {
