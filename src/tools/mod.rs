@@ -112,22 +112,25 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              and send an empty list to close the checklist. \
              For an independent subtask use delegate: hand the subagent one self-contained \
              task with all the context it needs — it has no tools and returns a final answer. \
-             Format user-facing replies with Markdown by default: use ## headings for sections, \
-             bullets or numbered lists for multiple items, **bold** for key terms, and fenced \
-             code blocks with a language tag for code or commands. Use inline code for paths, \
-             commands, identifiers, and short snippets. Keep paragraphs readable; do not flatten \
-             lists or code into plain prose. Keep responses short and concrete. Paths may be relative to the working directory."
+             Your user-facing replies are rendered as Markdown in the terminal: use ## headings for \
+             sections, bullets or numbered lists for multiple items, **bold** for key terms, and \
+             fenced code blocks with a language tag for code or commands. Use inline code for paths, \
+             commands, identifiers, and short snippets. Use > for quoted output and a compact table \
+             only when a table is clearer than a list. Keep paragraphs readable; do not flatten \
+             lists or code into plain prose, and never use HTML or images. Keep responses short and \
+             concrete. Paths may be relative to the working directory."
         )
     } else {
         format!(
             "You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Operating system: {os}\n\
-             Format replies with Markdown by default: use ## headings for sections, bullets or \
-             numbered lists for multiple items, **bold** for key terms, and fenced code blocks \
-             with language tags for code. Use inline code for paths, commands, and identifiers. \
-             Keep paragraphs readable; do not flatten lists or code into plain prose. \
-             Keep responses short and concrete."
+             Your replies are rendered as Markdown in the terminal: use ## headings for sections, \
+             bullets or numbered lists for multiple items, **bold** for key terms, and fenced code \
+             blocks with language tags for code. Use inline code for paths, commands, and \
+             identifiers. Use > for quoted output and a compact table only when a table is clearer \
+             than a list. Keep paragraphs readable; do not flatten lists or code into plain prose, \
+             and never use HTML or images. Keep responses short and concrete."
         )
     };
     let project_instructions =

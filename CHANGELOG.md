@@ -6,6 +6,13 @@ All notable changes to YopesCLI are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Rich Markdown rendering in the transcript: headings, emphasis, links, fenced
+  code with language labels, nested lists and task boxes, blockquotes, rules,
+  and compact tables. The system prompt now asks the model for terminal-friendly
+  Markdown.
+
 ### Changed
 
 - Split `src/app.rs` into `src/app/` modules (input, turns, streaming,
