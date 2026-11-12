@@ -238,10 +238,8 @@ pub fn section(cwd: &Path) -> Option<String> {
 }
 
 fn relative(path: &Path, cwd: &Path) -> String {
-    path.strip_prefix(cwd)
-        .map(Path::display)
-        .unwrap_or_else(|_| path.display().to_string())
-        .to_string()
+    // Outside the workspace stays absolute; inside prints relative.
+    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }
 
 /// Turn `/name args` into the message content that carries the skill body,
