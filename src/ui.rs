@@ -1268,7 +1268,9 @@ fn unified_lines(diff: &FileDiff, width: usize) -> Vec<Line<'static>> {
 
 fn side_by_side_lines(diff: &FileDiff, width: usize) -> Vec<Line<'static>> {
     let gutter = line_number_width(diff);
-    let text_width = width.saturating_sub(gutter * 2 + 5).max(1) / 2;
+    // Each pane gets an explicit +/- marker as well as its line number,
+    // so side-by-side edits remain obvious even when terminal colors are subtle.
+    let text_width = width.saturating_sub(gutter * 2 + 7).max(1) / 2;
     let mut lines = Vec::new();
     for (index, hunk) in diff.hunks.iter().enumerate() {
         if index > 0 {
@@ -1307,17 +1309,27 @@ fn side_by_side_lines(diff: &FileDiff, width: usize) -> Vec<Line<'static>> {
                 .right
                 .as_ref()
                 .map_or_else(|| Style::default().fg(TEXT), |line| diff_style(line));
+            let (left_sign, left_color) = row
+                .left
+                .as_ref()
+                .map_or((" ", TEXT), |line| diff_sign(line.kind));
+            let (right_sign, right_color) = row
+                .right
+                .as_ref()
+                .map_or((" ", TEXT), |line| diff_sign(line.kind));
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{left_number:>gutter$} "),
                     Style::default().fg(MUTED),
                 ),
+                Span::styled(left_sign, Style::default().fg(left_color)),
                 Span::styled(format!("{left_text:<text_width$}"), left_style),
                 Span::styled(" │ ", Style::default().fg(MUTED)),
                 Span::styled(
                     format!("{right_number:>gutter$} "),
                     Style::default().fg(MUTED),
                 ),
+                Span::styled(right_sign, Style::default().fg(right_color)),
                 Span::styled(right_text, right_style),
             ]));
         }
