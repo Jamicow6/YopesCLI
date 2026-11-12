@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
+pub(super) fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.min(68);
     let height = area.height.min(32);
     let popup = Rect::new(
@@ -18,7 +18,10 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
             " help ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Line::styled(" esc close ", Style::default().fg(MUTED)))
+        .title_bottom(Line::styled(
+            " esc close · ↑↓ scroll ",
+            Style::default().fg(MUTED),
+        ))
         .padding(Padding::new(2, 2, 1, 1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -34,6 +37,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("enter", "run the pending tool"),
         help_row("a", "always allow that tool this session"),
         help_row("v", "toggle unified / side-by-side diffs"),
+        help_row("ctrl+v", "paste an image"),
         help_row("ctrl+n", "new session"),
         help_row("ctrl+u", "clear input"),
         help_row("ctrl+w", "delete previous word"),
@@ -44,7 +48,14 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
     for command in COMMANDS {
         lines.push(help_row(command.display_name(), command.description));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    // The popup scrolls on a short terminal instead of clipping silently.
+    let visible = usize::from(inner.height.max(1));
+    let max_scroll = lines.len().saturating_sub(visible);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((app.help_scroll.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 }
 
 pub(super) fn help_section(title: &'static str) -> Line<'static> {

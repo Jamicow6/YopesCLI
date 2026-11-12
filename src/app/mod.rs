@@ -1028,6 +1028,8 @@ pub struct App {
     pub transcript_height: u16,
     pub follow_tail: bool,
     pub show_help: bool,
+    /// How far the help popup is scrolled down.
+    pub help_scroll: usize,
     pub should_quit: bool,
     pub notice: Option<Notice>,
     /// A request being retried, shown in the footer while it waits.
@@ -1110,6 +1112,7 @@ impl App {
             transcript_height: 10,
             follow_tail: true,
             show_help: false,
+            help_scroll: 0,
             should_quit: false,
             notice: None,
             retry: None,
