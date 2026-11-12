@@ -20,11 +20,8 @@ use crate::{
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
-    session::{
-        self, ImageAttachment, Message, Role, Session, TaskState, ToolCall,
-    },
-    skills,
-    tools,
+    session::{self, ImageAttachment, Message, Role, Session, TaskState, ToolCall},
+    skills, tools,
 };
 
 /// Warn this many rounds before the stop, so a long turn is not a surprise.
@@ -236,7 +233,10 @@ impl Mode {
         match self {
             Self::Build => false,
             Self::Plan => {
-                matches!(tool, "write_file" | "edit_file" | "multi_edit" | "run_command" | "bash_background")
+                matches!(
+                    tool,
+                    "write_file" | "edit_file" | "multi_edit" | "run_command" | "bash_background"
+                )
             }
             Self::Chat => true,
         }
@@ -369,7 +369,9 @@ fn session_entry(path: PathBuf) -> SessionEntry {
         .map(|probe| probe.title.trim().to_owned())
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| "Untitled".to_owned());
-    let modified = fs::metadata(&path).ok().and_then(|metadata| metadata.modified().ok());
+    let modified = fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
     SessionEntry {
         path,
         title,
@@ -382,9 +384,7 @@ fn session_matching<'a>(sessions: &'a [SessionEntry], filter: &str) -> Vec<&'a S
     let filter = filter.to_ascii_lowercase();
     sessions
         .iter()
-        .filter(|entry| {
-            filter.is_empty() || entry.title.to_ascii_lowercase().contains(&filter)
-        })
+        .filter(|entry| filter.is_empty() || entry.title.to_ascii_lowercase().contains(&filter))
         .collect()
 }
 
@@ -546,8 +546,7 @@ impl ConnectState {
         let filter = self.filter.to_ascii_lowercase();
         let active_base_url = active_base_url.trim_end_matches('/');
         let is_active = |endpoint: &str| {
-            !active_base_url.is_empty()
-                && endpoint.trim_end_matches('/') == active_base_url
+            !active_base_url.is_empty() && endpoint.trim_end_matches('/') == active_base_url
         };
         match self.stage {
             ConnectStage::Providers => {
@@ -793,7 +792,10 @@ impl ConnectState {
         };
         if matches!(
             self.stage,
-            ConnectStage::ApiKey | ConnectStage::Password | ConnectStage::CustomToken | ConnectStage::FasfasKey
+            ConnectStage::ApiKey
+                | ConnectStage::Password
+                | ConnectStage::CustomToken
+                | ConnectStage::FasfasKey
         ) && !value.is_empty()
         {
             "•".repeat(value.chars().count().min(64))
@@ -1156,7 +1158,10 @@ impl App {
                 } else {
                     let name = format!("paste-{}.png", self.next_image);
                     self.next_image += 1;
-                    self.attachments.push(ImageAttachment { name, data: payload });
+                    self.attachments.push(ImageAttachment {
+                        name,
+                        data: payload,
+                    });
                     self.info(format!(
                         "Image {} attached — send it with the next message.",
                         self.attachments.len()
@@ -1552,11 +1557,10 @@ impl App {
         else {
             return Action::None;
         };
-        let Some(reply) = self
-            .session
-            .messages
-            .iter()
-            .find(|message| message.role == Role::Assistant && !message.content.trim().is_empty())
+        let Some(reply) =
+            self.session.messages.iter().find(|message| {
+                message.role == Role::Assistant && !message.content.trim().is_empty()
+            })
         else {
             return Action::None;
         };
@@ -1582,9 +1586,7 @@ impl App {
             .map(str::trim)
             .find(|line| !line.is_empty())
             .unwrap_or_default()
-            .trim_matches(|character: char| {
-                matches!(character, '"' | '\'' | '`' | '*' | '#')
-            })
+            .trim_matches(|character: char| matches!(character, '"' | '\'' | '`' | '*' | '#'))
             .chars()
             .take(48)
             .collect();
@@ -1606,9 +1608,7 @@ impl App {
                 .filter(|character| !character.is_control())
                 .collect::<String>();
             match connect.stage {
-                ConnectStage::ApiKey | ConnectStage::FasfasKey => {
-                    connect.api_key.push_str(&clean)
-                }
+                ConnectStage::ApiKey | ConnectStage::FasfasKey => connect.api_key.push_str(&clean),
                 ConnectStage::Password => connect.password.push_str(&clean),
                 ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
@@ -2111,7 +2111,9 @@ impl App {
                     // A saved endpoint's manager backs out to the provider list;
                     // the create flow backs out to the endpoint field; Fasfas
                     // step one backs out to the provider list.
-                    connect.stage = if connect.custom_provider_id.is_some() || stage == ConnectStage::FasfasNotice {
+                    connect.stage = if connect.custom_provider_id.is_some()
+                        || stage == ConnectStage::FasfasNotice
+                    {
                         ConnectStage::Providers
                     } else {
                         ConnectStage::Endpoint
@@ -3014,13 +3016,15 @@ impl App {
         }
         if prompt.starts_with('/') {
             // Builtins never lose their name to a skill of the same spelling.
-            if COMMANDS.iter().any(|command| {
-                prompt.split_whitespace().next() == Some(command.name)
-            }) {
+            if COMMANDS
+                .iter()
+                .any(|command| prompt.split_whitespace().next() == Some(command.name))
+            {
                 return self.command(&prompt);
             }
-            let expanded =
-                std::env::current_dir().ok().and_then(|cwd| skills::expand(&prompt, &cwd));
+            let expanded = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| skills::expand(&prompt, &cwd));
             match expanded {
                 // A skill invocation becomes a normal turn that carries the
                 // skill body, so it works with tools off too.
@@ -3337,8 +3341,10 @@ impl App {
             StreamEvent::Delta { request_id, text }
                 if self.active_request_id() == Some(request_id) =>
             {
-                if let Some(compaction) =
-                    self.active.as_mut().and_then(|active| active.compacting.as_mut())
+                if let Some(compaction) = self
+                    .active
+                    .as_mut()
+                    .and_then(|active| active.compacting.as_mut())
                 {
                     compaction.text.push_str(&text);
                 } else if let Some(message) = self.session.messages.last_mut() {
@@ -3435,7 +3441,8 @@ impl App {
                 // Record what the reply cost and how long it took, so the
                 // transcript can show it under the finished message.
                 let finished = self.active.as_ref().map(|active| {
-                    let elapsed_ms = u64::try_from(active.started.elapsed().as_millis()).unwrap_or(0);
+                    let elapsed_ms =
+                        u64::try_from(active.started.elapsed().as_millis()).unwrap_or(0);
                     let (prompt_tokens, completion_tokens) = active
                         .usage
                         .unwrap_or((active.prompt_tokens, estimated_output_tokens(&self.session)));
@@ -3522,12 +3529,8 @@ impl App {
                         return self.advance_tools();
                     }
                 }
-                let diffs = tools::applied_change_all(
-                    &event.call,
-                    before,
-                    existed,
-                    &running.targets,
-                );
+                let diffs =
+                    tools::applied_change_all(&event.call, before, existed, &running.targets);
                 if !diffs.is_empty() {
                     self.changes.insert(
                         event.call.id.clone(),
@@ -3746,8 +3749,16 @@ mod tests {
         assert_eq!(
             command_names("/"),
             vec![
-                "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/system", "/compact",
-                "/effort", "/quit",
+                "/help",
+                "/new",
+                "/connect",
+                "/model",
+                "/sessions",
+                "/tools",
+                "/system",
+                "/compact",
+                "/effort",
+                "/quit",
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);

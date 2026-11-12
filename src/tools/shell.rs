@@ -230,7 +230,10 @@ pub(super) fn bash_output(arguments: &str) -> Result<String> {
     let args: BashJobArgs = parse(arguments)?;
     let mut jobs = bash_jobs();
     let Some(job) = jobs.get_mut(&args.job_id) else {
-        bail!("no bash job with id {}; it was never started or was already read", args.job_id);
+        bail!(
+            "no bash job with id {}; it was never started or was already read",
+            args.job_id
+        );
     };
     // Ownership of the child moves through this block so the job can finish
     // between calls; on kill and exit the child is consumed and dropped.
@@ -279,7 +282,10 @@ pub(super) fn bash_kill(arguments: &str) -> Result<String> {
     let args: BashJobArgs = parse(arguments)?;
     let mut jobs = bash_jobs();
     let Some(job) = jobs.get_mut(&args.job_id) else {
-        bail!("no bash job with id {}; it was never started or was already read", args.job_id);
+        bail!(
+            "no bash job with id {}; it was never started or was already read",
+            args.job_id
+        );
     };
     let Some(child) = job.child.as_mut() else {
         return Ok(format!("Bash job {} already finished.", args.job_id));
@@ -288,5 +294,8 @@ pub(super) fn bash_kill(arguments: &str) -> Result<String> {
     let _ = child.wait();
     job.child = None;
     job.exit = Some(-1);
-    Ok(format!("Killed bash job {}. It reported no exit code.", args.job_id))
+    Ok(format!(
+        "Killed bash job {}. It reported no exit code.",
+        args.job_id
+    ))
 }

@@ -72,7 +72,10 @@ pub(super) fn read_file(arguments: &str) -> Result<String> {
     let metadata = fs::metadata(&path).with_context(|| format!("reading {}", args.path))?;
     if metadata.is_dir() {
         if args.start_line.is_some() || args.limit.is_some() {
-            bail!("{} is a directory; line ranges only apply to files", args.path);
+            bail!(
+                "{} is a directory; line ranges only apply to files",
+                args.path
+            );
         }
         let requested = args.path.trim();
         return directory_listing(if requested.is_empty() { "." } else { requested });
@@ -112,7 +115,6 @@ pub(super) fn read_file(arguments: &str) -> Result<String> {
     }
     Ok(truncate_output(output))
 }
-
 
 #[derive(Deserialize)]
 pub(super) struct WriteFileArgs {
@@ -225,7 +227,13 @@ fn multi_edit_replay(arguments: &str) -> Result<Vec<(String, String, String)>> {
             args.edits.len()
         );
     }
-    if args.edits.iter().map(|edit| edit.new_text.len()).sum::<usize>() > MAX_WRITE_BYTES {
+    if args
+        .edits
+        .iter()
+        .map(|edit| edit.new_text.len())
+        .sum::<usize>()
+        > MAX_WRITE_BYTES
+    {
         bail!("combined new_text is too large (the limit is {MAX_WRITE_BYTES} bytes)");
     }
     let mut order: Vec<String> = Vec::new();
@@ -237,7 +245,10 @@ fn multi_edit_replay(arguments: &str) -> Result<Vec<(String, String, String)>> {
         }
         if !sources.contains_key(&edit.path) {
             let source = fs::read_to_string(resolve(&edit.path)).with_context(|| {
-                format!("reading {}; multi_edit only edits existing files", edit.path)
+                format!(
+                    "reading {}; multi_edit only edits existing files",
+                    edit.path
+                )
             })?;
             order.push(edit.path.clone());
             originals.insert(edit.path.clone(), source.clone());
