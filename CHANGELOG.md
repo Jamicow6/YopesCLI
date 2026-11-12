@@ -27,6 +27,8 @@ All notable changes to YopesCLI are recorded here. The format follows
 - The system prompt tells the model where scratch files belong
   (`%USERPROFILE%\Temp` on Windows).
 - Help popup scrolls with ↑↓/PgUp/PgDn and the mouse wheel.
+- `Ctrl+G` toggles mouse capture: with capture off the terminal's own text
+  selection and copy work over the transcript.
 
 ### Changed
 
