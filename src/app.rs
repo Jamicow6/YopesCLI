@@ -3463,13 +3463,16 @@ impl App {
                         let done = tasks.iter().filter(|task| task.done).count();
                         let count = tasks.len();
                         self.session.tasks = tasks;
-                        self.record_tool_result(
-                            event.call.id,
+                        // An empty write deliberately clears the checklist.
+                        let message = if count == 0 {
+                            "Cleared the task list; the Progress panel is closed.".to_owned()
+                        } else {
                             format!(
                                 "Stored {count} task{} ({done} done); the Progress panel shows them.",
                                 if count == 1 { "" } else { "s" }
-                            ),
-                        );
+                            )
+                        };
+                        self.record_tool_result(event.call.id, message);
                         self.follow_tail = true;
                         self.save_session();
                         return self.advance_tools();

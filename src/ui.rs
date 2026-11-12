@@ -111,7 +111,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let picker = app.model_picker.clone();
     let session_picker = app.session_picker.clone();
-    let tasks = !app.session.tasks.is_empty();
+    // The Progress panel steps aside once every task is done: a finished
+    // checklist means finished work, not a panel parked over the composer.
+    let tasks = app.session.tasks.iter().any(|task| !task.done);
     let palette = if app.show_help
         || app.connect_open()
         || app.approval.is_some()
