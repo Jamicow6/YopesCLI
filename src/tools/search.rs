@@ -8,7 +8,13 @@ struct GlobArgs {
 }
 
 /// Directories the walkers never enter, so caches and dependencies stay out.
-const SKIP_DIRS: [&str; 5] = [".git", "target", "node_modules", "__pycache__", ".pytest_cache"];
+const SKIP_DIRS: [&str; 5] = [
+    ".git",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+];
 const MAX_GLOB_ENTRIES: usize = 500;
 const MAX_WALKED_ENTRIES: usize = 20_000;
 const MAX_WALK_DEPTH: usize = 32;
@@ -111,8 +117,10 @@ pub(super) fn glob_matches(segments: &[String], path: &[String]) -> bool {
     }
     match path.split_first() {
         Some((name, rest)) => {
-            glob_segment(&head.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
-                && glob_matches(&segments[1..], rest)
+            glob_segment(
+                &head.chars().collect::<Vec<_>>(),
+                &name.chars().collect::<Vec<_>>(),
+            ) && glob_matches(&segments[1..], rest)
         }
         None => false,
     }
@@ -177,15 +185,18 @@ pub(super) fn grep(arguments: &str) -> Result<String> {
     if !root.is_dir() {
         bail!("{requested} is not a directory");
     }
-    let include = args.include.filter(|include| !include.trim().is_empty()).map(|include| {
-        include
-            .trim()
-            .replace('\\', "/")
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<String>>()
-    });
+    let include = args
+        .include
+        .filter(|include| !include.trim().is_empty())
+        .map(|include| {
+            include
+                .trim()
+                .replace('\\', "/")
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        });
     let needle = if args.ignore_case {
         pattern.to_ascii_lowercase()
     } else {
@@ -211,7 +222,10 @@ pub(super) fn grep(arguments: &str) -> Result<String> {
     if matches.is_empty() {
         return Ok(format!("{pattern}\n(no matches)"));
     }
-    let mut output = format!("{pattern} ({} matches)\n", matches.len().min(MAX_GREP_MATCHES));
+    let mut output = format!(
+        "{pattern} ({} matches)\n",
+        matches.len().min(MAX_GREP_MATCHES)
+    );
     output.push_str(&matches.join("\n"));
     if matches.len() >= MAX_GREP_MATCHES {
         output.push_str("\n… more matches truncated");
@@ -322,4 +336,3 @@ fn include_accepts(include: Option<&[String]>, file_name: &str, path: &str) -> b
     }
     match_path(segments, path)
 }
-

@@ -106,10 +106,7 @@ pub(super) fn web_fetch(arguments: &str) -> Result<String> {
         .context("creating the fetch client")?;
     let response = client
         .get(url)
-        .header(
-            "user-agent",
-            format!("yopes/{}", env!("CARGO_PKG_VERSION")),
-        )
+        .header("user-agent", format!("yopes/{}", env!("CARGO_PKG_VERSION")))
         .send()
         .with_context(|| format!("fetching {url}"))?;
     let status = response.status();
@@ -223,5 +220,3 @@ fn decode_entities(text: &str) -> String {
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
 }
-
-#[derive(Deserialize)]

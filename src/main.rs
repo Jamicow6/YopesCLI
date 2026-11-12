@@ -394,7 +394,10 @@ fn read_clipboard() -> Result<(String, String), String> {
         vec!["xclip", "-selection", "clipboard", "-o"],
         vec!["wl-paste", "--no-newline"],
     ] {
-        if let Ok(output) = std::process::Command::new(argv[0]).args(&argv[1..]).output() {
+        if let Ok(output) = std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .output()
+        {
             if output.status.success() {
                 let text = String::from_utf8_lossy(&output.stdout);
                 let text = text.trim();
@@ -423,11 +426,7 @@ fn read_clipboard_text() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 /// Read the clipboard as a PNG via PowerShell, returning `None` when the

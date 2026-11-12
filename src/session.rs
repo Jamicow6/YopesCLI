@@ -327,8 +327,13 @@ impl Session {
         }
         self.messages.drain(..split);
         self.summary = Some(summary.clone());
-        self.messages
-            .insert(0, Message::new(Role::User, format!("Earlier conversation, summarized:\n\n{summary}")));
+        self.messages.insert(
+            0,
+            Message::new(
+                Role::User,
+                format!("Earlier conversation, summarized:\n\n{summary}"),
+            ),
+        );
     }
 }
 
@@ -421,7 +426,9 @@ mod tests {
         session.messages.push(assistant);
         session.messages.push(Message::tool_result("call_1", "ok"));
         session.messages.push(Message::new(Role::User, "second"));
-        session.messages.push(Message::new(Role::Assistant, "answer"));
+        session
+            .messages
+            .push(Message::new(Role::Assistant, "answer"));
 
         // A budget the whole history fits never splits.
         assert_eq!(session.compaction_split(u64::MAX), Some(0));
@@ -431,10 +438,17 @@ mod tests {
 
         session.compact(split, "the user asked about files".to_owned());
         assert_eq!(session.messages.len(), 3);
-        assert!(session.messages[0].content.contains("the user asked about files"));
+        assert!(
+            session.messages[0]
+                .content
+                .contains("the user asked about files")
+        );
         assert_eq!(session.messages[1].content, "second");
         assert_eq!(session.messages[2].content, "answer");
-        assert_eq!(session.summary.as_deref(), Some("the user asked about files"));
+        assert_eq!(
+            session.summary.as_deref(),
+            Some("the user asked about files")
+        );
 
         // Round-trips through the session file as an optional field.
         let json = serde_json::to_string(&session).unwrap();

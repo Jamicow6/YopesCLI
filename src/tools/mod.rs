@@ -71,8 +71,10 @@ pub fn requires_approval(call: &ToolCall) -> bool {
         // A subagent request spends extra tokens on the user's account.
         return true;
     }
-    matches!(call.function.name.as_str(), "run_command" | "bash_background")
-        && command_risk(&call.function.arguments)
+    matches!(
+        call.function.name.as_str(),
+        "run_command" | "bash_background"
+    ) && command_risk(&call.function.arguments)
 }
 
 /// The `risk` flag the model set on a `run_command` or `bash_background` call.
@@ -559,7 +561,10 @@ pub fn target_existed(call: &ToolCall) -> bool {
 }
 
 pub fn command_text(call: &ToolCall) -> Option<String> {
-    if !matches!(call.function.name.as_str(), "run_command" | "bash_background") {
+    if !matches!(
+        call.function.name.as_str(),
+        "run_command" | "bash_background"
+    ) {
         return None;
     }
     serde_json::from_str::<Value>(&call.function.arguments)
@@ -742,7 +747,6 @@ pub fn delegate_task(call: &ToolCall) -> Option<String> {
         })
 }
 
-
 fn workspace() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -861,8 +865,16 @@ mod tests {
             "write_file",
             r#"{"path":"new.txt","content":"hello"}"#,
         );
-        assert!(applied_change(&call, Some(String::new()), false).unwrap().created);
-        assert!(!applied_change(&call, Some("old".to_owned()), true).unwrap().created);
+        assert!(
+            applied_change(&call, Some(String::new()), false)
+                .unwrap()
+                .created
+        );
+        assert!(
+            !applied_change(&call, Some("old".to_owned()), true)
+                .unwrap()
+                .created
+        );
     }
 
     #[test]
@@ -883,8 +895,15 @@ mod tests {
                 { "path": b, "old_text": "one", "new_text": "uno" },
             ]
         });
-        let output = execute(&ToolCall::new("call_20", "multi_edit", &batch.to_string()), None).unwrap();
-        assert!(output.contains("Applied 3 edits across 2 files"), "{output}");
+        let output = execute(
+            &ToolCall::new("call_20", "multi_edit", &batch.to_string()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            output.contains("Applied 3 edits across 2 files"),
+            "{output}"
+        );
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "A\nB\nA\n");
         assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "uno\n");
 
@@ -895,9 +914,12 @@ mod tests {
                 { "path": b, "old_text": "absent", "new_text": "?" },
             ]
         });
-        let error = execute(&ToolCall::new("call_21", "multi_edit", &broken.to_string()), None)
-            .unwrap_err()
-            .to_string();
+        let error = execute(
+            &ToolCall::new("call_21", "multi_edit", &broken.to_string()),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("was not found"), "{error}");
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "A\nB\nA\n");
         assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "uno\n");
@@ -927,8 +949,11 @@ mod tests {
             "old_text": "beta = 2\n",
             "new_text": "beta = 20\n",
         });
-        let output =
-            execute(&ToolCall::new("call_23", "edit_file", &single.to_string()), None).unwrap();
+        let output = execute(
+            &ToolCall::new("call_23", "edit_file", &single.to_string()),
+            None,
+        )
+        .unwrap();
         assert!(output.contains("Replaced 1 occurrence"), "{output}");
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -942,7 +967,11 @@ mod tests {
             "new_text": "gamma = 3\n",
             "replace_all": true,
         });
-        execute(&ToolCall::new("call_24", "edit_file", &all.to_string()), None).unwrap();
+        execute(
+            &ToolCall::new("call_24", "edit_file", &all.to_string()),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "gamma = 3\r\nbeta = 20\r\ngamma = 3\r\n"
@@ -978,9 +1007,9 @@ mod tests {
 
     #[test]
     fn bash_background_output_and_kill_handle_the_lifecycle() {
-        use std::{thread, time::Duration};
-        use super::shell::bash_path;
         use super::execute;
+        use super::shell::bash_path;
+        use std::{thread, time::Duration};
         if bash_path().is_none() {
             // No bash on this machine yet; the tools refuse gracefully.
             let error = execute(
@@ -1176,7 +1205,10 @@ mod tests {
         fs::write(dir.join("skip.bin"), [0u8, b'n', b'e', b'e', b'd']).unwrap();
 
         let args = |more: &str| {
-            format!(r#"{{"pattern":"needle","path":{:?}{more}}}"#, dir.display().to_string())
+            format!(
+                r#"{{"pattern":"needle","path":{:?}{more}}}"#,
+                dir.display().to_string()
+            )
         };
         let every = execute(&ToolCall::new("call_13", "grep", &args("")), None).unwrap();
         assert!(every.contains("top.txt:1:"), "{every}");
@@ -1184,9 +1216,11 @@ mod tests {
         assert!(every.contains("code.rs:1:"), "{every}");
         assert!(!every.contains("skip.bin"), "{every}");
 
-        let only_rust =
-            execute(&ToolCall::new("call_14", "grep", &args(r#","include":"*.rs""#)), None)
-                .unwrap();
+        let only_rust = execute(
+            &ToolCall::new("call_14", "grep", &args(r#","include":"*.rs""#)),
+            None,
+        )
+        .unwrap();
         assert!(only_rust.contains("code.rs:1:"));
         assert!(!only_rust.contains("top.txt"), "{only_rust}");
 
@@ -1225,11 +1259,7 @@ mod tests {
         // Dot also works, and line ranges stay file-only.
         let listing = ToolCall::new("call_8", "read_file", r#"{"path":"."}"#);
         assert!(execute(&listing, None).is_ok());
-        let ranged = ToolCall::new(
-            "call_9",
-            "read_file",
-            r#"{"path":".","start_line":2}"#,
-        );
+        let ranged = ToolCall::new("call_9", "read_file", r#"{"path":".","start_line":2}"#);
         let error = execute(&ranged, None).unwrap_err().to_string();
         assert!(error.contains("directory"), "{error}");
         let _ = fs::remove_dir_all(&dir);

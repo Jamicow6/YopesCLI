@@ -177,7 +177,10 @@ pub fn provider_models(provider: &Provider) -> Vec<(&str, &Model)> {
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
-    use super::{FasfasModels, FASFAST_BASE_URL, Catalog, connectable_providers, fasfas_catalog, provider_models};
+    use super::{
+        Catalog, FASFAST_BASE_URL, FasfasModels, connectable_providers, fasfas_catalog,
+        provider_models,
+    };
 
     const SAMPLE: &str = r#"{
         "openai": {

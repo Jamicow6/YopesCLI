@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
-        Mode, ListPicker, NoticeKind, ToolApproval, format_bytes, format_tokens,
+        ListPicker, Mode, NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
     catalog::FASFAST_ID,
     diff::{ChangeKind, DiffLine, FileDiff},
@@ -33,7 +33,11 @@ fn read_result_summary(result: &str) -> Option<(String, Vec<String>)> {
     let count = first.get(open + 2..)?.strip_suffix(" lines)")?;
     count.trim().parse::<usize>().ok()?;
     let mut summary = vec![first.trim().to_owned()];
-    if let Some(range) = result.lines().nth(1).filter(|line| line.starts_with("lines ")) {
+    if let Some(range) = result
+        .lines()
+        .nth(1)
+        .filter(|line| line.starts_with("lines "))
+    {
         summary.push(range.trim().to_owned());
     }
     Some((path.to_owned(), summary))
@@ -89,11 +93,7 @@ const PALETTE_WIDTH: u16 = 60;
 /// The streaming caret alternates on a ~300ms cadence driven by the 100ms
 /// ticker, so a quiet stretch of tokens still reads as alive.
 fn caret(spinner: usize) -> &'static str {
-    if (spinner / 3) % 2 == 0 {
-        "▌"
-    } else {
-        ""
-    }
+    if (spinner / 3) % 2 == 0 { "▌" } else { "" }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -142,7 +142,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let popup_height = palette_height + picker_height + session_height;
     let composer_height = composer_height(app, area.width);
-    let progress_height = if tasks { (app.session.tasks.len().min(6) as u16) + 2 } else { 0 };
+    let progress_height = if tasks {
+        (app.session.tasks.len().min(6) as u16) + 2
+    } else {
+        0
+    };
 
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(2)];
     if popup_height > 0 {
@@ -295,10 +299,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             "Type / to see commands.",
             Style::default().fg(MUTED),
         ));
-        frame.render_widget(
-            Paragraph::new(welcome).alignment(Alignment::Center),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(welcome).alignment(Alignment::Center), inner);
         return;
     }
 
@@ -339,12 +340,15 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         if message.role == Role::Tool {
             let start = lines.len();
             let name = tool_call_name(app, index).map(str::to_owned);
-            let framed = tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
+            let framed =
+                tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
             lines.extend(framed);
             if streaming {
                 if let Some(line) = lines.last_mut() {
-                    line.spans
-                        .push(Span::styled(format!(" {}", caret(app.spinner)), Style::default().fg(ACCENT)));
+                    line.spans.push(Span::styled(
+                        format!(" {}", caret(app.spinner)),
+                        Style::default().fg(ACCENT),
+                    ));
                 }
             }
             continue;
@@ -370,7 +374,10 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.extend(reasoning);
         }
         if message.content.is_empty() && streaming && !has_calls && message.reasoning.is_empty() {
-            lines.push(Line::styled(caret(app.spinner), Style::default().fg(ACCENT)));
+            lines.push(Line::styled(
+                caret(app.spinner),
+                Style::default().fg(ACCENT),
+            ));
             continue;
         }
         if !message.content.is_empty() {
@@ -411,8 +418,10 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if streaming {
             if let Some(line) = lines.last_mut() {
-                line.spans
-                    .push(Span::styled(format!(" {}", caret(app.spinner)), Style::default().fg(ACCENT)));
+                line.spans.push(Span::styled(
+                    format!(" {}", caret(app.spinner)),
+                    Style::default().fg(ACCENT),
+                ));
             }
         }
     }
@@ -458,7 +467,8 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         if offset >= inner.height {
             continue;
         }
-        app.output_rows.push((inner.y.saturating_add(offset), call_id));
+        app.output_rows
+            .push((inner.y.saturating_add(offset), call_id));
     }
 }
 
@@ -507,12 +517,7 @@ fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: Re
     // The popup shows a window of the list, moving with the selection.
     let visible = inner.height as usize;
     let start = selected.saturating_sub(visible.saturating_sub(1));
-    for (offset, model) in models
-        .iter()
-        .skip(start)
-        .take(visible)
-        .enumerate()
-    {
+    for (offset, model) in models.iter().skip(start).take(visible).enumerate() {
         let index = start + offset;
         let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
         let chosen = index == selected;
@@ -589,12 +594,7 @@ fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: 
     let visible = inner.height as usize;
     let start = selected.saturating_sub(visible.saturating_sub(1));
     let right_width = 4;
-    for (offset, entry) in sessions
-        .iter()
-        .skip(start)
-        .take(visible)
-        .enumerate()
-    {
+    for (offset, entry) in sessions.iter().skip(start).take(visible).enumerate() {
         let index = start + offset;
         let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
         let chosen = index == selected;
@@ -901,13 +901,11 @@ fn draw_approval(
     frame.render_widget(Clear, popup);
 
     let blink = (spinner / 5) % 2 == 0;
-    let border = Style::default()
-        .fg(ACCENT)
-        .add_modifier(if blink {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        });
+    let border = Style::default().fg(ACCENT).add_modifier(if blink {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    });
     let has_command = tools::command_text(&approval.call).is_some();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1505,7 +1503,9 @@ fn draw_connect_list(
     let preferred_divider = has_preferred && !tail.is_empty();
     let models_divider = custom_count > 0 && custom_count < tail.len();
     // Rows: Ok(index) renders item index, Err(label) renders a divider.
-    let mut rows = Vec::with_capacity(items.len() + usize::from(preferred_divider) + usize::from(models_divider));
+    let mut rows = Vec::with_capacity(
+        items.len() + usize::from(preferred_divider) + usize::from(models_divider),
+    );
     for index in 0..items.len() {
         if preferred_divider && index == base {
             rows.push(Err(" preferred "));
@@ -1589,9 +1589,7 @@ fn draw_connect_list(
 fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
     let text = match connect.stage {
         ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
-        ConnectStage::FasfasNotice => {
-            "enter then paste your key · esc close".to_owned()
-        }
+        ConnectStage::FasfasNotice => "enter then paste your key · esc close".to_owned(),
         ConnectStage::FasfasKey => "enter load models · esc back".to_owned(),
         ConnectStage::Models => "↑↓ move · type to filter · enter choose · esc back".to_owned(),
         ConnectStage::ApiKey => connect.required_env().map_or_else(
@@ -1648,11 +1646,7 @@ fn message_line(raw: &str) -> Line<'static> {
         },
         Style::default().fg(if bullet { ACCENT } else { TEXT }),
     )];
-    spans.extend(inline_spans(if bullet {
-        strip_bullet(body)
-    } else {
-        body
-    }));
+    spans.extend(inline_spans(if bullet { strip_bullet(body) } else { body }));
     Line::from(spans)
 }
 
@@ -1712,12 +1706,18 @@ fn inline_spans(text: &str) -> Vec<Span<'static>> {
         }
         let after = &rest[at + marker.len()..];
         let Some(end) = after.find(marker) else {
-            spans.push(Span::styled(rest[at..].to_owned(), Style::default().fg(TEXT)));
+            spans.push(Span::styled(
+                rest[at..].to_owned(),
+                Style::default().fg(TEXT),
+            ));
             break;
         };
         let inner = &after[..end];
         if inner.is_empty() {
-            spans.push(Span::styled(rest[at..].to_owned(), Style::default().fg(TEXT)));
+            spans.push(Span::styled(
+                rest[at..].to_owned(),
+                Style::default().fg(TEXT),
+            ));
             break;
         }
         spans.push(if marker == "**" {
@@ -1778,10 +1778,7 @@ fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Li
         if show_hidden {
             output.push(Line::from(vec![
                 Span::styled("│ ", Style::default().fg(MUTED)),
-                Span::styled(
-                    format!("… {hidden} earlier lines of thinking"),
-                    style,
-                ),
+                Span::styled(format!("… {hidden} earlier lines of thinking"), style),
             ]));
         }
         for line in &lines[start..] {
@@ -1956,8 +1953,8 @@ fn wrapped_rows(line: &str, width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{frame_lines, reasoning_lines, wrapped_line_count};
-    use ratatui::{style::Color, text::Line};
     use crate::session::{Message, Role};
+    use ratatui::{style::Color, text::Line};
 
     fn text_of(line: &Line<'_>) -> String {
         line.spans
@@ -1986,11 +1983,7 @@ mod tests {
             page_height: 0,
         };
         let lines = approval_lines(&approval, 60, false);
-        let text = lines
-            .iter()
-            .map(text_of)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = lines.iter().map(text_of).collect::<Vec<_>>().join("\n");
         assert!(text.contains("hello.txt"), "{text}");
         assert!(text.contains("+1"), "{text}");
         assert!(!text.contains("$"), "{text}");
@@ -2023,7 +2016,10 @@ mod tests {
     #[test]
     fn streaming_reasoning_shows_recent_lines_with_a_summary() {
         let mut message = Message::new(Role::Assistant, "");
-        message.reasoning = (0..40).map(|i| format!("thought {i}")).collect::<Vec<_>>().join("\n");
+        message.reasoning = (0..40)
+            .map(|i| format!("thought {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let lines = reasoning_lines(&message, true, false);
         assert_eq!(lines.len(), 25);
         assert_eq!(text_of(&lines[0]), "│ … 16 earlier lines of thinking");
