@@ -46,9 +46,15 @@ struct Location {
 pub fn discover(cwd: &Path) -> Vec<Skill> {
     let mut locations = Vec::new();
     if let Some(home) = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
-        locations.push(Location { path: home, personal: true });
+        locations.push(Location {
+            path: home,
+            personal: true,
+        });
     }
-    locations.push(Location { path: cwd.to_path_buf(), personal: false });
+    locations.push(Location {
+        path: cwd.to_path_buf(),
+        personal: false,
+    });
     scan(&locations)
 }
 
@@ -63,7 +69,9 @@ fn scan(locations: &[Location]) -> Vec<Skill> {
             location.path.join(".claude").join("skills"),
             location.path.join(".claude").join("commands"),
         ] {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
             let mut entries: Vec<(PathBuf, bool)> = entries
                 .flatten()
                 .filter_map(|entry| {
@@ -79,14 +87,20 @@ fn scan(locations: &[Location]) -> Vec<Skill> {
             for (path, is_dir) in entries {
                 // A directory holds its instructions in SKILL.md; a plain
                 // `.md` file *is* the skill.
-                let file = if is_dir { path.join("SKILL.md") } else { path.clone() };
+                let file = if is_dir {
+                    path.join("SKILL.md")
+                } else {
+                    path.clone()
+                };
                 let fallback = if is_dir {
                     path.file_name().and_then(|name| name.to_str())
                 } else {
                     path.file_stem().and_then(|name| name.to_str())
                 };
                 let Some(fallback) = fallback else { continue };
-                let Ok(text) = fs::read_to_string(&file) else { continue };
+                let Ok(text) = fs::read_to_string(&file) else {
+                    continue;
+                };
                 let Some(skill) = parse_skill(&text, fallback, file, location.personal) else {
                     continue;
                 };
@@ -107,16 +121,13 @@ fn parse_skill(text: &str, fallback: &str, path: PathBuf, personal: bool) -> Opt
     if !valid_name(&name) {
         return None;
     }
-    let mut description = fields
-        .description
-        .clone()
-        .unwrap_or_else(|| {
-            body.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .unwrap_or_default()
-                .to_owned()
-        });
+    let mut description = fields.description.clone().unwrap_or_else(|| {
+        body.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_owned()
+    });
     if let Some(when_to_use) = fields.when_to_use {
         if description.is_empty() {
             description = when_to_use;
@@ -138,13 +149,24 @@ fn parse_skill(text: &str, fallback: &str, path: PathBuf, personal: bool) -> Opt
     })
 }
 
-#[derive(Default)]
 struct Fields {
     name: Option<String>,
     description: Option<String>,
     when_to_use: Option<String>,
     disable_model_invocation: bool,
     user_invocable: bool,
+}
+
+impl Default for Fields {
+    fn default() -> Self {
+        Self {
+            name: None,
+            description: None,
+            when_to_use: None,
+            disable_model_invocation: false,
+            user_invocable: true,
+        }
+    }
 }
 
 /// Parse the frontmatter rows, or everything as body when the opening `---`
@@ -154,8 +176,10 @@ fn frontmatter(text: &str) -> (Fields, String) {
     if !matches!(lines.next(), Some(first) if first.trim() == "---") {
         return (Fields::default(), text.to_owned());
     }
-    let mut fields = Fields::default();
-    fields.user_invocable = true;
+    let mut fields = Fields {
+        user_invocable: true,
+        ..Fields::default()
+    };
     let mut body = Vec::new();
     let mut closed = false;
     for line in lines {
@@ -164,9 +188,12 @@ fn frontmatter(text: &str) -> (Fields, String) {
         } else if closed {
             body.push(line);
         } else {
-            let Some((key, value)) = line.split_once(':') else { continue };
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let key = unquote(key.trim());
             let value = unquote(value.trim());
-            match key.trim().to_ascii_lowercase().as_str() {
+            match key.to_ascii_lowercase().as_str() {
                 "name" if !value.is_empty() => fields.name = Some(value),
                 "description" if !value.is_empty() => fields.description = Some(value),
                 "when_to_use" if !value.is_empty() => fields.when_to_use = Some(value),
@@ -232,7 +259,10 @@ pub fn section(cwd: &Path) -> Option<String> {
     );
     for skill in usable {
         let shown = relative(&skill.path, cwd);
-        text.push_str(&format!("- /{} — {} ({shown})\n", skill.name, skill.description));
+        text.push_str(&format!(
+            "- /{} — {} ({shown})\n",
+            skill.name, skill.description
+        ));
     }
     Some(text)
 }
@@ -254,7 +284,10 @@ pub fn expand(prompt: &str, cwd: &Path) -> Option<String> {
         .find(|skill| skill.user_invocable && skill.name.eq_ignore_ascii_case(name))?;
     let body = frontmatter(&fs::read_to_string(&skill.path).ok()?).1;
     let intro = if args.is_empty() {
-        format!("The user invoked the /{} skill. Follow its instructions.", skill.name)
+        format!(
+            "The user invoked the /{} skill. Follow its instructions.",
+            skill.name
+        )
     } else {
         format!(
             "The user invoked the /{} skill with: {args}. Follow its instructions.",
@@ -277,7 +310,11 @@ pub fn summary(cwd: &Path) -> Option<String> {
     let items = skills
         .iter()
         .map(|skill| {
-            let origin = if skill.personal { "personal" } else { "project" };
+            let origin = if skill.personal {
+                "personal"
+            } else {
+                "project"
+            };
             let description: String = skill.description.chars().take(80).collect();
             format!("/{} ({origin}) — {description}", skill.name)
         })
@@ -344,7 +381,9 @@ mod tests {
         assert_eq!(skill.description, "Deploys. When the user asks to ship.");
 
         // Unusable names and empty descriptions refuse to load.
-        assert!(parse_skill("---\nname: bad name\n---\nBody", "d", PathBuf::new(), false).is_none());
+        assert!(
+            parse_skill("---\nname: bad name\n---\nBody", "d", PathBuf::new(), false).is_none()
+        );
         assert!(parse_skill("---\n---\n\n   \n", "empty", PathBuf::new(), false).is_none());
 
         // The combined listing respects the cap.
@@ -371,15 +410,33 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         };
-        write(&home.join(".claude/skills/deploy/SKILL.md"), "---\ndescription: Home deploy\n---\nHome body.");
-        write(&work.join(".claude/skills/deploy/SKILL.md"), "---\ndescription: Project deploy\n---\nProject body.");
-        write(&work.join(".yopes/skills/codex/SKILL.md"), "Codex opens paths.");
-        write(&work.join(".claude/commands/commit.md"), "---\ndescription: Commit helper\n---\nCommit body.");
+        write(
+            &home.join(".claude/skills/deploy/SKILL.md"),
+            "---\ndescription: Home deploy\n---\nHome body.",
+        );
+        write(
+            &work.join(".claude/skills/deploy/SKILL.md"),
+            "---\ndescription: Project deploy\n---\nProject body.",
+        );
+        write(
+            &work.join(".yopes/skills/codex/SKILL.md"),
+            "Codex opens paths.",
+        );
+        write(
+            &work.join(".claude/commands/commit.md"),
+            "---\ndescription: Commit helper\n---\nCommit body.",
+        );
         write(&work.join(".claude/skills/skip me.md"), "Hmm."); // invalid name, dropped
 
         let locations = [
-            Location { path: home.clone(), personal: true },
-            Location { path: work.clone(), personal: false },
+            Location {
+                path: home.clone(),
+                personal: true,
+            },
+            Location {
+                path: work.clone(),
+                personal: false,
+            },
         ];
         let skills = scan(&locations);
 
@@ -407,7 +464,10 @@ mod tests {
             &work.join(".yopes/skills/hidden/SKILL.md"),
             "---\ndescription: Never auto\ndisable-model-invocation: true\n---\nHidden body.",
         );
-        write(&work.join(".yopes/skills/open/SKILL.md"), "---\ndescription: Open sail\n---\nOpen body.");
+        write(
+            &work.join(".yopes/skills/open/SKILL.md"),
+            "---\ndescription: Open sail\n---\nOpen body.",
+        );
 
         let section = section(&work).unwrap();
         assert!(section.contains("/open"), "{section}");

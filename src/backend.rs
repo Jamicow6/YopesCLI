@@ -9,8 +9,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::{AuthKind, Config, ProviderKind, SavedModel},
     session::{Message, Role, ToolCall},
-    skills,
-    tools,
+    skills, tools,
 };
 
 #[derive(Debug)]
@@ -136,6 +135,7 @@ impl Backend {
         self.reasoning_effort = value;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn configure(
         &mut self,
         provider: ProviderKind,
@@ -354,9 +354,7 @@ fn request_messages(
     // Skills auto-load through read_file, so only tool-capable sessions get
     // the listing; slash invocation injects the content by itself.
     if tooling {
-        if let Some(listing) =
-            skills::section(&std::env::current_dir().unwrap_or_default())
-        {
+        if let Some(listing) = skills::section(&std::env::current_dir().unwrap_or_default()) {
             system.push_str("\n\n");
             system.push_str(&listing);
         }
@@ -897,7 +895,7 @@ mod tests {
             &mut state,
         )
         .unwrap();
-        assert_eq!(done, false);
+        assert!(!done);
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedEvent::Delta(text) => assert_eq!(text, "Hello"),
@@ -1011,14 +1009,7 @@ mod tests {
         assert!(system.find("Always answer").unwrap() < system.find("PLAN MODE").unwrap());
         // A blank prompt adds nothing.
         assert_eq!(
-            request_messages(
-                &messages,
-                true,
-                ImageStyle::None,
-                Some("  "),
-                None
-            )
-            .unwrap(),
+            request_messages(&messages, true, ImageStyle::None, Some("  "), None).unwrap(),
             request_messages(&messages, true, ImageStyle::None, None, None).unwrap()
         );
     }
@@ -1046,10 +1037,7 @@ mod tests {
             .filter_map(|part| part.get("image_url").and_then(serde_json::Value::as_object))
             .collect::<Vec<_>>();
         assert_eq!(urls.len(), 1);
-        assert_eq!(
-            urls[0]["url"],
-            "data:image/png;base64,aWNvbg=="
-        );
+        assert_eq!(urls[0]["url"], "data:image/png;base64,aWNvbg==");
         assert!(parts.last().unwrap().get("images").is_none());
 
         // Ollama wants a flat base64 array on the message itself.
@@ -1058,8 +1046,7 @@ mod tests {
         assert_eq!(last["content"], "what changed?");
         assert_eq!(last["images"][0], "aWNvbg==");
         // Plain requests keep the raw attachment field out.
-        let plain =
-            request_messages(&messages, false, ImageStyle::None, None, None).unwrap();
+        let plain = request_messages(&messages, false, ImageStyle::None, None, None).unwrap();
         assert!(plain.last().unwrap().get("images").is_none());
         assert_eq!(plain.last().unwrap()["role"], "user");
     }
@@ -1119,7 +1106,7 @@ mod tests {
             &mut state,
         )
         .unwrap();
-        assert_eq!(done, false);
+        assert!(!done);
         assert_eq!(
             events,
             vec![ParsedEvent::Usage {
@@ -1140,7 +1127,7 @@ mod tests {
     fn reasoning_stays_apart_from_content() {
         let mut state = OpenAiState::default();
         let (events, _) = parse_openai_line(
-            r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think...","content":"So the"}}"],"usage":{"prompt_tokens":3,"completion_tokens":9}}"#,
+            r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think...","content":"So the"}}],"usage":{"prompt_tokens":3,"completion_tokens":9}}"#,
             &mut state,
         )
         .unwrap();
@@ -1195,18 +1182,18 @@ mod tests {
                     .all(|event| !matches!(event, ParsedEvent::ToolProgress { .. }))
             );
         }
-        let big = format!(
-            "{{\"path\":\"test.html\",\"content\":\"{}\"}}",
-            "x".repeat(2048)
-        );
-        let big = big.replace('"', "\\\"");
-        let (events, _) = parse_openai_line(
-            &format!(
-                r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"function":{{"arguments":"{big}"}}}}]}}}}]}}""#
-            ),
-            &mut state,
-        )
-        .unwrap();
+        let big = format!(r#"{{"path":"test.html","content":"{}"}}"#, "x".repeat(2048));
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": big }
+                    }]
+                }
+            }]
+        });
+        let (events, _) = parse_openai_line(&format!("data: {chunk}"), &mut state).unwrap();
         assert!(
             events.iter().any(
                 |event| matches!(event, ParsedEvent::ToolProgress { bytes, .. } if *bytes > 0)

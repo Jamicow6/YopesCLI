@@ -1,16 +1,26 @@
+//! The tool surface offered to the model: definitions, approval rules, change
+//! previews, and the dispatch that runs a call.
+//!
+//! `mod.rs` holds the contract shared by every tool: the JSON schema in
+//! `definitions`, the approval and preview rules, and `execute`. The tools
+//! themselves live in one module per family: `files` (read, write, edit),
+//! `search` (glob, grep), `shell` (commands and background jobs), `web`
+//! (search, fetch) and `todo`.
+
+mod files;
+mod search;
+mod shell;
+mod todo;
+mod web;
+
 use std::{
-    collections::HashMap,
     env, fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Child as ProcessChild, Command as ProcessCommand, Stdio},
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Mutex, MutexGuard, OnceLock,
-    },
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+pub(crate) use files::{change_preview, edit_targets};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -63,8 +73,10 @@ pub fn requires_approval(call: &ToolCall) -> bool {
         // A subagent request spends extra tokens on the user's account.
         return true;
     }
-    matches!(call.function.name.as_str(), "run_command" | "bash_background")
-        && command_risk(&call.function.arguments)
+    matches!(
+        call.function.name.as_str(),
+        "run_command" | "bash_background"
+    ) && command_risk(&call.function.arguments)
 }
 
 /// The `risk` flag the model set on a `run_command` or `bash_background` call.
@@ -109,17 +121,26 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              lists or code into plain prose. Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
-        format!("You are yopes, a coding assistant running in the user's terminal.\n\
+        format!(
+            "You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Operating system: {os}\n\
              Format replies with Markdown by default: use ## headings for sections, bullets or \
              numbered lists for multiple items, **bold** for key terms, and fenced code blocks \
              with language tags for code. Use inline code for paths, commands, and identifiers. \
              Keep paragraphs readable; do not flatten lists or code into plain prose. \
-             Keep responses short and concrete.")
+             Keep responses short and concrete."
+        )
     };
-    let project_instructions = load_agents_instructions(&env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    if project_instructions.is_empty() { base } else { format!("{base}\n\nProject Markdown context (AGENTS.md files contain instructions):\n{project_instructions}") }
+    let project_instructions =
+        load_agents_instructions(&env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    if project_instructions.is_empty() {
+        base
+    } else {
+        format!(
+            "{base}\n\nProject Markdown context (AGENTS.md files contain instructions):\n{project_instructions}"
+        )
+    }
 }
 
 fn load_agents_instructions(root: &Path) -> String {
@@ -129,14 +150,22 @@ fn load_agents_instructions(root: &Path) -> String {
     let mut files = Vec::new();
     collect_agents_files(root, 0, &mut files);
     files.sort_by(|a, b| {
-        let depth_a = a.parent().map_or(0, |p| p.strip_prefix(root).unwrap_or(p).components().count());
-        let depth_b = b.parent().map_or(0, |p| p.strip_prefix(root).unwrap_or(p).components().count());
+        let depth_a = a.parent().map_or(0, |p| {
+            p.strip_prefix(root).unwrap_or(p).components().count()
+        });
+        let depth_b = b.parent().map_or(0, |p| {
+            p.strip_prefix(root).unwrap_or(p).components().count()
+        });
         depth_a.cmp(&depth_b).then_with(|| a.cmp(b))
     });
     let mut output = String::new();
     for path in files.into_iter().take(MAX_FILES) {
-        if output.len() >= MAX_TOTAL_CHARS { break; }
-        let Ok(content) = fs::read_to_string(&path) else { continue };
+        if output.len() >= MAX_TOTAL_CHARS {
+            break;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
         let content: String = content.chars().take(MAX_FILE_CHARS).collect();
         let relative = path.strip_prefix(root).unwrap_or(&path).display();
         let remaining = MAX_TOTAL_CHARS.saturating_sub(output.len());
@@ -148,15 +177,25 @@ fn load_agents_instructions(root: &Path) -> String {
 }
 
 fn collect_agents_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>) {
-    if depth > 12 || files.len() >= 64 { return; }
-    let Ok(entries) = fs::read_dir(directory) else { return };
+    if depth > 12 || files.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
     let mut entries = entries.flatten().collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        let path = entry.path(); let name = entry.file_name();
-        if name == ".git" || name == "target" || name == "node_modules" || name == ".venv" { continue; }
-        if path.is_dir() { collect_agents_files(&path, depth + 1, files); }
-        else if path.extension().is_some_and(|extension| extension == "md") { files.push(path); }
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == ".git" || name == "target" || name == "node_modules" || name == ".venv" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_agents_files(&path, depth + 1, files);
+        } else if path.extension().is_some_and(|extension| extension == "md") {
+            files.push(path);
+        }
     }
 }
 
@@ -597,7 +636,10 @@ pub fn target_existed(call: &ToolCall) -> bool {
 }
 
 pub fn command_text(call: &ToolCall) -> Option<String> {
-    if !matches!(call.function.name.as_str(), "run_command" | "bash_background") {
+    if !matches!(
+        call.function.name.as_str(),
+        "run_command" | "bash_background"
+    ) {
         return None;
     }
     serde_json::from_str::<Value>(&call.function.arguments)
@@ -616,18 +658,18 @@ pub fn command_text(call: &ToolCall) -> Option<String> {
 pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) -> Option<FileDiff> {
     match call.function.name.as_str() {
         "write_file" => {
-            let args: WriteFileArgs = parse(&call.function.arguments).ok()?;
+            let args: files::WriteFileArgs = parse(&call.function.arguments).ok()?;
             let before = before.unwrap_or_default();
             Some(FileDiff::new(args.path, &before, &args.content, !existed))
         }
         "edit_file" => {
-            let args: EditFileArgs = parse(&call.function.arguments).ok()?;
+            let args: files::EditFileArgs = parse(&call.function.arguments).ok()?;
             if args.old_text.is_empty() {
                 return None;
             }
             let after = fs::read_to_string(resolve(&args.path)).ok()?;
             let before = before.or_else(|| {
-                apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
+                files::apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
                     .map(|(text, _)| text)
             })?;
             if before == after {
@@ -650,91 +692,17 @@ pub fn applied_change_all(
 ) -> Vec<FileDiff> {
     if call.function.name == "multi_edit" {
         let arguments = call.function.arguments.clone();
-        return multi_edit_applied(&arguments, targets);
+        return files::multi_edit_applied(&arguments, targets);
     }
     applied_change(call, before, existed).into_iter().collect()
 }
 
-fn multi_edit_applied(arguments: &str, targets: &[(String, bool)]) -> Vec<FileDiff> {
-    let args: MultiEditArgs = match parse(arguments) {
-        Ok(args) => args,
-        Err(_) => return Vec::new(),
-    };
-    let mut reversed: Vec<&MultiEditItem> = args.edits.iter().rev().collect();
-    let mut diffs = Vec::new();
-    for (path, existed) in targets {
-        let after = match fs::read_to_string(resolve(path)) {
-            Ok(after) => after,
-            Err(_) => continue,
-        };
-        let mut before = after.clone();
-        reversed.retain(|edit| {
-            if edit.path == *path {
-                if let Some((text, _)) =
-                    apply_text_edit(&before, &edit.new_text, &edit.old_text, edit.replace_all)
-                {
-                    before = text;
-                }
-                false
-            } else {
-                true
-            }
-        });
-        if before == after {
-            continue;
-        }
-        diffs.push(FileDiff::new(path.as_str(), &before, &after, !*existed));
-    }
-    diffs
-}
-
-pub fn change_preview(call: &ToolCall) -> ChangePreview {
-    match call.function.name.as_str() {
-        "write_file" => write_file_preview(&call.function.arguments),
-        "edit_file" => edit_file_preview(&call.function.arguments),
-        "multi_edit" => multi_edit_preview(&call.function.arguments),
-        _ => ChangePreview {
-            diffs: Vec::new(),
-            before: None,
-            note: None,
-        },
-    }
-}
-
-/// Every file a write, edit or multi_edit touches, with whether each existed
-/// before the call, so per-file diffs can be recovered after the batch runs.
-pub fn edit_targets(call: &ToolCall) -> Vec<(String, bool)> {
-    let arguments = match serde_json::from_str::<Value>(&call.function.arguments) {
-        Ok(arguments) => arguments,
-        Err(_) => return Vec::new(),
-    };
-    let mut targets: Vec<(String, bool)> = Vec::new();
-    let seen = |path: &str, targets: &mut Vec<(String, bool)>| {
-        if path.is_empty() || targets.iter().any(|(tracked, _)| tracked == path) {
-            return;
-        }
-        let existed = resolve(path).exists();
-        targets.push((path.to_owned(), existed));
-    };
-    if let Some(path) = arguments.get("path").and_then(Value::as_str) {
-        seen(path, &mut targets);
-    }
-    if let Some(edits) = arguments.get("edits").and_then(Value::as_array) {
-        for edit in edits {
-            if let Some(path) = edit.get("path").and_then(Value::as_str) {
-                seen(path, &mut targets);
-            }
-        }
-    }
-    targets
-}
-
 fn write_file_preview(arguments: &str) -> ChangePreview {
-    let args: WriteFileArgs = match parse(arguments) {
+    let args: files::WriteFileArgs = match parse(arguments) {
         Ok(args) => args,
         Err(error) => return preview_error(error),
     };
-    let WriteFileArgs { path, content } = args;
+    let files::WriteFileArgs { path, content } = args;
     let resolved = resolve(&path);
     let exists = resolved.exists();
     let before = match read_preview(&resolved, &path) {
@@ -749,11 +717,11 @@ fn write_file_preview(arguments: &str) -> ChangePreview {
 }
 
 fn edit_file_preview(arguments: &str) -> ChangePreview {
-    let args: EditFileArgs = match parse(arguments) {
+    let args: files::EditFileArgs = match parse(arguments) {
         Ok(args) => args,
         Err(error) => return preview_error(error),
     };
-    let EditFileArgs {
+    let files::EditFileArgs {
         path,
         old_text,
         new_text,
@@ -767,7 +735,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
     let attempted = if old_text.is_empty() {
         None
     } else {
-        apply_text_edit(&before, &old_text, &new_text, replace_all)
+        files::apply_text_edit(&before, &old_text, &new_text, replace_all)
     };
     let matches = attempted.as_ref().map_or(0, |(_, count)| *count);
     let note = if old_text.is_empty() {
@@ -821,20 +789,20 @@ fn read_preview(path: &Path, display: &str) -> Result<String> {
 
 pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
-        "list_dir" => list_dir(&call.function.arguments),
-        "read_file" => read_file(&call.function.arguments),
-        "glob" => glob(&call.function.arguments),
-        "grep" => grep(&call.function.arguments),
-        "write_file" => write_file(&call.function.arguments),
-        "edit_file" => edit_file(&call.function.arguments),
-        "multi_edit" => multi_edit(&call.function.arguments),
-        "run_command" => run_command(&call.function.arguments),
-        "bash_background" => bash_background(&call.function.arguments),
-        "bash_output" => bash_output(&call.function.arguments),
-        "bash_kill" => bash_kill(&call.function.arguments),
-        "web_search" => web_search(&call.function.arguments, web_key),
-        "web_fetch" => web_fetch(&call.function.arguments),
-        "todo_write" => todo_write(&call.function.arguments),
+        "list_dir" => files::list_dir(&call.function.arguments),
+        "read_file" => files::read_file(&call.function.arguments),
+        "glob" => search::glob(&call.function.arguments),
+        "grep" => search::grep(&call.function.arguments),
+        "write_file" => files::write_file(&call.function.arguments),
+        "edit_file" => files::edit_file(&call.function.arguments),
+        "multi_edit" => files::multi_edit(&call.function.arguments),
+        "run_command" => shell::run_command(&call.function.arguments),
+        "bash_background" => shell::bash_background(&call.function.arguments),
+        "bash_output" => shell::bash_output(&call.function.arguments),
+        "bash_kill" => shell::bash_kill(&call.function.arguments),
+        "web_search" => web::web_search(&call.function.arguments, web_key),
+        "web_fetch" => web::web_fetch(&call.function.arguments),
+        "todo_write" => todo::todo_write(&call.function.arguments),
         // Handled by the session loop: the subagent needs the backend.
         "delegate" => bail!("delegate cannot run outside the session loop"),
         other => bail!("unknown tool `{other}`"),
@@ -852,1229 +820,6 @@ pub fn delegate_task(call: &ToolCall) -> Option<String> {
                 .map(str::to_owned)
                 .filter(|task| !task.trim().is_empty())
         })
-}
-
-#[derive(Deserialize)]
-struct ListDirArgs {
-    #[serde(default)]
-    path: Option<String>,
-}
-
-fn list_dir(arguments: &str) -> Result<String> {
-    let args: ListDirArgs = parse(arguments)?;
-    let requested = args.path.as_deref().unwrap_or(".").trim();
-    let requested = if requested.is_empty() { "." } else { requested };
-    directory_listing(requested)
-}
-
-/// The listing shared by `list_dir` and `read_file` on a directory: reading
-/// `.` is the fastest way to see the workspace layout.
-fn directory_listing(requested: &str) -> Result<String> {
-    let directory = resolve(requested);
-    if !directory.is_dir() {
-        bail!("{requested} is not a directory");
-    }
-    let mut entries = fs::read_dir(&directory)
-        .with_context(|| format!("listing {requested}"))?
-        .filter_map(|entry| entry.ok())
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| {
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        (!is_dir, name)
-    });
-
-    let mut lines = Vec::new();
-    for entry in entries.iter().take(MAX_LIST_ENTRIES) {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        if is_dir {
-            lines.push(format!("{name}/"));
-        } else {
-            let size = entry.metadata().map_or(0, |meta| meta.len());
-            lines.push(format!("{name}  {size} B"));
-        }
-    }
-    if entries.len() > MAX_LIST_ENTRIES {
-        lines.push(format!(
-            "… {} more entries",
-            entries.len() - MAX_LIST_ENTRIES
-        ));
-    }
-    if lines.is_empty() {
-        lines.push("(empty)".to_owned());
-    }
-    Ok(truncate_output(format!(
-        "{requested}/\n{}\n",
-        lines.join("\n")
-    )))
-}
-
-#[derive(Deserialize)]
-struct ReadFileArgs {
-    path: String,
-    #[serde(default)]
-    start_line: Option<usize>,
-    #[serde(default)]
-    limit: Option<usize>,
-}fn read_file(arguments: &str) -> Result<String> {
-    let args: ReadFileArgs = parse(arguments)?;
-    let path = resolve(&args.path);
-    let metadata = fs::metadata(&path).with_context(|| format!("reading {}", args.path))?;
-    if metadata.is_dir() {
-        if args.start_line.is_some() || args.limit.is_some() {
-            bail!("{} is a directory; line ranges only apply to files", args.path);
-        }
-        let requested = args.path.trim();
-        return directory_listing(if requested.is_empty() { "." } else { requested });
-    }
-    if !metadata.is_file() {
-        bail!("{} is not a file", args.path);
-    }
-    if metadata.len() > MAX_READ_BYTES {
-        bail!(
-            "{} is too large ({} bytes; the limit is {MAX_READ_BYTES})",
-            args.path,
-            metadata.len()
-        );
-    }
-    let source = fs::read_to_string(&path).with_context(|| format!("reading {}", args.path))?;
-    let lines = source.lines().collect::<Vec<_>>();
-    let total = lines.len();
-    let start = args.start_line.unwrap_or(1).max(1);
-    let limit = args
-        .limit
-        .unwrap_or(MAX_READ_LINES)
-        .clamp(1, MAX_READ_LINE_LIMIT);
-    if start > total && total > 0 {
-        bail!(
-            "start_line {start} is past the end of {} ({total} lines)",
-            args.path
-        );
-    }
-    let end = start.saturating_sub(1).saturating_add(limit).min(total);
-    let mut output = format!("{} ({total} lines)\n", args.path);
-    if start > 1 || end < total {
-        output.push_str(&format!("lines {start}-{end} of {total}\n"));
-    }
-    for line in &lines[start.saturating_sub(1)..end] {
-        output.push_str(line);
-        output.push('\n');
-    }
-    Ok(truncate_output(output))
-}
-
-#[derive(Deserialize)]
-struct GlobArgs {
-    pattern: String,
-    #[serde(default)]
-    path: Option<String>,
-}
-
-/// Directories the walkers never enter, so caches and dependencies stay out.
-const SKIP_DIRS: [&str; 5] = [".git", "target", "node_modules", "__pycache__", ".pytest_cache"];
-const MAX_GLOB_ENTRIES: usize = 500;
-const MAX_WALKED_ENTRIES: usize = 20_000;
-const MAX_WALK_DEPTH: usize = 32;
-
-fn glob(arguments: &str) -> Result<String> {
-    let args: GlobArgs = parse(arguments)?;
-    let pattern = args.pattern.trim().replace('\\', "/");
-    let segments = pattern
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        bail!("pattern cannot be empty");
-    }
-    if Path::new(&segments[0]).is_absolute() {
-        bail!("patterns are relative to the working directory");
-    }
-    let requested = args.path.as_deref().unwrap_or(".").trim();
-    let requested = if requested.is_empty() { "." } else { requested };
-    let root = resolve(requested);
-    if !root.is_dir() {
-        bail!("{requested} is not a directory");
-    }
-    let mut matches = Vec::new();
-    let mut walked = 0usize;
-    walk_glob(&root, &String::new(), &segments, &mut matches, &mut walked)?;
-    matches.sort();
-    matches.dedup();
-    let mut output = format!("{pattern} ({} matches)\n", matches.len());
-    if matches.len() > MAX_GLOB_ENTRIES {
-        output.push_str("… truncated\n");
-        matches.truncate(MAX_GLOB_ENTRIES);
-    }
-    output.push_str(&matches.join("\n"));
-    if matches.is_empty() {
-        output.push_str("(no matches)");
-    }
-    Ok(truncate_output(output))
-}
-
-fn walk_glob(
-    directory: &Path,
-    display: &str,
-    segments: &[String],
-    matches: &mut Vec<String>,
-    walked: &mut usize,
-) -> Result<()> {
-    if matches.len() >= MAX_GLOB_ENTRIES || display.matches('/').count() >= MAX_WALK_DEPTH {
-        return Ok(());
-    }
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        // An unreadable directory never stops the walk.
-        Err(_) => return Ok(()),
-    };
-    let mut names: Vec<(String, bool)> = Vec::new();
-    for entry in entries.flatten() {
-        *walked += 1;
-        if *walked > MAX_WALKED_ENTRIES {
-            bail!("search stopped after {MAX_WALKED_ENTRIES} entries; use a narrower pattern");
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        names.push((name, is_dir));
-    }
-    for (name, is_dir) in names {
-        let path = if display.is_empty() {
-            name.clone()
-        } else {
-            format!("{display}/{name}")
-        };
-        if match_path(&segments, &path) {
-            matches.push(path.clone());
-        }
-        if is_dir && !SKIP_DIRS.contains(&name.as_str()) {
-            walk_glob(&directory.join(&name), &path, segments, matches, walked)?;
-        }
-    }
-    Ok(())
-}
-
-/// Whether a full relative path matches glob `segments`, joining on `/` with
-/// `*` (one segment, any characters), `?` (one character), and `**`.
-fn match_path(segments: &[String], path: &str) -> bool {
-    let path_segments: Vec<String> = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_owned)
-        .collect();
-    glob_matches(segments, &path_segments)
-}
-
-fn glob_matches(segments: &[String], path: &[String]) -> bool {
-    let Some(head) = segments.first() else {
-        return path.is_empty();
-    };
-    if head == "**" {
-        return (0..=path.len()).any(|skip| glob_matches(&segments[1..], &path[skip..]));
-    }
-    match path.split_first() {
-        Some((name, rest)) => {
-            glob_segment(&head.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
-                && glob_matches(&segments[1..], rest)
-        }
-        None => false,
-    }
-}
-
-/// One path segment: `*`, `?`, and literals, case-insensitive like paths on
-/// Windows.
-fn glob_segment(pattern: &[char], text: &[char]) -> bool {
-    let Some((&head, rest)) = pattern.split_first() else {
-        return text.is_empty();
-    };
-    if head == '*' {
-        if glob_segment(rest, text) {
-            return true;
-        }
-        return text
-            .iter()
-            .enumerate()
-            .any(|(index, _)| glob_segment(rest, &text[index + 1..]));
-    }
-    if head == '?' {
-        return match text.split_first() {
-            Some((_, rest_text)) => glob_segment(rest, rest_text),
-            None => false,
-        };
-    }
-    match text.split_first() {
-        Some((character, rest_text)) => {
-            character.to_ascii_lowercase() == head.to_ascii_lowercase()
-                && glob_segment(rest, rest_text)
-        }
-        None => false,
-    }
-}
-
-#[derive(Deserialize)]
-struct GrepArgs {
-    pattern: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    include: Option<String>,
-    #[serde(default)]
-    ignore_case: bool,
-}
-
-const MAX_GREP_MATCHES: usize = 80;
-const MAX_GREP_FILE_BYTES: u64 = 1024 * 1024;
-const MAX_GREP_LINE_CHARS: usize = 200;
-
-/// Substring search over text files under a directory, with a glob `include`
-/// filter for file types. Binary files and dependencies are skipped.
-fn grep(arguments: &str) -> Result<String> {
-    let args: GrepArgs = parse(arguments)?;
-    let pattern = args.pattern.trim();
-    if pattern.is_empty() {
-        bail!("pattern cannot be empty");
-    }
-    let requested = args.path.as_deref().unwrap_or(".").trim();
-    let requested = if requested.is_empty() { "." } else { requested };
-    let root = resolve(requested);
-    if !root.is_dir() {
-        bail!("{requested} is not a directory");
-    }
-    let include = args.include.filter(|include| !include.trim().is_empty()).map(|include| {
-        include
-            .trim()
-            .replace('\\', "/")
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<String>>()
-    });
-    let needle = if args.ignore_case {
-        pattern.to_ascii_lowercase()
-    } else {
-        pattern.to_owned()
-    };
-    let display = if requested == "." {
-        String::new()
-    } else {
-        requested.trim_end_matches('/').replace('\\', "/")
-    };
-    let mut matches = Vec::new();
-    let mut walked = 0usize;
-    let include_segments = include.as_deref();
-    walk_grep(
-        &root,
-        &display,
-        &needle,
-        args.ignore_case,
-        include_segments,
-        &mut matches,
-        &mut walked,
-    )?;
-    if matches.is_empty() {
-        return Ok(format!("{pattern}\n(no matches)"));
-    }
-    let mut output = format!("{pattern} ({} matches)\n", matches.len().min(MAX_GREP_MATCHES));
-    output.push_str(&matches.join("\n"));
-    if matches.len() >= MAX_GREP_MATCHES {
-        output.push_str("\n… more matches truncated");
-    }
-    Ok(truncate_output(output))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_grep(
-    directory: &Path,
-    display: &str,
-    needle: &str,
-    ignore_case: bool,
-    include: Option<&[String]>,
-    matches: &mut Vec<String>,
-    walked: &mut usize,
-) -> Result<()> {
-    if matches.len() >= MAX_GREP_MATCHES || display.matches('/').count() >= MAX_WALK_DEPTH {
-        return Ok(());
-    }
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
-    let mut names: Vec<(String, bool)> = Vec::new();
-    for entry in entries.flatten() {
-        *walked += 1;
-        if *walked > MAX_WALKED_ENTRIES {
-            bail!("search stopped after {MAX_WALKED_ENTRIES} entries; use a narrower path");
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        names.push((name, is_dir));
-    }
-    for (name, is_dir) in names {
-        let path = if display.is_empty() {
-            name.clone()
-        } else {
-            format!("{display}/{name}")
-        };
-        if is_dir {
-            if !SKIP_DIRS.contains(&name.as_str()) {
-                walk_grep(
-                    &directory.join(&name),
-                    &path,
-                    needle,
-                    ignore_case,
-                    include,
-                    matches,
-                    walked,
-                )?;
-            }
-            continue;
-        }
-        if !include_accepts(include, &name, &path) {
-            continue;
-        }
-        let metadata = match fs::metadata(directory.join(&name)) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if metadata.len() > MAX_GREP_FILE_BYTES {
-            continue;
-        }
-        let bytes = match fs::read(directory.join(&name)) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        if bytes.contains(&0) {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        for (line_index, line) in text.lines().enumerate() {
-            let hit = if ignore_case {
-                line.to_ascii_lowercase().contains(needle)
-            } else {
-                line.contains(needle)
-            };
-            if hit {
-                matches.push(format!(
-                    "{path}:{}: {}",
-                    line_index + 1,
-                    clip(line, MAX_GREP_LINE_CHARS)
-                ));
-                if matches.len() >= MAX_GREP_MATCHES {
-                    break;
-                }
-            }
-        }
-        if matches.len() >= MAX_GREP_MATCHES {
-            break;
-        }
-    }
-    Ok(())
-}
-
-/// Whether the include glob accepts the file: one segment matches the file
-/// name, several match the joined path.
-fn include_accepts(include: Option<&[String]>, file_name: &str, path: &str) -> bool {
-    let Some(segments) = include else {
-        return true;
-    };
-    if segments.len() == 1 {
-        return glob_segment(
-            &segments[0].chars().collect::<Vec<_>>(),
-            &file_name.chars().collect::<Vec<_>>(),
-        );
-    }
-    match_path(segments, path)
-}
-
-#[derive(Deserialize)]
-struct WriteFileArgs {
-    path: String,
-    content: String,
-}
-
-fn write_file(arguments: &str) -> Result<String> {
-    let args: WriteFileArgs = parse(arguments)?;
-    if args.content.len() > MAX_WRITE_BYTES {
-        bail!(
-            "content is too large ({} bytes; the limit is {MAX_WRITE_BYTES})",
-            args.content.len()
-        );
-    }
-    let path = resolve(&args.path);
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(&path, args.content.as_bytes()).with_context(|| format!("writing {}", args.path))?;
-    Ok(format!(
-        "Wrote {} bytes to {}.",
-        args.content.len(),
-        args.path
-    ))
-}
-
-#[derive(Deserialize)]
-struct EditFileArgs {
-    path: String,
-    old_text: String,
-    new_text: String,
-    #[serde(default)]
-    replace_all: bool,
-}
-
-fn edit_file(arguments: &str) -> Result<String> {
-    let args: EditFileArgs = parse(arguments)?;
-    if args.old_text.is_empty() {
-        bail!("old_text cannot be empty");
-    }
-    let path = resolve(&args.path);
-    let source = fs::read_to_string(&path).with_context(|| format!("reading {}", args.path))?;
-    let Some((updated, matches)) =
-        apply_text_edit(&source, &args.old_text, &args.new_text, args.replace_all)
-    else {
-        bail!("old_text was not found in {}", args.path);
-    };
-    if matches > 1 && !args.replace_all {
-        bail!(
-            "old_text matches {matches} times in {}; add more context or set replace_all to true",
-            args.path
-        );
-    }
-    fs::write(&path, updated.as_bytes()).with_context(|| format!("writing {}", args.path))?;
-    let replaced = if args.replace_all { matches } else { 1 };
-    Ok(format!(
-        "Replaced {replaced} occurrence{} in {}.",
-        if replaced == 1 { "" } else { "s" },
-        args.path
-    ))
-}
-
-/// How many `multi_edit` calls may be batched at once.
-const MAX_MULTI_EDITS: usize = 50;
-
-#[derive(Deserialize)]
-struct MultiEditItem {
-    path: String,
-    old_text: String,
-    new_text: String,
-    #[serde(default)]
-    replace_all: bool,
-}
-
-#[derive(Deserialize)]
-struct MultiEditArgs {
-    edits: Vec<MultiEditItem>,
-}
-
-fn multi_edit(arguments: &str) -> Result<String> {
-    let updates = multi_edit_replay(arguments)?;
-    for (path, _, after) in &updates {
-        fs::write(resolve(path), after.as_bytes()).with_context(|| format!("writing {path}"))?;
-    }
-    let edits = updates.len();
-    let files = updates
-        .iter()
-        .map(|(path, ..)| path)
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-    Ok(format!(
-        "Applied {edits} edit{} across {files} file{}.",
-        if edits == 1 { "" } else { "s" },
-        if files == 1 { "" } else { "s" },
-    ))
-}
-
-/// Validate and replay every edit against in-memory copies of the files: the
-/// whole batch is refused up front, so no file is touched on a failure.
-/// Returns `(path, contents before the batch, contents after)` per file.
-fn multi_edit_replay(arguments: &str) -> Result<Vec<(String, String, String)>> {
-    let args: MultiEditArgs = parse(arguments)?;
-    if args.edits.len() > MAX_MULTI_EDITS {
-        bail!(
-            "too many edits ({}; the limit is {MAX_MULTI_EDITS})",
-            args.edits.len()
-        );
-    }
-    if args.edits.iter().map(|edit| edit.new_text.len()).sum::<usize>() > MAX_WRITE_BYTES {
-        bail!("combined new_text is too large (the limit is {MAX_WRITE_BYTES} bytes)");
-    }
-    let mut order: Vec<String> = Vec::new();
-    let mut originals: HashMap<String, String> = HashMap::new();
-    let mut sources: HashMap<String, String> = HashMap::new();
-    for edit in &args.edits {
-        if edit.old_text.is_empty() {
-            bail!("{}: old_text cannot be empty", edit.path);
-        }
-        if !sources.contains_key(&edit.path) {
-            let source = fs::read_to_string(resolve(&edit.path)).with_context(|| {
-                format!("reading {}; multi_edit only edits existing files", edit.path)
-            })?;
-            order.push(edit.path.clone());
-            originals.insert(edit.path.clone(), source.clone());
-            sources.insert(edit.path.clone(), source);
-        }
-        let updated = replace_one(&sources[&edit.path], edit)?;
-        sources.insert(edit.path.clone(), updated);
-    }
-    Ok(order
-        .into_iter()
-        .map(|path| {
-            let before = originals.remove(&path).unwrap_or_default();
-            let after = sources.remove(&path).unwrap_or_default();
-            (path, before, after)
-        })
-        .collect())
-}
-
-/// Apply one edit to a string with the same rules as `edit_file`.
-fn replace_one(source: &str, edit: &MultiEditItem) -> Result<String> {
-    let Some((updated, matches)) =
-        apply_text_edit(source, &edit.old_text, &edit.new_text, edit.replace_all)
-    else {
-        bail!("old_text was not found in {}", edit.path);
-    };
-    if matches > 1 && !edit.replace_all {
-        bail!(
-            "old_text matches {matches} times in {}; add more context or set replace_all",
-            edit.path
-        );
-    }
-    Ok(updated)
-}
-
-/// Replacement that tolerates CRLF/LF differences between the caller's text
-/// and the file: both sides are compared after normalizing to LF, inserted
-/// text adopts the file's line endings, and only matched spans are rewritten
-/// so untouched lines keep their exact bytes.
-fn apply_text_edit(
-    source: &str,
-    old: &str,
-    new: &str,
-    replace_all: bool,
-) -> Option<(String, usize)> {
-    // Byte-exact text covers the matching-endings case with no extra work.
-    if source.contains(old) {
-        let matches = source.matches(old).count();
-        let updated = if replace_all {
-            source.replace(old, new)
-        } else {
-            source.replacen(old, new, 1)
-        };
-        return Some((updated, matches));
-    }
-    // Endings can only be why a multi-line needle misses.
-    if !old.contains('\n') {
-        return None;
-    }
-    let (flat_source, map, crlf) = {
-        let mut text = String::with_capacity(source.len());
-        let mut map = Vec::with_capacity(source.len());
-        for (index, ch) in source.char_indices() {
-            // Windows text drops every '\r'; the '\n' below it stays, so CRLF
-            // reads as LF. map holds the original byte offset of every kept
-            // byte, so normalized byte ranges slice back into the source.
-            if ch == '\r' {
-                continue;
-            }
-            for _ in 0..ch.len_utf8() {
-                map.push(index);
-            }
-            text.push(ch);
-        }
-        (text, map, source.contains("\r\n"))
-    };
-    let flat_old = old.replace("\r\n", "\n").replace('\r', "\n");
-    if !flat_source.contains(&flat_old) {
-        return None;
-    }
-    let new_text = {
-        let flat_new = new.replace("\r\n", "\n").replace('\r', "\n");
-        if crlf {
-            flat_new.replace('\n', "\r\n")
-        } else {
-            flat_new
-        }
-    };
-    let mut updated = String::with_capacity(source.len());
-    let mut copied = 0;
-    let mut matches = 0;
-    for (at, matched) in flat_source.match_indices(&flat_old) {
-        let start = map[at];
-        let end = if at + matched.len() == map.len() {
-            source.len()
-        } else {
-            map[at + matched.len()]
-        };
-        updated.push_str(&source[copied..start]);
-        updated.push_str(&new_text);
-        copied = end;
-        matches += 1;
-        if !replace_all {
-            break;
-        }
-    }
-    updated.push_str(&source[copied..]);
-    Some((updated, matches))
-}
-
-fn multi_edit_preview(arguments: &str) -> ChangePreview {
-    let updates = match multi_edit_replay(arguments) {
-        Ok(updates) => updates,
-        Err(error) => return preview_error(error),
-    };
-    ChangePreview {
-        diffs: updates
-            .iter()
-            .map(|(path, before, after)| {
-                FileDiff::new(path.as_str(), before.as_str(), after.as_str(), false)
-            })
-            .collect(),
-        before: None,
-        note: None,
-    }
-}
-
-#[derive(Deserialize)]
-struct RunCommandArgs {
-    command: String,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-}
-
-fn run_command(arguments: &str) -> Result<String> {
-    let args: RunCommandArgs = parse(arguments)?;
-    let command = args.command.trim();
-    if command.is_empty() {
-        bail!("command cannot be empty");
-    }
-    let timeout = args
-        .timeout_seconds
-        .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
-        .clamp(1, MAX_TIMEOUT_SECONDS);
-
-    let log_path = temporary_log_path();
-    let file =
-        fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
-    let stderr = file
-        .try_clone()
-        .with_context(|| format!("opening {}", log_path.display()))?;
-
-    let mut process = shell_process(command);
-    process
-        .current_dir(workspace())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(stderr));
-
-    let mut child = process
-        .spawn()
-        .with_context(|| format!("running `{command}`"))?;
-    let started = Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().context("waiting for the command")? {
-            break Some(status);
-        }
-        if started.elapsed() >= Duration::from_secs(timeout) {
-            let _ = child.kill();
-            let _ = child.wait();
-            timed_out = true;
-            break None;
-        }
-        thread::sleep(Duration::from_millis(25));
-    };
-
-    let output = read_log(&log_path);
-    let _ = fs::remove_file(&log_path);
-    let mut result = String::new();
-    if timed_out {
-        result.push_str(&format!("Command timed out after {timeout}s.\n"));
-    } else if let Some(status) = status {
-        if !status.success() {
-            result.push_str(&format!("Exit code: {}.\n", status.code().unwrap_or(-1)));
-        }
-    }
-    if output.is_empty() {
-        result.push_str("(no output)");
-    } else {
-        result.push_str(&output);
-    }
-    Ok(truncate_output(result))
-}
-
-/// One background command: where it writes, when it started, and how to stop
-/// it. `exit` is set the first time its output is read after finishing.
-struct BashJob {
-    started: Instant,
-    timeout: u64,
-    log_path: PathBuf,
-    child: Option<ProcessChild>,
-    exit: Option<i32>,
-}
-
-const MAX_BASH_JOBS: usize = 16;
-static BASH_JOBS: OnceLock<Mutex<HashMap<u32, BashJob>>> = OnceLock::new();
-static JOB_SEQ: AtomicU32 = AtomicU32::new(1);
-
-fn bash_jobs() -> MutexGuard<'static, HashMap<u32, BashJob>> {
-    BASH_JOBS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// The cached bash executable. On Windows it arrives with Git for Windows;
-/// without it the shell tools refuse to run and `run_command` stays on cmd.
-static BASH_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-fn bash_path() -> Option<&'static PathBuf> {
-    BASH_PATH.get_or_init(detect_bash).as_ref()
-}
-
-fn detect_bash() -> Option<PathBuf> {
-    if !cfg!(windows) {
-        return Some(PathBuf::from("bash"));
-    }
-    let probe = ProcessCommand::new("where").arg("git").output().ok()?;
-    if !probe.status.success() {
-        return None;
-    }
-    let lossy = String::from_utf8_lossy(&probe.stdout);
-    let git = lossy.lines().next()?.trim();
-    // git.exe usually lives in …\cmd or …\bin; bash.exe in …\bin or …\usr\bin.
-    let root = PathBuf::from(git).parent()?.to_path_buf();
-    let step_up = root.parent().map(|root| root.join("bin").join("bash.exe"));
-    vec![
-        root.join("bash.exe"),
-        root.join("bin").join("bash.exe"),
-        root.join("usr").join("bin").join("bash.exe"),
-    ]
-    .into_iter()
-    .chain(step_up)
-    .find(|candidate| candidate.is_file())
-}
-
-/// The process wrapper every command runs through: git-bash when it is
-/// installed, otherwise the platform default. That is the graceful disable.
-fn shell_process(command: &str) -> ProcessCommand {
-    if let Some(bash) = bash_path() {
-        let mut process = ProcessCommand::new(bash);
-        process.args(["-lc", command]);
-        return process;
-    }
-    if cfg!(windows) {
-        let mut process = ProcessCommand::new("cmd");
-        process.args(["/C", command]);
-        process
-    } else {
-        let mut process = ProcessCommand::new("sh");
-        process.args(["-c", command]);
-        process
-    }
-}
-
-#[derive(Deserialize)]
-struct BashBackgroundArgs {
-    command: String,
-    #[serde(default)]
-    risk: bool,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct BashJobArgs {
-    job_id: u32,
-}
-
-fn bash_background(arguments: &str) -> Result<String> {
-    let Some(bash) = bash_path().cloned() else {
-        bail!(
-            "bash is not available on this machine; install Git for Windows and \
-             restart yopes to run background jobs"
-        );
-    };
-    let args: BashBackgroundArgs = parse(arguments)?;
-    let command = args.command.trim();
-    if command.is_empty() {
-        bail!("command cannot be empty");
-    }
-    let timeout = args
-        .timeout_seconds
-        .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
-        .clamp(1, MAX_TIMEOUT_SECONDS);
-    let mut jobs = bash_jobs();
-    // Finished jobs forget themselves on read, but those the model
-    // never reads again stay; drop them here so the cap cannot be
-    // exhausted by finished work.
-    jobs.retain(|_, job| job.child.is_some());
-    if jobs.len() >= MAX_BASH_JOBS {
-        bail!(
-            "too many bash jobs are waiting or running ({}, the limit is \
-             {MAX_BASH_JOBS}); read their output with bash_output first",
-            jobs.len()
-        );
-    }
-    let id = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
-    let log_path = temporary_log_path();
-    let file =
-        fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
-    let stderr = file
-        .try_clone()
-        .with_context(|| format!("opening {}", log_path.display()))?;
-    let mut process = ProcessCommand::new(bash);
-    process.args(["-lc", command]);
-    let child = process
-        .current_dir(workspace())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| format!("running `{command}`"))?;
-    jobs.insert(
-        id,
-        BashJob {
-            started: Instant::now(),
-            timeout,
-            log_path,
-            child: Some(child),
-            exit: None,
-        },
-    );
-    Ok(format!(
-        "Started bash job {id} (timeout {timeout}s). Call bash_output with job id {id} \
-         to read it, and bash_kill to stop it."
-    ))
-}
-
-fn bash_output(arguments: &str) -> Result<String> {
-    let args: BashJobArgs = parse(arguments)?;
-    let mut jobs = bash_jobs();
-    let Some(job) = jobs.get_mut(&args.job_id) else {
-        bail!("no bash job with id {}; it was never started or was already read", args.job_id);
-    };
-    // Ownership of the child moves through this block so the job can finish
-    // between calls; on kill and exit the child is consumed and dropped.
-    let mut held = job.child.take();
-    if let Some(child) = held.as_mut() {
-        match child.try_wait().context("waiting for the bash job")? {
-            Some(status) => {
-                job.exit = Some(status.code().unwrap_or(-1));
-                held = None;
-            }
-            None if job.started.elapsed() >= Duration::from_secs(job.timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                job.exit = Some(-1);
-                held = None;
-            }
-            None => {}
-        }
-    }
-    if job.exit.is_none() {
-        job.child = held;
-    }
-    let mut result = String::new();
-    match job.exit {
-        Some(exit) => result.push_str(&format!("Exit code: {exit}.\n")),
-        None => result.push_str("Still running.\n"),
-    }
-    let output = read_log(&job.log_path);
-    if output.is_empty() {
-        if job.child.is_some() {
-            result.push_str("(no output yet)");
-        } else {
-            result.push_str("(no output)");
-        }
-    } else {
-        result.push_str(&output);
-    }
-    // A job whose child is gone and whose exit was read frees its slot.
-    if job.exit.is_some() && job.child.is_none() {
-        jobs.remove(&args.job_id);
-    }
-    Ok(truncate_output(result))
-}
-
-fn bash_kill(arguments: &str) -> Result<String> {
-    let args: BashJobArgs = parse(arguments)?;
-    let mut jobs = bash_jobs();
-    let Some(job) = jobs.get_mut(&args.job_id) else {
-        bail!("no bash job with id {}; it was never started or was already read", args.job_id);
-    };
-    let Some(child) = job.child.as_mut() else {
-        return Ok(format!("Bash job {} already finished.", args.job_id));
-    };
-    let _ = child.kill();
-    let _ = child.wait();
-    job.child = None;
-    job.exit = Some(-1);
-    Ok(format!("Killed bash job {}. It reported no exit code.", args.job_id))
-}
-
-#[derive(Deserialize)]
-struct WebSearchArgs {
-    query: String,
-    #[serde(default)]
-    max_results: Option<usize>,
-}
-
-const TAVILY_SEARCH_URL: &str = "https://api.tavily.com/search";
-const MAX_WEB_RESULTS: usize = 10;
-
-/// Search the web with Tavily and format the top results.
-///
-/// Uses a blocking HTTP client because tool execution runs on
-/// `spawn_blocking`, not on the async runtime.
-fn web_search(arguments: &str, api_key: Option<&str>) -> Result<String> {
-    let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
-        bail!(
-            "web search is not configured; add tavily_api_key to the config or set \
-             TAVILY_API_KEY, then restart yopes"
-        );
-    };
-    let args: WebSearchArgs = parse(arguments)?;
-    let query = args.query.trim();
-    if query.is_empty() {
-        bail!("query cannot be empty");
-    }
-    let max_results = args.max_results.unwrap_or(5).clamp(1, MAX_WEB_RESULTS);
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("creating the search client")?;
-    let response = client
-        .post(TAVILY_SEARCH_URL)
-        .bearer_auth(api_key)
-        .json(&json!({ "query": query, "max_results": max_results }))
-        .send()
-        .context("contacting Tavily")?;
-    let status = response.status();
-    let body: Value = response.json().context("reading the Tavily response")?;
-    if !status.is_success() {
-        let message = body
-            .get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("no detail");
-        bail!("Tavily returned {status}: {message}");
-    }
-    let results = body
-        .get("results")
-        .and_then(Value::as_array)
-        .context("the Tavily response has no results")?;
-    if results.is_empty() {
-        return Ok(format!("{query}\n(no results)"));
-    }
-    let mut output = format!("{query}\n");
-    for (index, result) in results.iter().enumerate() {
-        let title = result
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("(untitled)");
-        let url = result
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let snippet = result
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        output.push_str(&format!(
-            "\n{}. {title}\n{url}\n{}\n",
-            index + 1,
-            snippet.trim()
-        ));
-    }
-    Ok(truncate_output(output))
-}
-
-/// How many bytes one `web_fetch` may pull.
-const MAX_FETCH_BYTES: usize = 1_000_000;
-
-#[derive(Deserialize)]
-struct WebFetchArgs {
-    url: String,
-}
-
-/// Fetch one page over HTTP GET and return its text: scripts, styles and
-/// tags are gone, whitespace is squeezed to lines. Blocking, because tool
-/// execution runs on `spawn_blocking`.
-fn web_fetch(arguments: &str) -> Result<String> {
-    let args: WebFetchArgs = parse(arguments)?;
-    let url = args.url.trim();
-    if url.is_empty() {
-        bail!("url cannot be empty");
-    }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        bail!("url must start with http:// or https://");
-    }
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("creating the fetch client")?;
-    let response = client
-        .get(url)
-        .header(
-            "user-agent",
-            format!("yopes/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .with_context(|| format!("fetching {url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        bail!("the server returned {status} for {url}");
-    }
-    let mut body_bytes = Vec::new();
-    response
-        .take((MAX_FETCH_BYTES + 1) as u64)
-        .read_to_end(&mut body_bytes)
-        .context("reading the response body")?;
-    let body = String::from_utf8_lossy(&body_bytes);
-    Ok(truncate_output(strip_html(&body)))
-}
-
-/// The page's text: `<script>` and `<style>` bodies dropped wholesale, all
-/// other tags replaced by a space, the usual entities decoded, blank runs
-/// collapsed. Good enough to read, deliberately not a browser engine.
-fn strip_html(body: &str) -> String {
-    let body = drop_block(body, "script");
-    let body = drop_block(&body, "style");
-    let mut text = String::with_capacity(body.len());
-    let mut at = 0;
-    while at < body.len() {
-        match body[at..].find('<') {
-            None => {
-                text.push_str(&body[at..]);
-                break;
-            }
-            Some(open_rel) => {
-                let open = at + open_rel;
-                text.push_str(&body[at..open]);
-                let Some(close_rel) = body[open..].find('>') else {
-                    break;
-                };
-                // Tags often sit between words; a space keeps them separate.
-                text.push(' ');
-                at = open + close_rel + 1;
-            }
-        }
-    }
-    let text = decode_entities(&text);
-    let mut clean = String::new();
-    let mut blanks = 0;
-    for line in text.lines() {
-        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        blanks = if line.is_empty() { blanks + 1 } else { 0 };
-        if blanks <= 1 {
-            clean.push_str(&line);
-            clean.push('\n');
-        }
-    }
-    clean.trim_end().to_owned()
-}
-
-/// Drop `<tag …>…</tag>` blocks: real pages nest scripts and styles everywhere
-/// and their bodies are noise, not content.
-fn drop_block(body: &str, tag: &str) -> String {
-    let open_marker = format!("<{tag}");
-    let close_marker = format!("</{tag}");
-    let mut text = body.to_owned();
-    loop {
-        let lower = text.to_ascii_lowercase();
-        let Some(start) = find_tag(&lower, &open_marker) else {
-            return text;
-        };
-        let Some(close) = find_tag(&lower[start..], &close_marker).map(|rel| start + rel) else {
-            // An unterminated block swallows everything after it.
-            text.truncate(start);
-            return text;
-        };
-        let end = close
-            + close_marker.len()
-            + lower[close + close_marker.len()..]
-                .find('>')
-                .map_or(0, |rel| rel + 1);
-        let mut combined = String::with_capacity(text.len());
-        combined.push_str(&text[..start]);
-        combined.push(' ');
-        combined.push_str(&text[end..]);
-        text = combined;
-    }
-}
-
-/// The offset of `<name` where the next character really opens an element:
-/// `>`, `/` or whitespace, so `<scripts>` is never mistaken for `<script>`.
-fn find_tag(hay: &str, marker: &str) -> Option<usize> {
-    let mut at = 0;
-    while let Some(rel) = hay[at..].find(marker) {
-        let start = at + rel;
-        at = start + marker.len();
-        match hay[at..].chars().next() {
-            Some('>') | Some('/') => return Some(start),
-            Some(c) if c.is_ascii_whitespace() => return Some(start),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn decode_entities(text: &str) -> String {
-    if !text.contains('&') {
-        return text.to_owned();
-    }
-    // `&amp;` last, so encoded entities stay encoded.
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-}
-
-#[derive(Deserialize)]
-struct TodoItemArgs {
-    text: String,
-    #[serde(default)]
-    done: bool,
-}
-
-#[derive(Deserialize)]
-struct TodoWriteArgs {
-    items: Vec<TodoItemArgs>,
-}
-
-const MAX_TODO_ITEMS: usize = 100;
-const MAX_TODO_TEXT: usize = 500;
-
-/// Validate the checklist and return it as JSON: the app keeps the tasks in
-/// the session, so the list never needs a workspace file.
-///
-/// The model owns the list content: it sends the whole list every time, so
-/// the stored checklist is always what the model believes. An empty list is
-/// a deliberate close of the finished checklist, not a spill.
-fn todo_write(arguments: &str) -> Result<String> {
-    let args: TodoWriteArgs = parse(arguments)?;
-    if args.items.len() > MAX_TODO_ITEMS {
-        bail!("too many items; the checklist is capped at {MAX_TODO_ITEMS}");
-    }
-    let items = args
-        .items
-        .iter()
-        .map(|item| {
-            let text = clip(item.text.trim(), MAX_TODO_TEXT);
-            if text.is_empty() {
-                bail!("item text cannot be empty");
-            }
-            Ok(json!({ "text": text, "done": item.done }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(json!(items).to_string())
 }
 
 fn workspace() -> PathBuf {
@@ -2145,6 +890,7 @@ fn read_log(path: &Path) -> String {
 mod tests {
     use super::{TOOL_NAMES, applied_change, definitions, preview, requires_approval};
     use crate::session::ToolCall;
+    use serde_json::json;
 
     #[test]
     fn definitions_cover_every_tool() {
@@ -2195,8 +941,16 @@ mod tests {
             "write_file",
             r#"{"path":"new.txt","content":"hello"}"#,
         );
-        assert!(applied_change(&call, Some(String::new()), false).unwrap().created);
-        assert!(!applied_change(&call, Some("old".to_owned()), true).unwrap().created);
+        assert!(
+            applied_change(&call, Some(String::new()), false)
+                .unwrap()
+                .created
+        );
+        assert!(
+            !applied_change(&call, Some("old".to_owned()), true)
+                .unwrap()
+                .created
+        );
     }
 
     #[test]
@@ -2212,26 +966,36 @@ mod tests {
         let b = dir.join("b.txt").display().to_string();
         let batch = json!({
             "edits": [
-                { "path": a, "old_text": "alpha", "new_text": "A" },
+                { "path": a, "old_text": "alpha", "new_text": "A", "replace_all": true },
                 { "path": a, "old_text": "beta", "new_text": "B", "replace_all": true },
                 { "path": b, "old_text": "one", "new_text": "uno" },
             ]
         });
-        let output = execute(&ToolCall::new("call_20", "multi_edit", &batch.to_string()), None).unwrap();
-        assert!(output.contains("Applied 3 edits across 2 files"), "{output}");
+        let output = execute(
+            &ToolCall::new("call_20", "multi_edit", batch.to_string()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            output.contains("Applied 3 edits across 2 files"),
+            "{output}"
+        );
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "A\nB\nA\n");
         assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "uno\n");
 
         // A bad edit refuses the whole batch and leaves every file untouched.
         let broken = json!({
             "edits": [
-                { "path": a, "old_text": "A", "new_text": "X" },
+                { "path": a, "old_text": "A", "new_text": "X", "replace_all": true },
                 { "path": b, "old_text": "absent", "new_text": "?" },
             ]
         });
-        let error = execute(&ToolCall::new("call_21", "multi_edit", &broken.to_string()), None)
-            .unwrap_err()
-            .to_string();
+        let error = execute(
+            &ToolCall::new("call_21", "multi_edit", broken.to_string()),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("was not found"), "{error}");
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "A\nB\nA\n");
         assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "uno\n");
@@ -2261,8 +1025,11 @@ mod tests {
             "old_text": "beta = 2\n",
             "new_text": "beta = 20\n",
         });
-        let output =
-            execute(&ToolCall::new("call_23", "edit_file", &single.to_string()), None).unwrap();
+        let output = execute(
+            &ToolCall::new("call_23", "edit_file", single.to_string()),
+            None,
+        )
+        .unwrap();
         assert!(output.contains("Replaced 1 occurrence"), "{output}");
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -2276,7 +1043,11 @@ mod tests {
             "new_text": "gamma = 3\n",
             "replace_all": true,
         });
-        execute(&ToolCall::new("call_24", "edit_file", &all.to_string()), None).unwrap();
+        execute(
+            &ToolCall::new("call_24", "edit_file", all.to_string()),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "gamma = 3\r\nbeta = 20\r\ngamma = 3\r\n"
@@ -2299,7 +1070,7 @@ mod tests {
                 { "path": dir.join("m.txt").display().to_string(), "old_text": "cc", "new_text": "dd" },
             ]
         });
-        let call = ToolCall::new("call_23", "multi_edit", &args.to_string());
+        let call = ToolCall::new("call_23", "multi_edit", args.to_string());
         let change = change_preview(&call);
         assert_eq!(change.diffs.len(), 2);
         assert!(change.before.is_none());
@@ -2312,8 +1083,9 @@ mod tests {
 
     #[test]
     fn bash_background_output_and_kill_handle_the_lifecycle() {
+        use super::execute;
+        use super::shell::bash_path;
         use std::{thread, time::Duration};
-        use super::{bash_path, execute};
         if bash_path().is_none() {
             // No bash on this machine yet; the tools refuse gracefully.
             let error = execute(
@@ -2398,7 +1170,8 @@ mod tests {
 
     #[test]
     fn web_fetch_guards_urls_and_strips_the_page_noise() {
-        use super::{execute, strip_html};
+        use super::execute;
+        use super::web::strip_html;
         let empty = ToolCall::new("call_30", "web_fetch", r#"{"url":"  "}"#);
         let error = execute(&empty, None).unwrap_err().to_string();
         assert!(error.contains("url"), "{error}");
@@ -2421,7 +1194,7 @@ mod tests {
 
     #[test]
     fn glob_segments_match_one_directory_level_only() {
-        use super::{glob_matches, glob_segment};
+        use super::search::{glob_matches, glob_segment};
         let segment = |pattern: &str, text: &str| {
             glob_segment(
                 &pattern.chars().collect::<Vec<_>>(),
@@ -2477,19 +1250,19 @@ mod tests {
                 dir.display().to_string()
             )
         };
-        let all = ToolCall::new("call_10", "glob", &args("**/*.md"));
+        let all = ToolCall::new("call_10", "glob", args("**/*.md"));
         let output = execute(&all, None).unwrap();
         assert!(output.contains("README.md"), "{output}");
         assert!(output.contains("sub/note.md"), "{output}");
         assert!(output.contains("sub/deep/last.md"), "{output}");
         assert!(!output.contains("target"), "{output}");
 
-        let shallow = ToolCall::new("call_11", "glob", &args("*.md"));
+        let shallow = ToolCall::new("call_11", "glob", args("*.md"));
         let output = execute(&shallow, None).unwrap();
         assert!(output.contains("README.md"));
         assert!(!output.contains("note.md"), "{output}");
 
-        let missing = ToolCall::new("call_12", "glob", &args("*.toml"));
+        let missing = ToolCall::new("call_12", "glob", args("*.toml"));
         let output = execute(&missing, None).unwrap();
         assert!(output.contains("(no matches)"), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2508,32 +1281,37 @@ mod tests {
         fs::write(dir.join("skip.bin"), [0u8, b'n', b'e', b'e', b'd']).unwrap();
 
         let args = |more: &str| {
-            format!(r#"{{"pattern":"needle","path":{:?}{more}}}"#, dir.display().to_string())
+            format!(
+                r#"{{"pattern":"needle","path":{:?}{more}}}"#,
+                dir.display().to_string()
+            )
         };
-        let every = execute(&ToolCall::new("call_13", "grep", &args("")), None).unwrap();
+        let every = execute(&ToolCall::new("call_13", "grep", args("")), None).unwrap();
         assert!(every.contains("top.txt:1:"), "{every}");
         assert!(every.contains("top.txt:3:"), "{every}");
         assert!(every.contains("code.rs:1:"), "{every}");
         assert!(!every.contains("skip.bin"), "{every}");
 
-        let only_rust =
-            execute(&ToolCall::new("call_14", "grep", &args(r#","include":"*.rs""#)), None)
-                .unwrap();
+        let only_rust = execute(
+            &ToolCall::new("call_14", "grep", args(r#","include":"*.rs""#)),
+            None,
+        )
+        .unwrap();
         assert!(only_rust.contains("code.rs:1:"));
         assert!(!only_rust.contains("top.txt"), "{only_rust}");
 
         let insensitive = execute(
-            &ToolCall::new("call_15", "grep", &args(r#","ignore_case":true"#)),
+            &ToolCall::new("call_15", "grep", args(r#","ignore_case":true"#)),
             None,
         )
         .unwrap();
         assert!(insensitive.contains("top.txt:1:"), "{insensitive}");
 
-        let absent = execute(
-            &ToolCall::new("call_16", "grep", r#"{"pattern":"absent-nowhere"}"#),
-            None,
-        )
-        .unwrap();
+        let absent_args = format!(
+            r#"{{"pattern":"absent-nowhere","path":{:?}}}"#,
+            dir.display().to_string()
+        );
+        let absent = execute(&ToolCall::new("call_16", "grep", absent_args), None).unwrap();
         assert!(absent.contains("(no matches)"), "{absent}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2549,7 +1327,7 @@ mod tests {
         let call = ToolCall::new(
             "call_7",
             "read_file",
-            &format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
+            format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
         );
         let output = execute(&call, None).unwrap();
         assert!(output.contains("note.txt"), "{output}");
@@ -2557,11 +1335,7 @@ mod tests {
         // Dot also works, and line ranges stay file-only.
         let listing = ToolCall::new("call_8", "read_file", r#"{"path":"."}"#);
         assert!(execute(&listing, None).is_ok());
-        let ranged = ToolCall::new(
-            "call_9",
-            "read_file",
-            r#"{"path":".","start_line":2}"#,
-        );
+        let ranged = ToolCall::new("call_9", "read_file", r#"{"path":".","start_line":2}"#);
         let error = execute(&ranged, None).unwrap_err().to_string();
         assert!(error.contains("directory"), "{error}");
         let _ = fs::remove_dir_all(&dir);
