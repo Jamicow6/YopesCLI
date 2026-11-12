@@ -1610,7 +1610,7 @@ mod tests {
 
     #[test]
     fn delete_removes_only_a_model_row() {
-        use super::{ADD_MODEL_ID, ConnectStage, ConnectState};
+        use super::{ConnectStage, ConnectState, FETCH_MODELS_ID};
         use crate::config::SavedModel;
 
         let mut connect = ConnectState::loading();
@@ -1635,7 +1635,7 @@ mod tests {
         connect.selected = last;
         assert!(connect.remove_selected_model().is_none());
         assert_eq!(connect.custom_models.len(), 1);
-        assert_eq!(connect.items()[last].id, ADD_MODEL_ID);
+        assert_eq!(connect.items()[last].id, FETCH_MODELS_ID);
 
         connect.custom_provider_id = Some("endpoint".to_owned());
         let last = connect.items().len().saturating_sub(1);
