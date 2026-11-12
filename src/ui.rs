@@ -21,6 +21,38 @@ use crate::{
     tools,
 };
 
+/// How a `read_file` result surfaces in the transcript: quiet. The header and
+/// range lines render instead of the contents; a click still expands it.
+fn read_result_summary(result: &str) -> Option<(String, Vec<String>)> {
+    let first = result.lines().next()?;
+    let open = first.rfind(" (")?;
+    let path = first[..open].trim();
+    if path.is_empty() {
+        return None;
+    }
+    let count = first.get(open + 2..)?.strip_suffix(" lines)")?;
+    count.trim().parse::<usize>().ok()?;
+    let mut summary = vec![first.trim().to_owned()];
+    if let Some(range) = result.lines().nth(1).filter(|line| line.starts_with("lines ")) {
+        summary.push(range.trim().to_owned());
+    }
+    Some((path.to_owned(), summary))
+}
+
+/// Name of the tool that produced the result at `index`, found by walking
+/// back to the assistant message that requested the call.
+fn tool_call_name(site: &App, index: usize) -> Option<&str> {
+    let id = site.session.messages[index].tool_call_id.as_deref()?;
+    for message in site.session.messages[..index].iter().rev() {
+        if let Some(calls) = &message.tool_calls {
+            if let Some(call) = calls.iter().find(|call| call.id.as_str() == id) {
+                return Some(call.function.name.as_str());
+            }
+        }
+    }
+    None
+}
+
 const MUTED: Color = Color::DarkGray;
 const ACCENT: Color = Color::Cyan;
 const ERROR: Color = Color::Red;
@@ -79,6 +111,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let picker = app.model_picker.clone();
     let session_picker = app.session_picker.clone();
+    let tasks = !app.session.tasks.is_empty();
     let palette = if app.show_help
         || app.connect_open()
         || app.approval.is_some()
@@ -107,10 +140,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let popup_height = palette_height + picker_height + session_height;
     let composer_height = composer_height(app, area.width);
+    let progress_height = if tasks { (app.session.tasks.len().min(6) as u16) + 2 } else { 0 };
 
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(2)];
     if popup_height > 0 {
         constraints.push(Constraint::Length(popup_height));
+    }
+    if progress_height > 0 {
+        constraints.push(Constraint::Length(progress_height));
     }
     constraints.push(Constraint::Length(1));
     constraints.push(Constraint::Length(composer_height));
@@ -134,15 +171,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_palette(frame, app, &palette, chunks[index]);
         }
         index += 1;
-    } else {
+    }
+    if progress_height > 0 {
+        draw_progress(frame, app, chunks[index]);
+        index += 1;
+    } else if popup_height == 0 {
         draw_separator(frame, chunks[index]);
     }
-    draw_composer(frame, app, chunks[index + 1]);
-    draw_footer(frame, app, chunks[index + 2]);
+    // The separator slot is reserved even when an overlay or the panel takes
+    // that row instead.
+    index += 1;
+    draw_composer(frame, app, chunks[index]);
+    draw_footer(frame, app, chunks[index + 1]);
 
     let spinner = app.spinner;
+    let sides = app.diff_sides;
     if let Some(approval) = app.approval.as_mut() {
-        draw_approval(frame, approval, spinner, area);
+        draw_approval(frame, approval, sides, spinner, area);
     } else if app.show_help {
         draw_help(frame, area);
     } else if let Some(connect) = app.connect_state() {
@@ -291,7 +336,8 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         if message.role == Role::Tool {
             let start = lines.len();
-            let framed = tool_result_lines(app, message, inner.width, &mut rows, start);
+            let name = tool_call_name(app, index).map(str::to_owned);
+            let framed = tool_result_lines(app, message, inner.width, &mut rows, start, name.as_deref());
             lines.extend(framed);
             if streaming {
                 if let Some(line) = lines.last_mut() {
@@ -696,6 +742,40 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// The native progress panel: the session's task checklist above the composer.
+fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height < 3 || area.width < 20 {
+        return;
+    }
+    let inner = padded(area, 2);
+    let done = app.session.tasks.iter().filter(|task| task.done).count();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("Progress {done}/{}", app.session.tasks.len()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · todo_write", Style::default().fg(MUTED)),
+    ])];
+    for (index, task) in app.session.tasks.iter().enumerate() {
+        if index == 6 {
+            lines.push(Line::styled(
+                format!("… {} more", app.session.tasks.len() - 6),
+                Style::default().fg(MUTED),
+            ));
+            break;
+        }
+        let mark = if task.done { "[x]" } else { "[ ]" };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(if task.done { MUTED } else { ACCENT }),
+            ),
+            Span::styled(task.text.clone(), Style::default().fg(TEXT)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let inner = padded(area, 2);
     let count = app.session.messages.len();
@@ -793,15 +873,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// A small prompt for a risky command. It only names the command and asks.
-/// The border pulses on the idle ticker so the dialog pulls the eye.
-fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, spinner: usize, area: Rect) {
+/// A small prompt for a risky command. It shows the command and, for a write
+/// or edit, the change itself. The border pulses on the idle ticker so the
+/// dialog pulls the eye.
+fn draw_approval(
+    frame: &mut Frame,
+    approval: &mut ToolApproval,
+    side_by_side: bool,
+    spinner: usize,
+    area: Rect,
+) {
     let width = area.width.saturating_sub(4).min(72);
     if width < 30 || area.height < 8 {
         return;
     }
     let content_width = usize::from(width.saturating_sub(6));
-    let lines = approval_lines(approval, content_width);
+    let lines = approval_lines(approval, content_width, side_by_side);
     let height = (lines.len() as u16 + 4).clamp(7, area.height.saturating_sub(2));
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
@@ -819,11 +906,16 @@ fn draw_approval(frame: &mut Frame, approval: &mut ToolApproval, spinner: usize,
         } else {
             Modifier::empty()
         });
+    let has_command = tools::command_text(&approval.call).is_some();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
         .title_top(Line::from(vec![Span::styled(
-            " run this command? ",
+            if has_command {
+                " run this command? "
+            } else {
+                " apply this change? "
+            },
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]))
         .title_bottom(Line::styled(
@@ -856,6 +948,7 @@ fn tool_result_lines(
     width: u16,
     rows: &mut Vec<(u16, String)>,
     start_row: usize,
+    call_name: Option<&str>,
 ) -> Vec<Line<'static>> {
     let outer = usize::from(width).max(1);
     let inner_width = outer.saturating_sub(4);
@@ -883,11 +976,29 @@ fn tool_result_lines(
         .as_deref()
         .and_then(|call_id| app.changes.get(call_id));
     let mut body: Vec<Line<'static>> = Vec::new();
-    for content_line in &rendered {
-        body.push(Line::styled(
-            truncate(content_line, inner_width),
-            Style::default().fg(color),
-        ));
+    let mut label: Option<String> = None;
+    let mut quiet = false;
+    // A read stays quiet: its header and range replace the contents, and
+    // clicking the frame still reveals everything it returned.
+    if !failed && call_name == Some("read_file") {
+        if let Some((path, summary)) = read_result_summary(&message.content) {
+            quiet = true;
+            label = Some(path);
+            for line in summary {
+                body.push(Line::styled(
+                    truncate(&line, inner_width),
+                    Style::default().fg(TEXT),
+                ));
+            }
+        }
+    }
+    if !quiet {
+        for content_line in &rendered {
+            body.push(Line::styled(
+                truncate(content_line, inner_width),
+                Style::default().fg(color),
+            ));
+        }
     }
     if let Some(report) = report {
         body.extend(change_lines(report, inner_width));
@@ -896,27 +1007,55 @@ fn tool_result_lines(
         body.push(Line::styled(" ", Style::default().fg(MUTED)));
     }
     // Long output, diff included, is folded; a click on the frame reveals the rest.
-    let total = body.len();
-    let clickable = total > TOOL_OUTPUT_PREVIEW_LINES;
-    let expanded = clickable && app.expanded.contains(&call_id);
-    if clickable && !expanded {
-        let hidden = total - TOOL_OUTPUT_PREVIEW_LINES;
-        let hint = if inner_width >= 30 {
-            format!(
-                "… {hidden} more line{} · click to expand",
-                if hidden == 1 { "" } else { "s" }
-            )
-        } else {
-            format!("… {hidden} more")
-        };
-        let mut shown: Vec<Line<'static>> = body.drain(..TOOL_OUTPUT_PREVIEW_LINES).collect();
-        shown.push(Line::styled(
-            truncate(&hint, inner_width),
+    let expanded = app.expanded.contains(&call_id);
+    let clickable = if quiet {
+        true
+    } else {
+        body.len() > TOOL_OUTPUT_PREVIEW_LINES
+    };
+    if !expanded {
+        if quiet {
+            body.push(Line::styled(
+                truncate(
+                    &format!(
+                        "… {} more line{} · click to expand",
+                        rendered.len(),
+                        if rendered.len() == 1 { "" } else { "s" }
+                    ),
+                    inner_width,
+                ),
+                Style::default().fg(MUTED),
+            ));
+        } else if body.len() > TOOL_OUTPUT_PREVIEW_LINES {
+            let total = body.len();
+            let hidden = total - TOOL_OUTPUT_PREVIEW_LINES;
+            let hint = if inner_width >= 30 {
+                format!(
+                    "… {hidden} more line{} · click to expand",
+                    if hidden == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("… {hidden} more")
+            };
+            let mut shown: Vec<Line<'static>> = body.drain(..TOOL_OUTPUT_PREVIEW_LINES).collect();
+            shown.push(Line::styled(
+                truncate(&hint, inner_width),
+                Style::default().fg(MUTED),
+            ));
+            body = shown;
+        }
+    } else if quiet {
+        for content_line in &rendered {
+            body.push(Line::styled(
+                truncate(content_line, inner_width),
+                Style::default().fg(TEXT),
+            ));
+        }
+        body.push(Line::styled(
+            truncate("· click to collapse", inner_width),
             Style::default().fg(MUTED),
         ));
-        body = shown;
-    }
-    if expanded {
+    } else {
         body.push(Line::styled(
             truncate("· click to collapse", inner_width),
             Style::default().fg(MUTED),
@@ -924,7 +1063,12 @@ fn tool_result_lines(
     }
 
     let label = truncate(
-        report.map_or("tool", |report| report.diff.path.as_str()),
+        report
+            .and_then(|report| report.diffs.first())
+            .map(|diff| diff.path.clone())
+            .or(label)
+            .unwrap_or_else(|| "tool".to_owned())
+            .as_str(),
         inner_width,
     );
     let framed = frame_lines(label, body, inner_width, border);
@@ -987,10 +1131,21 @@ fn frame_lines(
     lines
 }
 
-/// The diff under a tool result: a file header, then the change itself.
+/// The diffs under a tool result: per file, a header then the change, with a
+/// blank line between files.
 fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
-    let diff = &report.diff;
+    let mut lines = Vec::new();
+    for (index, diff) in report.diffs.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
+        lines.extend(change_file_lines(diff, width, report.side_by_side));
+    }
+    lines
+}
+
+fn change_file_lines(diff: &FileDiff, width: usize, side_by_side: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut spans = vec![Span::styled(
         truncate(&diff.path, width.saturating_sub(22)),
@@ -1016,7 +1171,7 @@ fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
         ));
         return lines;
     }
-    if report.side_by_side {
+    if side_by_side {
         lines.extend(side_by_side_lines(diff, width));
     } else {
         lines.extend(unified_lines(diff, width));
@@ -1024,7 +1179,7 @@ fn change_lines(report: &ChangeReport, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
+fn approval_lines(approval: &ToolApproval, width: usize, side_by_side: bool) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let command = tools::command_text(&approval.call).unwrap_or_default();
@@ -1052,8 +1207,18 @@ fn approval_lines(approval: &ToolApproval, width: usize) -> Vec<Line<'static>> {
             break;
         }
     }
-    if shown == 0 {
+    if shown == 0 && approval.diffs.is_empty() {
         lines.push(Line::styled("$", Style::default().fg(TEXT)));
+    }
+    for (index, diff) in approval.diffs.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
+        let report = ChangeReport {
+            diffs: vec![diff.clone()],
+            side_by_side,
+        };
+        lines.append(&mut change_lines(&report, width));
     }
     if let Some(note) = &approval.note {
         lines.push(Line::styled(
@@ -1591,7 +1756,7 @@ fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Li
         return Vec::new();
     }
     if streaming || expanded {
-        let style = Style::default().fg(MUTED).add_modifier(Modifier::DIM);
+        let style = Style::default().fg(MUTED);
         let hidden = lines.len().saturating_sub(STREAMING_REASONING_LINES);
         let show_hidden = streaming && hidden > 0 && !expanded;
         let start = if show_hidden { hidden } else { 0 };
@@ -1620,7 +1785,7 @@ fn reasoning_lines(message: &Message, streaming: bool, expanded: bool) -> Vec<Li
     };
     vec![Line::from(vec![
         Span::styled("▸ ", Style::default().fg(MUTED)),
-        Span::styled(text, Style::default().fg(MUTED).add_modifier(Modifier::DIM)),
+        Span::styled(text, Style::default().fg(MUTED)),
     ])]
 }
 
@@ -1785,6 +1950,60 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn approvals_render_the_diff_of_a_change() {
+        use super::approval_lines;
+        use crate::app::ToolApproval;
+        use crate::diff::FileDiff;
+        use crate::session::ToolCall;
+
+        let call = ToolCall::new(
+            "call_1",
+            "write_file",
+            r#"{"path":"hello.txt","content":"hi"}"#,
+        );
+        let approval = ToolApproval {
+            call,
+            note: Some("old_text was not found; the edit will fail.".to_owned()),
+            diffs: vec![FileDiff::new("hello.txt", "", "hi\n", true)],
+            scroll: 0,
+            page_height: 0,
+        };
+        let lines = approval_lines(&approval, 60, false);
+        let text = lines
+            .iter()
+            .map(text_of)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("hello.txt"), "{text}");
+        assert!(text.contains("+1"), "{text}");
+        assert!(!text.contains("$"), "{text}");
+        assert!(text.contains("old_text was not found"), "{text}");
+    }
+
+    #[test]
+    fn quiet_read_summaries_skip_the_contents() {
+        use super::read_result_summary;
+        let (path, summary) = read_result_summary(
+            "src/main.rs (1014 lines)\nlines 1-400 of 1014\nfn main() {\n    ...",
+        )
+        .unwrap();
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(summary[0], "src/main.rs (1014 lines)");
+        assert_eq!(summary[1], "lines 1-400 of 1014");
+        assert_eq!(summary.len(), 2);
+
+        // A full read keeps only the header line.
+        let (path, summary) =
+            read_result_summary("todo.md (12 lines)\n- [x] ready\n- [ ] go").unwrap();
+        assert_eq!(path, "todo.md");
+        assert_eq!(summary.len(), 1);
+
+        // Directory listings and unplanned shapes stay visible in full.
+        assert!(read_result_summary("./\nnote.txt  2 B\nnested/\n").is_none());
+        assert!(read_result_summary("src/missing.txt (10 lines) nope").is_none());
     }
 
     #[test]
