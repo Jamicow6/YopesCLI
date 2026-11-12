@@ -44,7 +44,7 @@ Every one of these is a separate match arm or list entry:
 | `system_prompt()` | One sentence telling the model when to reach for it. |
 | `TOOL_NAMES` | The name, and the count assertion in the tests. |
 
-## 3. Gate it in `src/app.rs`
+## 3. Gate it in `src/app/mode.rs`
 
 `Mode::denied` decides what plan mode blocks. A tool that writes, edits, or
 runs commands must be denied there; a read-only tool must not be.
@@ -71,6 +71,6 @@ and clean it up.
 - [ ] `applied_change*()` if it writes files
 - [ ] `system_prompt()` sentence
 - [ ] `TOOL_NAMES` + count
-- [ ] `Mode::denied` in `app.rs`
+- [ ] `Mode::denied` in `app/mode.rs`
 - [ ] `README.md` tool list
 - [ ] Tests

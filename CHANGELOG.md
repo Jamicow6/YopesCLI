@@ -6,6 +6,12 @@ All notable changes to YopesCLI are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Split `src/app.rs` into `src/app/` modules (input, turns, streaming,
+  `/connect`, palette, pickers, images, formatting, modes) and `src/ui.rs` into
+  `src/ui/` modules, one per panel. No behaviour change.
+
 ## [0.1.0]
 
 First public release.
