@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::{AuthKind, Config, ProviderKind, SavedModel},
     session::{Message, Role, ToolCall},
+    skills,
     tools,
 };
 
@@ -352,6 +353,16 @@ fn request_messages(
     if let Some(note) = mode_note {
         system.push_str("\n\n");
         system.push_str(note);
+    }
+    // Skills auto-load through read_file, so only tool-capable sessions get
+    // the listing; slash invocation injects the content by itself.
+    if tooling {
+        if let Some(listing) =
+            skills::section(&std::env::current_dir().unwrap_or_default())
+        {
+            system.push_str("\n\n");
+            system.push_str(&listing);
+        }
     }
     request.push(serde_json::json!({
         "role": "system",
