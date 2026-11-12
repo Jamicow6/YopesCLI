@@ -1205,7 +1205,11 @@ impl App {
     }
 
     /// A logo arrived: keep it for the next draw, and cache it on disk.
-    pub(crate) fn on_logo(&mut self, provider_id: String, result: Result<crate::logos::Logo, String>) {
+    pub(crate) fn on_logo(
+        &mut self,
+        provider_id: String,
+        result: Result<crate::logos::Logo, String>,
+    ) {
         if let Ok(logo) = result {
             self.logos.cache(&provider_id, &logo);
             self.logos.insert(&provider_id, logo);
