@@ -17,11 +17,10 @@ pub fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Dollars per million tokens, `(input, output)`.
-///
-/// These are list prices and only cover the common models; an unknown model
-/// falls back to the default so the counter still moves instead of lying flat.
-pub(super) fn model_price(model: &str) -> (f64, f64) {
+/// Dollars per million tokens, `(input, output)`, for the common models when
+/// the provider catalog has no price. `None` means the price is unknown: the
+/// session counter shows a dash instead of inventing a bill.
+pub(super) fn known_model_price(model: &str) -> Option<(f64, f64)> {
     let model = model.to_ascii_lowercase();
     let table: [(&str, f64, f64); 8] = [
         ("gpt-4o-mini", 0.15, 0.60),
@@ -40,12 +39,22 @@ pub(super) fn model_price(model: &str) -> (f64, f64) {
             best = Some((name, input, output));
         }
     }
-    best.map_or((2.50, 10.0), |(_, input, output)| (input, output))
+    best.map(|(_, input, output)| (input, output))
 }
 
-/// Session spend as `$0.0000`, priced from the active model.
-pub fn format_cost(prompt_tokens: u64, completion_tokens: u64, model: &str) -> String {
-    let (input, output) = model_price(model);
+/// Session spend as `$0.0000`, priced from the active model. A model with no
+/// known price shows `—`; a free one shows `free` rather than a fake bill.
+pub fn format_cost(
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    price: Option<(f64, f64)>,
+) -> String {
+    let Some((input, output)) = price else {
+        return "—".to_owned();
+    };
+    if input == 0.0 && output == 0.0 {
+        return "free".to_owned();
+    }
     let dollars = (prompt_tokens as f64 * input + completion_tokens as f64 * output) / 1_000_000.0;
     // Small sessions cost fractions of a cent, so keep four decimals until it
     // is worth showing cents.

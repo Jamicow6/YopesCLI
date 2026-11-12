@@ -29,6 +29,7 @@ use crate::{diff::FileDiff, session::ToolCall};
 
 const MAX_LIST_ENTRIES: usize = 300;
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_READ_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_READ_LINES: usize = 400;
 const MAX_READ_LINE_LIMIT: usize = 2_000;
 const MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
@@ -38,9 +39,10 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 15] = [
+pub const TOOL_NAMES: [&str; 16] = [
     "list_dir",
     "read_file",
+    "read_image",
     "glob",
     "grep",
     "write_file",
@@ -239,6 +241,23 @@ pub fn definitions() -> Value {
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of lines to return."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_image",
+                "description": "Attach a PNG or JPEG image from disk to the conversation so a vision-capable model can see it. Read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Image path relative to the working directory."
                         }
                     },
                     "required": ["path"]
@@ -578,6 +597,7 @@ pub fn preview(call: &ToolCall) -> String {
             }
         }
         "read_file" => string("path"),
+        "read_image" => string("path"),
         "glob" => clip(&string("pattern"), 160),
         "grep" => clip(&string("pattern"), 160),
         "write_file" => {
@@ -794,6 +814,7 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
         "list_dir" => files::list_dir(&call.function.arguments),
         "read_file" => files::read_file(&call.function.arguments),
+        "read_image" => files::read_image(&call.function.arguments),
         "glob" => search::glob(&call.function.arguments),
         "grep" => search::grep(&call.function.arguments),
         "write_file" => files::write_file(&call.function.arguments),

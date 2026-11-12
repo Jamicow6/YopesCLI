@@ -1,5 +1,48 @@
 use super::*;
 
+/// The longest edge sent to a vision model, in pixels: larger images are
+/// downscaled before encoding, so one file cannot dominate the context.
+const MAX_IMAGE_DIMENSION: u32 = 1568;
+
+/// Read the pixels of a `read_image` result. The tool's text result cannot
+/// carry binary data, so the app attaches the PNG to the tool message itself.
+pub(super) fn tool_image_attachment(call: &ToolCall) -> Option<ImageAttachment> {
+    let value: serde_json::Value = serde_json::from_str(&call.function.arguments).ok()?;
+    let path = value.get("path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut image = image::open(&resolved).ok()?;
+    if image.width() > MAX_IMAGE_DIMENSION || image.height() > MAX_IMAGE_DIMENSION {
+        image = image.resize(
+            MAX_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .ok()?;
+    let name = resolved.file_name().map_or_else(
+        || "image.png".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Some(ImageAttachment {
+        name,
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
 /// Half-block pixel art of a pasted image: each TUI row shows two pixel
 /// lines at once, through `▄` glyphs with per-span foreground and background.
 pub(super) fn build_image_rows(encoded: &str, cols: u16) -> Vec<Line<'static>> {
