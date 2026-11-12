@@ -323,6 +323,8 @@ pub enum ConnectStage {
     CustomToken,
     ModelId,
     ModelName,
+    /// Optional: how many tokens the model's context window holds.
+    ModelContextWindow,
     CustomModels,
     Password,
     /// Unlock a key that is already stored for the endpoint.
@@ -344,6 +346,7 @@ impl ConnectStage {
             Self::CustomToken => "token",
             Self::ModelId => "model id",
             Self::ModelName => "model name",
+            Self::ModelContextWindow => "context window",
             Self::CustomModels => "models",
             Self::Password => "password",
             Self::Unlock => "password",
@@ -433,6 +436,7 @@ pub struct ConnectState {
     custom_models: Vec<SavedModel>,
     custom_model_id: String,
     custom_model_name: String,
+    custom_model_context_window: String,
     /// The key already stored for the endpoint being connected, if any.
     stored_secret: Option<config::StoredSecret>,
     /// What to do once a stored key is unlocked.
@@ -468,6 +472,7 @@ impl ConnectState {
             custom_models: Vec::new(),
             custom_model_id: String::new(),
             custom_model_name: String::new(),
+            custom_model_context_window: String::new(),
             stored_secret: None,
             unlock_target: UnlockTarget::Finish,
             unlock_endpoint: String::new(),
@@ -745,6 +750,7 @@ impl ConnectState {
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
+            | ConnectStage::ModelContextWindow
             | ConnectStage::Password
             | ConnectStage::Unlock => Vec::new(),
         }
@@ -792,6 +798,7 @@ impl ConnectState {
             ConnectStage::CustomToken => &self.custom_token,
             ConnectStage::ModelId => &self.custom_model_id,
             ConnectStage::ModelName => &self.custom_model_name,
+            ConnectStage::ModelContextWindow => &self.custom_model_context_window,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
             ConnectStage::FasfasNotice => unreachable!("handled above"),
             ConnectStage::Auth | ConnectStage::CustomModels => unreachable!(),
@@ -824,6 +831,7 @@ impl ConnectState {
             ConnectStage::CustomToken => "token",
             ConnectStage::ModelId => "model id",
             ConnectStage::ModelName => "model name",
+            ConnectStage::ModelContextWindow => "context window size in tokens (blank to skip)",
             ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
             ConnectStage::Unlock => "key password",
@@ -963,6 +971,7 @@ fn custom_field_mut(connect: &mut ConnectState, stage: ConnectStage) -> Option<&
         ConnectStage::CustomToken => Some(&mut connect.custom_token),
         ConnectStage::ModelId => Some(&mut connect.custom_model_id),
         ConnectStage::ModelName => Some(&mut connect.custom_model_name),
+        ConnectStage::ModelContextWindow => Some(&mut connect.custom_model_context_window),
         _ => None,
     }
 }
@@ -1447,9 +1456,22 @@ impl App {
     }
 
     /// Context-window size of the active model from the catalog, if known.
+    /// For custom providers, checks the manually saved context_window first.
     pub fn model_context_window(&self) -> Option<u64> {
+        let model_id = self.backend.model();
+        // Custom provider models carry a manually set limit.
+        if let Some(w) = self
+            .custom_providers
+            .iter()
+            .flat_map(|p| p.models.iter())
+            .find(|m| m.id == model_id)
+            .and_then(|m| m.context_window)
+        {
+            return Some(w);
+        }
+        // Fall back to the catalog from /connect.
         let catalog = self.connect.as_ref()?.catalog.as_ref()?;
-        catalog::context_window(catalog, self.backend.model())
+        catalog::context_window(catalog, model_id)
     }
 
     pub fn tick(&mut self) {
