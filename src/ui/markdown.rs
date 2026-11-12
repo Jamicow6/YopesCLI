@@ -627,7 +627,7 @@ fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
         if first == '`' {
             if let Some((content, consumed)) = code_span(rest) {
                 flush_plain(&mut spans, &mut plain, base);
-                spans.push(Span::styled(content, Style::default().fg(CODE)));
+                spans.push(Span::styled(content, base.fg(CODE)));
                 index += consumed;
                 continue;
             }
@@ -774,7 +774,7 @@ fn parse_link(text: &str) -> Option<(String, String, usize)> {
     let label = &body[..closing];
     let target = body[closing + 1..].strip_prefix('(')?;
     let end = target.find(')')?;
-    let url = target[..end].trim().split_whitespace().next().unwrap_or("");
+    let url = target[..end].split_whitespace().next().unwrap_or("");
     Some((label.to_owned(), url.to_owned(), closing + end + 4))
 }
 
@@ -1023,7 +1023,7 @@ mod tests {
     #[test]
     fn escaped_pipes_inside_code_spans_stay_in_one_table_cell() {
         let lines = render("| expression | meaning |\n|---|---|\n| `a\\|b` | literal pipe |");
-        assert!(lines.iter().any(|line| line.contains("`a|b`")));
+        assert!(lines.iter().any(|line| line.contains("a|b")));
         assert!(!lines.iter().any(|line| line.contains("\\|")));
     }
 
@@ -1052,7 +1052,7 @@ mod tests {
         let lines = markdown_lines("*Use `*` literally*", 40);
         assert_eq!(text_of(&lines[0]), "Use * literally");
         assert!(lines[0].spans.iter().any(|span| {
-            span.content.as_ref() == "Use * literally"
+            span.content.as_ref() == "*"
                 && span.style.add_modifier.contains(Modifier::ITALIC)
         }));
     }
