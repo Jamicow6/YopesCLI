@@ -135,6 +135,7 @@ impl Backend {
         self.reasoning_effort = value;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn configure(
         &mut self,
         provider: ProviderKind,

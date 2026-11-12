@@ -165,8 +165,10 @@ fn frontmatter(text: &str) -> (Fields, String) {
     if !matches!(lines.next(), Some(first) if first.trim() == "---") {
         return (Fields::default(), text.to_owned());
     }
-    let mut fields = Fields::default();
-    fields.user_invocable = true;
+    let mut fields = Fields {
+        user_invocable: true,
+        ..Fields::default()
+    };
     let mut body = Vec::new();
     let mut closed = false;
     for line in lines {

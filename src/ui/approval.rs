@@ -435,11 +435,11 @@ pub(super) fn side_by_side_lines(diff: &FileDiff, width: usize) -> Vec<Line<'sta
             let left_style = row
                 .left
                 .as_ref()
-                .map_or_else(|| Style::default().fg(TEXT), |line| diff_style(line));
+                .map_or_else(|| Style::default().fg(TEXT), diff_style);
             let right_style = row
                 .right
                 .as_ref()
-                .map_or_else(|| Style::default().fg(TEXT), |line| diff_style(line));
+                .map_or_else(|| Style::default().fg(TEXT), diff_style);
             let (left_sign, left_color) = row
                 .left
                 .as_ref()

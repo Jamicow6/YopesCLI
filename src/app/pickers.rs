@@ -104,7 +104,7 @@ impl App {
             paths.push(current.clone());
         }
         let mut entries: Vec<SessionEntry> = paths.into_iter().map(session_entry).collect();
-        entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified));
         entries.truncate(80);
         entries
     }

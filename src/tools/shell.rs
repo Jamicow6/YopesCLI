@@ -156,8 +156,6 @@ fn shell_process(command: &str) -> ProcessCommand {
 struct BashBackgroundArgs {
     command: String,
     #[serde(default)]
-    risk: bool,
-    #[serde(default)]
     timeout_seconds: Option<u64>,
 }
 
