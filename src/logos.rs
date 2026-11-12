@@ -156,8 +156,8 @@ fn pixmap_to_rows(pixmap: &tiny_skia::Pixmap) -> Logo {
         let bottom = (top + 1).min(height - 1);
         let mut spans = Vec::with_capacity(width as usize);
         for x in 0..width {
-            let upper = pixmap.pixel(x, top).map(|color| color.demultiply());
-            let lower = pixmap.pixel(x, bottom).map(|color| color.demultiply());
+            let upper = pixmap.pixel(x, top);
+            let lower = pixmap.pixel(x, bottom);
             spans.push(Span::styled(
                 "▄",
                 Style::default()
@@ -172,15 +172,14 @@ fn pixmap_to_rows(pixmap: &tiny_skia::Pixmap) -> Logo {
 }
 
 /// The colour of a pixel, or the background colour when it is not drawn.
-fn pixel_color(pixel: Option<tiny_skia::PremultipliedColorU8>) -> Color {
+fn pixel_color(pixel: Option<tiny_skia::ColorU8>) -> Color {
     let Some(pixel) = pixel else {
         return Color::Reset;
     };
-    let color = pixel.demultiply();
-    if color.alpha() == 0 {
+    if pixel.alpha() == 0 {
         return Color::Reset;
     }
-    Color::Rgb(color.red(), color.green(), color.blue())
+    Color::Rgb(pixel.red(), pixel.green(), pixel.blue())
 }
 
 /// Encode the rows so they can be cached on disk.

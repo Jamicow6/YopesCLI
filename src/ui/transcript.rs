@@ -28,11 +28,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::raw(""),
         ];
         // The mascot belongs to the startup screen only, never to a reply.
-        let ball = YARN_ROLL[(app.spinner / 2) % YARN_ROLL.len()];
-        for art in CAT_BASE {
-            welcome.push(Line::styled(art, Style::default().fg(ACCENT)));
-        }
-        welcome.push(Line::styled(ball, Style::default().fg(MUTED)));
+        welcome.extend(mascot_frame(app.spinner));
         welcome.push(Line::raw(""));
         welcome.push(Line::styled(
             "A quiet place to think out loud.",
