@@ -4,6 +4,7 @@ mod catalog;
 mod config;
 mod credentials;
 mod diff;
+mod logos;
 mod session;
 mod skills;
 mod temp;
@@ -78,6 +79,8 @@ async fn run() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let (tool_sender, mut tool_receiver) = mpsc::unbounded_channel::<ToolEvent>();
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
+    let (logo_sender, mut logo_receiver) =
+        mpsc::unbounded_channel::<(String, Result<crate::logos::Logo, String>)>();
     let (paste_sender, mut paste_receiver) =
         mpsc::unbounded_channel::<Result<(String, String), String>>();
     let (title_sender, mut title_receiver) = mpsc::unbounded_channel::<(u64, String)>();
@@ -138,6 +141,7 @@ async fn run() -> Result<()> {
                             &sender,
                             &tool_sender,
                             &catalog_sender,
+                            &logo_sender,
                             &paste_sender,
                             &title_sender,
                             &mut active_task,
@@ -202,6 +206,7 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
+                            &logo_sender,
                     &paste_sender,
                     &title_sender,
                     &mut active_task,
@@ -221,6 +226,7 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
+                            &logo_sender,
                     &paste_sender,
                     &title_sender,
                     &mut active_task,
@@ -231,6 +237,24 @@ async fn run() -> Result<()> {
                 if let Some(result) = result {
                     app.on_catalog(result);
                 }
+                for provider_id in app.take_pending_logos() {
+                    dispatch(
+                        Action::FetchLogo(provider_id),
+                        &mut app,
+                        &sender,
+                        &tool_sender,
+                        &catalog_sender,
+                        &logo_sender,
+                        &paste_sender,
+                        &title_sender,
+                        &mut active_task,
+                    );
+                }
+                redraw_now = true;
+            }
+            result = logo_receiver.recv() => {
+                let Some((provider_id, result)) = result else { break; };
+                app.on_logo(provider_id, result);
                 redraw_now = true;
             }
             result = paste_receiver.recv() => {
@@ -272,6 +296,7 @@ fn dispatch(
     events: &mpsc::UnboundedSender<StreamEvent>,
     tool_events: &mpsc::UnboundedSender<ToolEvent>,
     catalog_events: &mpsc::UnboundedSender<FetchResult>,
+    logo_events: &mpsc::UnboundedSender<(String, Result<crate::logos::Logo, String>)>,
     paste_sender: &mpsc::UnboundedSender<Result<(String, String), String>>,
     title_sender: &mpsc::UnboundedSender<(u64, String)>,
     active_task: &mut Option<(u64, JoinHandle<()>)>,
@@ -363,6 +388,15 @@ fn dispatch(
                     .await
                     .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
+            });
+        }
+        Action::FetchLogo(provider_id) => {
+            let sender = logo_events.clone();
+            tokio::spawn(async move {
+                let result = crate::logos::fetch(&provider_id)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send((provider_id, result));
             });
         }
         Action::NameSession { task } => {

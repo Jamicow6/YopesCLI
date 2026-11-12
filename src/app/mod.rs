@@ -20,6 +20,7 @@ use crate::{
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
+    logos::Logos,
     session::{self, ImageAttachment, Message, Role, Session, TaskState, ToolCall},
     skills, tools,
 };
@@ -889,6 +890,8 @@ pub enum Action {
     LoadCatalog,
     /// Fetch the Fasfas `/v1/models` list with the key entered in /connect.
     FetchFasfas(String),
+    /// Fetch a provider's logo and draw it.
+    FetchLogo(String),
     /// Ask the provider for a short title after the first reply of a session.
     NameSession {
         task: String,
@@ -1070,6 +1073,10 @@ pub struct App {
     sessions_dir: Option<PathBuf>,
     config_path: PathBuf,
     custom_providers: Vec<config::CustomProvider>,
+    /// The provider logos, drawn from the models.dev artwork.
+    pub logos: Logos,
+    /// The logos that still have to be fetched.
+    pending_logos: Vec<String>,
     /// Tavily key for the web_search tool.
     tavily_api_key: Option<String>,
     palette_index: usize,
@@ -1130,8 +1137,10 @@ impl App {
             tool_rounds: 0,
             session_path,
             sessions_dir,
-            config_path,
+            config_path: config_path.clone(),
             custom_providers,
+            logos: Logos::new(crate::logos::cache_dir(&config_path)),
+            pending_logos: Vec::new(),
             tavily_api_key,
             palette_index: 0,
             palette_hidden: false,
