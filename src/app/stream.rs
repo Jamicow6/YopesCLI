@@ -143,7 +143,14 @@ impl App {
                 self.active = None;
                 if self.pending_tools.is_empty() {
                     self.tool_rounds = 0;
-                    self.remove_empty_response();
+                    // A provider can end the stream without sending anything;
+                    // the placeholder is dropped, but the user is told why no
+                    // reply appeared instead of seeing nothing.
+                    if self.remove_empty_response() {
+                        self.info(
+                            "The model returned no content for this turn; try sending again.",
+                        );
+                    }
                     self.save_session();
                     return self.maybe_name_session();
                 }
@@ -230,7 +237,14 @@ impl App {
             }
             Err(error) => format!("Error: {error}"),
         };
-        self.record_tool_result(event.call.id, content);
+        let images = if event.call.function.name == "read_image" {
+            images::tool_image_attachment(&event.call)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.record_tool_result_with_images(event.call.id, content, images);
         self.save_session();
         self.advance_tools()
     }
@@ -240,9 +254,19 @@ impl App {
         call_id: impl Into<String>,
         content: impl Into<String>,
     ) {
-        self.session
-            .messages
-            .push(Message::tool_result(call_id, content));
+        self.record_tool_result_with_images(call_id, content, Vec::new());
+    }
+
+    /// Store a tool result, optionally with images the model should see.
+    pub(crate) fn record_tool_result_with_images(
+        &mut self,
+        call_id: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<ImageAttachment>,
+    ) {
+        let mut message = Message::tool_result(call_id, content);
+        message.images = images;
+        self.session.messages.push(message);
     }
 
     pub(crate) fn discard_pending_tools(&mut self, reason: &str) {
@@ -252,9 +276,11 @@ impl App {
         self.approval = None;
     }
 
-    pub(crate) fn remove_empty_response(&mut self) {
-        // A reply that only produced reasoning is kept: long thinking is real
-        // output the user asked for, so dropping it loses the whole answer.
+    /// Drop an empty assistant placeholder; `true` when one was dropped.
+    ///
+    /// A reply with only reasoning is kept: long thinking is real output the
+    /// user asked for, so dropping it loses the whole answer.
+    pub(crate) fn remove_empty_response(&mut self) -> bool {
         if self.session.messages.last().is_some_and(|message| {
             message.role == Role::Assistant
                 && message.content.is_empty()
@@ -263,7 +289,9 @@ impl App {
                 && message.error.is_none()
         }) {
             self.session.messages.pop();
+            return true;
         }
+        false
     }
 
     pub(crate) fn connect_error(&mut self, message: impl Into<String>) {
@@ -287,13 +315,13 @@ impl App {
     }
 
     pub(crate) fn save_session(&mut self) {
-        let result = self
-            .session_path
-            .as_ref()
-            .map(|path| self.session.save(path));
-        if let Some(Err(error)) = result {
-            self.error(format!("Could not save session: {error:#}"));
+        if let Some(error) = self.session_saver.take_error() {
+            self.error(format!("Could not save session: {error}"));
         }
+        let Some(path) = self.session_path.clone() else {
+            return;
+        };
+        self.session_saver.save(path, self.session.clone());
     }
 
     /// Store the custom system prompt in the saved config.
@@ -318,8 +346,15 @@ impl App {
     }
 
     pub(crate) fn persist(&self) -> Result<()> {
-        self.session_path
-            .as_ref()
-            .map_or(Ok(()), |path| self.session.save(path))
+        let Some(path) = self.session_path.clone() else {
+            return Ok(());
+        };
+        if self
+            .session_saver
+            .save_and_wait(path.clone(), self.session.clone())
+        {
+            return Ok(());
+        }
+        self.session.save(&path)
     }
 }
