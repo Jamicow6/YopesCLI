@@ -26,7 +26,10 @@ use crate::{
     tools,
 };
 
-const MAX_TOOL_ROUNDS: usize = 24;
+/// Tool-round brake: real agentic turns regularly need far more than what a
+/// belt-tightening 24 allowed, but the brake still exists so a looping model
+/// cannot bill forever without a human once per hundred rounds.
+const MAX_TOOL_ROUNDS: usize = 100;
 /// The choices the /effort command accepts, printed in its messages.
 const EFFORT_CHOICES: &str = "Usage: /effort off|none|low|medium|high|xhigh";
 
