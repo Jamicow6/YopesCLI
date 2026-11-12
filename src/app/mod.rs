@@ -123,7 +123,7 @@ pub const COMMANDS: [CommandSpec; 13] = [
     },
     CommandSpec {
         name: "/tools",
-        description: "Set tool mode: on, off, auto, ask",
+        description: "Set tool mode: on, off, auto, ask (deprecated)",
         argument: Some("mode"),
     },
     CommandSpec {

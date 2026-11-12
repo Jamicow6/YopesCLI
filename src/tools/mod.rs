@@ -89,11 +89,13 @@ pub fn command_risk(arguments: &str) -> bool {
 pub fn system_prompt(tools_enabled: bool) -> String {
     let cwd = env::current_dir().map_or_else(|_| ".".to_owned(), |path| path.display().to_string());
     let os = env::consts::OS;
+    let temp = crate::temp::platform_temp_root().display().to_string();
     let base = if tools_enabled {
         format!(
             "You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Operating system: {os}\n\
+             Scratch files (scripts, downloads, logs) go in {temp}: that is where the user looks for them.\n\
              Use the provided tools to inspect and change files and to run commands. \
              Prefer tools over guessing, read a file before editing it, and never claim \
              that a file changed unless a tool result confirms it. Set run_command risk to \

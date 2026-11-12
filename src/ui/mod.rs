@@ -267,6 +267,17 @@ fn truncate(text: &str, width: usize) -> String {
     result
 }
 
+/// Pad `text` with spaces to `width` display columns, so CJK and emoji
+/// align like ASCII does.
+pub(super) fn pad_to(text: &str, width: usize) -> String {
+    let display = UnicodeWidthStr::width(text);
+    if display >= width {
+        text.to_owned()
+    } else {
+        format!("{text}{}", " ".repeat(width - display))
+    }
+}
+
 /// The muted stats line under a finished reply: tokens in and out, then how long.
 fn usage_line(usage: Usage) -> Line<'static> {
     let mut text = format!(
@@ -521,6 +532,15 @@ mod tests {
         let lines = frame_lines("x".repeat(60), vec![Line::raw("body")], 10, Color::Reset);
         assert_eq!(text_of(&lines[1]).chars().count(), 14);
         assert_eq!(text_of(&lines[2]).chars().count(), 14);
+    }
+
+    #[test]
+    fn padding_counts_display_columns_not_chars() {
+        // A CJK char is two columns; char-count padding would under-pad it.
+        assert_eq!(pad_to("a", 4), "a   ");
+        assert_eq!(pad_to("汉", 4), "汉  ");
+        assert_eq!(pad_to("汉汉", 4), "汉汉");
+        assert_eq!(pad_to("too long here", 4), "too long here");
     }
 
     #[test]
