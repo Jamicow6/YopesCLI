@@ -57,6 +57,8 @@ pub struct Backend {
     models: Vec<SavedModel>,
     /// Custom system prompt text, appended to the built-in one.
     custom_prompt: Option<String>,
+    /// Reasoning effort hint sent with OpenAI-compatible requests.
+    reasoning_effort: Option<String>,
     client: Client,
 }
 
@@ -76,6 +78,7 @@ impl Backend {
             auth: config.auth,
             models: config.models.clone(),
             custom_prompt: config.system_prompt.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
             client,
         })
     }
@@ -122,6 +125,14 @@ impl Backend {
 
     pub fn set_system_prompt(&mut self, value: Option<String>) {
         self.custom_prompt = value;
+    }
+
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.reasoning_effort.as_deref()
+    }
+
+    pub fn set_reasoning_effort(&mut self, value: Option<String>) {
+        self.reasoning_effort = value;
     }
 
     pub fn configure(
@@ -217,6 +228,14 @@ impl Backend {
             "messages": request_messages(
                 messages,
                 tooling,
+                if matches!(
+                    self.provider,
+                    ProviderKind::OpenAi | ProviderKind::Custom
+                ) {
+                    ImageStyle::Parts
+                } else {
+                    ImageStyle::None
+                },
                 self.custom_prompt.as_deref(),
                 mode_note,
             )?,
@@ -225,6 +244,13 @@ impl Backend {
         });
         if tooling {
             request["tools"] = tools::definitions();
+        }
+        if let Some(effort) = self
+            .reasoning_effort
+            .as_deref()
+            .filter(|effort| !effort.trim().is_empty())
+        {
+            request["reasoning_effort"] = serde_json::Value::String(effort.to_owned());
         }
         let response = send_with_retry("OpenAI-compatible API", || {
             let mut builder = self
@@ -267,6 +293,7 @@ impl Backend {
             "messages": request_messages(
                 messages,
                 false,
+                ImageStyle::Ollama,
                 self.custom_prompt.as_deref(),
                 mode_note,
             )?,
@@ -297,9 +324,20 @@ fn completion_url(base_url: &str) -> String {
     }
 }
 
+/// How images ride along in request messages: OpenAI-compatible multimodal
+/// text parts, Ollama's `images` base64 array, or not at all.
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
+enum ImageStyle {
+    #[default]
+    None,
+    Parts,
+    Ollama,
+}
+
 fn request_messages(
     messages: &[Message],
     tooling: bool,
+    image_style: ImageStyle,
     custom_prompt: Option<&str>,
     mode_note: Option<&'static str>,
 ) -> Result<Vec<serde_json::Value>> {
@@ -327,9 +365,11 @@ fn request_messages(
             }));
             continue;
         }
-        // Attached screenshots travel as multimodal content parts so a
-        // vision-capable model sees them.
-        if tooling && message.role == Role::User && !message.images.is_empty() {
+        // Attached screenshots travel so a vision-capable model sees them:
+        // multimodal parts for OpenAI-compatible providers, Ollama's own
+        // `images` array there.
+        let openai_parts = image_style == ImageStyle::Parts;
+        if openai_parts && message.role == Role::User && !message.images.is_empty() {
             let mut parts: Vec<serde_json::Value> = Vec::with_capacity(1 + message.images.len());
             if !message.content.is_empty() {
                 parts.push(serde_json::json!({ "type": "text", "text": message.content }));
@@ -345,6 +385,26 @@ fn request_messages(
             request.push(serde_json::json!({ "role": "user", "content": parts }));
             continue;
         }
+        if image_style == ImageStyle::Ollama
+            && message.role == Role::User
+            && !message.images.is_empty()
+        {
+            let mut value = serde_json::to_value(message)?;
+            if let Some(object) = value.as_object_mut() {
+                let attached = object
+                    .remove("images")
+                    .and_then(|images| images.as_array().cloned())
+                    .unwrap_or_default();
+                let images = attached
+                    .iter()
+                    .filter_map(|image| image.get("data").and_then(serde_json::Value::as_str))
+                    .map(|data| serde_json::Value::String(data.to_owned()))
+                    .collect::<Vec<_>>();
+                object.insert("images".to_owned(), serde_json::Value::from(images));
+            }
+            request.push(value);
+            continue;
+        }
         if message.role == Role::Assistant
             && message.content.is_empty()
             && message.tool_calls.is_none()
@@ -356,11 +416,15 @@ fn request_messages(
             if let Some(object) = value.as_object_mut() {
                 object.remove("tool_calls");
                 object.remove("tool_call_id");
-                object.remove("images");
             }
             if message.role == Role::Assistant && message.content.is_empty() {
                 continue;
             }
+        }
+        // Parts and Ollama branches above already carry the images; anything
+        // left in the plain path must not leak the raw attachment field.
+        if let Some(object) = value.as_object_mut() {
+            object.remove("images");
         }
         request.push(value);
     }
@@ -778,8 +842,8 @@ fn parse_ollama_line(line: &str) -> Result<(Vec<ParsedEvent>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiState, ParsedEvent, completion_url, parse_ollama_line, parse_openai_line,
-        progress_detail, request_messages, response_error_detail,
+        ImageStyle, OpenAiState, ParsedEvent, completion_url, parse_ollama_line,
+        parse_openai_line, progress_detail, request_messages, response_error_detail,
     };
     use crate::session::{Message, Role, ToolCall};
 
@@ -865,12 +929,12 @@ mod tests {
             Message::tool_result("call_1", "contents"),
         ];
 
-        let tooling = request_messages(&messages, true, None, None).unwrap();
+        let tooling = request_messages(&messages, true, ImageStyle::None, None, None).unwrap();
         assert_eq!(tooling[0]["role"], "system");
         assert_eq!(tooling[2]["tool_calls"][0]["function"]["name"], "read_file");
         assert_eq!(tooling[3]["tool_call_id"], "call_1");
 
-        let plain = request_messages(&messages, false, None, None).unwrap();
+        let plain = request_messages(&messages, false, ImageStyle::None, None, None).unwrap();
         assert!(
             plain
                 .iter()
@@ -886,9 +950,15 @@ mod tests {
     #[test]
     fn the_mode_instruction_lands_in_the_system_prompt() {
         let messages = vec![Message::new(Role::User, "hi")];
-        let plain = request_messages(&messages, true, None, None).unwrap();
-        let plan =
-            request_messages(&messages, true, None, Some("PLAN MODE: propose only")).unwrap();
+        let plain = request_messages(&messages, true, ImageStyle::None, None, None).unwrap();
+        let plan = request_messages(
+            &messages,
+            true,
+            ImageStyle::None,
+            None,
+            Some("PLAN MODE: propose only"),
+        )
+        .unwrap();
         assert!(
             !plain[0]["content"]
                 .as_str()
@@ -907,6 +977,7 @@ mod tests {
         let request = request_messages(
             &messages,
             true,
+            ImageStyle::None,
             Some(" Always answer in rhyme. "),
             Some("PLAN MODE: propose only"),
         )
@@ -918,9 +989,57 @@ mod tests {
         assert!(system.find("Always answer").unwrap() < system.find("PLAN MODE").unwrap());
         // A blank prompt adds nothing.
         assert_eq!(
-            request_messages(&messages, true, Some("  "), None).unwrap(),
-            request_messages(&messages, true, None, None).unwrap()
+            request_messages(
+                &messages,
+                true,
+                ImageStyle::None,
+                Some("  "),
+                None
+            )
+            .unwrap(),
+            request_messages(&messages, true, ImageStyle::None, None, None).unwrap()
         );
+    }
+
+    #[test]
+    fn attached_images_travel_in_the_providers_own_format() {
+        use crate::session::ImageAttachment;
+
+        let mut message = Message::new(Role::User, "what changed?");
+        message.images.push(ImageAttachment {
+            name: "shot.png".to_owned(),
+            data: "aWNvbg==".to_owned(),
+        });
+        let messages = vec![message];
+
+        let parts = request_messages(&messages, true, ImageStyle::Parts, None, None).unwrap();
+        let sent = parts
+            .last()
+            .unwrap()
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let urls = sent
+            .iter()
+            .filter_map(|part| part.get("image_url").and_then(serde_json::Value::as_object))
+            .collect::<Vec<_>>();
+        assert_eq!(urls.len(), 1);
+        assert_eq!(
+            urls[0]["url"],
+            "data:image/png;base64,aWNvbg=="
+        );
+        assert!(parts.last().unwrap().get("images").is_none());
+
+        // Ollama wants a flat base64 array on the message itself.
+        let ollama = request_messages(&messages, true, ImageStyle::Ollama, None, None).unwrap();
+        let last = ollama.last().unwrap();
+        assert_eq!(last["content"], "what changed?");
+        assert_eq!(last["images"][0], "aWNvbg==");
+        // Plain requests keep the raw attachment field out.
+        let plain =
+            request_messages(&messages, false, ImageStyle::None, None, None).unwrap();
+        assert!(plain.last().unwrap().get("images").is_none());
+        assert_eq!(plain.last().unwrap()["role"], "user");
     }
 
     #[test]

@@ -126,6 +126,15 @@ impl Message {
     }
 }
 
+/// One checklist task the model maintains, kept in the session itself so it
+/// survives restarts without a workspace file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TaskState {
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     version: u32,
@@ -136,6 +145,9 @@ pub struct Session {
     /// without forgetting them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// The todo checklist from todo_write, native instead of `todo.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskState>,
 }
 
 impl Default for Session {
@@ -155,6 +167,7 @@ impl Session {
             title: "New session".to_owned(),
             messages: Vec::new(),
             summary: None,
+            tasks: Vec::new(),
         }
     }
 

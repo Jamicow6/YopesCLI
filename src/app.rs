@@ -20,11 +20,15 @@ use crate::{
     catalog::{self, Catalog},
     config::{self, AuthKind, Connection, ProviderKind, SavedModel},
     diff::FileDiff,
-    session::{self, ImageAttachment, Message, Role, Session, ToolCall},
+    session::{
+        self, ImageAttachment, Message, Role, Session, TaskState, ToolCall,
+    },
     tools,
 };
 
 const MAX_TOOL_ROUNDS: usize = 24;
+/// The choices the /effort command accepts, printed in its messages.
+const EFFORT_CHOICES: &str = "Usage: /effort off|none|low|medium|high|xhigh";
 
 /// Estimated prompt tokens that trigger compaction of older turns.
 const COMPACTION_THRESHOLD_TOKENS: u64 = 32_000;
@@ -66,7 +70,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 9] = [
+pub const COMMANDS: [CommandSpec; 10] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -106,6 +110,11 @@ pub const COMMANDS: [CommandSpec; 9] = [
         name: "/compact",
         description: "Compact history now; auto on|off",
         argument: Some("on|off|now"),
+    },
+    CommandSpec {
+        name: "/effort",
+        description: "Show or set reasoning effort",
+        argument: Some("level"),
     },
     CommandSpec {
         name: "/quit",
@@ -214,7 +223,9 @@ impl Mode {
     pub fn denied(self, tool: &str) -> bool {
         match self {
             Self::Build => false,
-            Self::Plan => matches!(tool, "write_file" | "edit_file" | "run_command"),
+            Self::Plan => {
+                matches!(tool, "write_file" | "edit_file" | "multi_edit" | "run_command" | "bash_background")
+            }
             Self::Chat => true,
         }
     }
@@ -287,6 +298,8 @@ fn pixel_color(pixel: &image::Rgba<u8>) -> Color {
 pub struct ToolApproval {
     pub call: ToolCall,
     pub note: Option<String>,
+    /// Change previews of a write or edit, drawn in the dialog itself.
+    pub diffs: Vec<FileDiff>,
     pub scroll: usize,
     pub page_height: u16,
 }
@@ -298,6 +311,8 @@ pub struct RunningTool {
     pub before: Option<String>,
     /// Whether the write or edit target existed before the call ran.
     pub existed: bool,
+    /// Every file the call may change and whether each existed before.
+    pub targets: Vec<(String, bool)>,
 }
 
 /// Filter state of the `/model` popup.
@@ -368,7 +383,7 @@ pub struct ToolEvent {
 
 /// A diff shown under a tool result in the conversation.
 pub struct ChangeReport {
-    pub diff: FileDiff,
+    pub diffs: Vec<FileDiff>,
     pub side_by_side: bool,
 }
 
@@ -1118,17 +1133,23 @@ impl App {
         self.connect.as_ref()
     }
 
-    /// An image arrived from the clipboard: queue it and confirm briefly.
+    /// A clipboard read arrived: queue it as an image or insert its text.
     pub fn on_paste_image(&mut self, result: Result<(String, String), String>) -> Action {
         match result {
-            Ok((_, data)) => {
-                let name = format!("paste-{}.png", self.next_image);
-                self.next_image += 1;
-                self.attachments.push(ImageAttachment { name, data });
-                self.info(format!(
-                    "Image {} attached — send it with the next message.",
-                    self.attachments.len()
-                ));
+            Ok((kind, payload)) => {
+                if kind == "text" {
+                    // The same route as a bracketed paste keeps the caret,
+                    // connect fields and help overlay behaving the same.
+                    self.handle_paste(&payload);
+                } else {
+                    let name = format!("paste-{}.png", self.next_image);
+                    self.next_image += 1;
+                    self.attachments.push(ImageAttachment { name, data: payload });
+                    self.info(format!(
+                        "Image {} attached — send it with the next message.",
+                        self.attachments.len()
+                    ));
+                }
             }
             Err(error) => self.error(error),
         }
@@ -1903,6 +1924,7 @@ impl App {
         self.running_tool = Some(RunningTool {
             existed: tools::target_existed(&call),
             before: preview.before,
+            targets: tools::edit_targets(&call),
             call: call.clone(),
             started: Instant::now(),
         });
@@ -1936,6 +1958,7 @@ impl App {
             self.approval = Some(ToolApproval {
                 call,
                 note: change.note,
+                diffs: change.diffs,
                 scroll: 0,
                 page_height: 0,
             });
@@ -3176,6 +3199,29 @@ impl App {
                     self.error("Usage: /compact on|off|now");
                 }
             }
+            "/effort" => {
+                let value = parts.next().unwrap_or_default().to_ascii_lowercase();
+                if value.is_empty() {
+                    match self.backend.reasoning_effort() {
+                        Some(effort) => self.info(format!(
+                            "Reasoning effort: {effort} · /effort to toggle, {EFFORT_CHOICES}"
+                        )),
+                        None => self.info(format!(
+                            "Reasoning effort: backend default · {EFFORT_CHOICES}"
+                        )),
+                    }
+                } else if matches!(value.as_str(), "off" | "none") {
+                    self.persist_reasoning_effort(None);
+                    self.backend.set_reasoning_effort(None);
+                    self.info("Reasoning effort off — the backend default applies");
+                } else if matches!(value.as_str(), "low" | "medium" | "high" | "xhigh") {
+                    self.persist_reasoning_effort(Some(value.clone()));
+                    self.backend.set_reasoning_effort(Some(value.clone()));
+                    self.info(format!("Reasoning effort set to {value}"));
+                } else {
+                    self.error(format!("Usage: {EFFORT_CHOICES}"));
+                }
+            }
             "/quit" => {
                 self.should_quit = true;
                 return Action::Quit;
@@ -3412,11 +3458,34 @@ impl App {
         let existed = running.existed;
         let content = match event.result {
             Ok(output) => {
-                if let Some(diff) = tools::applied_change(&event.call, before, existed) {
+                if event.call.function.name == "todo_write" {
+                    if let Ok(tasks) = serde_json::from_str::<Vec<TaskState>>(&output) {
+                        let done = tasks.iter().filter(|task| task.done).count();
+                        let count = tasks.len();
+                        self.session.tasks = tasks;
+                        self.record_tool_result(
+                            event.call.id,
+                            format!(
+                                "Stored {count} task{} ({done} done); the Progress panel shows them.",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                        );
+                        self.follow_tail = true;
+                        self.save_session();
+                        return self.advance_tools();
+                    }
+                }
+                let diffs = tools::applied_change_all(
+                    &event.call,
+                    before,
+                    existed,
+                    &running.targets,
+                );
+                if !diffs.is_empty() {
                     self.changes.insert(
                         event.call.id.clone(),
                         ChangeReport {
-                            diff,
+                            diffs,
                             side_by_side: self.diff_sides,
                         },
                     );
@@ -3497,6 +3566,13 @@ impl App {
     fn persist_auto_compact(&mut self, value: bool) {
         if let Err(error) = config::save_auto_compact(&self.config_path, value) {
             self.error(format!("Could not save the compact setting: {error:#}"));
+        }
+    }
+
+    /// Store the reasoning effort in the saved config.
+    fn persist_reasoning_effort(&mut self, value: Option<String>) {
+        if let Err(error) = config::save_reasoning_effort(&self.config_path, value) {
+            self.error(format!("Could not save the reasoning effort: {error:#}"));
         }
     }
 
@@ -3624,12 +3700,13 @@ mod tests {
             command_names("/"),
             vec![
                 "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/system", "/compact",
-                "/quit",
+                "/effort", "/quit",
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);
         assert_eq!(command_names("/m"), vec!["/model"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
+        assert_eq!(command_names("/e"), vec!["/effort"]);
         assert_eq!(command_names("/MO"), vec!["/model"]);
         assert!(command_names("/model gpt").is_empty());
         assert!(command_names("hello").is_empty());
@@ -3745,7 +3822,9 @@ mod tests {
         assert!(!Mode::Plan.denied("web_search"));
         assert!(Mode::Plan.denied("write_file"));
         assert!(Mode::Plan.denied("edit_file"));
+        assert!(Mode::Plan.denied("multi_edit"));
         assert!(Mode::Plan.denied("run_command"));
+        assert!(Mode::Plan.denied("bash_background"));
         assert!(Mode::Chat.denied("read_file"));
         assert!(
             Mode::Plan

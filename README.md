@@ -15,7 +15,13 @@ A better coding CLI, Built with Rust, Ratatui, and Tokio.
 
 ## Install
 
-Download the latest build for your platform from [Releases](https://github.com/Jamicow6/YopesCLI/releases). To build or run from a checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Download the latest build for your platform from [Releases](https://github.com/Jamicow6/YopesCLI/releases), install it with PowerShell on Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/Jamicow6/YopesCLI/main/install.ps1 | iex
+```
+
+The script picks the latest release, verifies its SHA256SUMS checksum, installs `yopes.exe` to `%LOCALAPPDATA%\Programs\yopes`, and adds it to your user PATH. To build or run from a checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Keys
 
@@ -34,6 +40,7 @@ Download the latest build for your platform from [Releases](https://github.com/J
 | `Ctrl+U` | Clear the composer |
 | `Ctrl+W` | Delete the previous word |
 | `Ctrl+A` / `Ctrl+E` | Move to start / end |
+| `Ctrl+V` | Paste: an image attaches to the next message, or text inserts into the composer |
 | `Up` / `Down` | Move through the palette, or scroll the conversation |
 | `PageUp` / `PageDown` | Scroll one page |
 | `End` | Jump to the latest message |
@@ -56,11 +63,13 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 - `/system` — show the current custom system prompt; `/system off` removes it.
 - `/compact` — summarize older turns in place when the history grows long.
 - `/compact on|off` — turn automatic compaction on or off; `/compact now` compacts without waiting for the context to fill.
+- `/effort` — show the current reasoning effort, or the backend default.
+- `/effort off|none|low|medium|high|xhigh` — set the reasoning effort sent with each request; `off` or `none` returns to the backend default. The setting is saved with the connection.
 - `/quit` — save and quit.
 
 ### Tools
 
-Yopes offers tools to OpenAI-compatible providers (`openai` and `custom`): `list_dir`, `read_file`, `write_file`, `edit_file`, `run_command`, `web_search`, `todo_write`, and `delegate` — the last one hands a self-contained subtask to a subagent on the same provider and model; it has no tools and returns its final answer as the tool result, with an approval prompt before it runs. Ollama sessions remain text-only for now.
+Yopes offers tools to OpenAI-compatible providers (`openai` and `custom`): `list_dir`, `read_file`, `glob`, and `grep` (`grep` narrows matches to a file type like `*.rs`), `write_file`, `edit_file`, and `multi_edit` (a batch of edits applied to one or more files only after every replay validates — the approval dialog previews a combined diff across all touched files), `run_command` plus the background trio `bash_background` / `bash_output` / `bash_kill`, `web_search` and `web_fetch` (HTML is stripped to text and the response is capped), `todo_write`, and `delegate` — the last one hands a self-contained subtask to a subagent on the same provider and model; it has no tools and returns its final answer as the tool result, with an approval prompt before it runs.
 
 Tool modes:
 
@@ -69,7 +78,11 @@ Tool modes:
 - `auto` — every tool call runs automatically.
 - `ask` — every tool call asks for approval.
 
-When a tool needs approval, yopes shows its arguments and, for `write_file` and `edit_file`, a diff of the change. The default view is a unified diff with line numbers, hunk headers, red deletions, and green insertions. Press `v` for a side-by-side view. Press `Enter` to run the tool, `a` to always allow that tool for the current session, or `Esc` to deny it. Denials and errors are returned to the model, and the model continues the turn after each tool result.
+When a tool needs approval, yopes shows its arguments and, for `write_file`, `edit_file`, and `multi_edit`, a diff of the change. The default view is a unified diff with line numbers, hunk headers, red deletions, and green insertions. Press `v` for a side-by-side view. Press `Enter` to run the tool, `a` to always allow that tool for the current session, or `Esc` to deny it. Denials and errors are returned to the model, and the model continues the turn after each tool result.
+
+`run_command` prefers Git Bash (found by probing `where git` on Windows) and otherwise falls back to `cmd /C` on Windows or `sh -c` elsewhere. The background trio uses the same detection; when no bash is found it refuses gracefully and reports that to the model instead of failing the turn. In plan mode plans stay plans — `write_file`, `edit_file`, `multi_edit`, `run_command`, and `bash_background` are denied before they can change anything.
+
+`todo_write` keeps its task list in the saved session rather than a `todo.md` on disk, and the interface shows the list in a Progress panel (one checked or empty box per task) that travels with the session.
 
 ### Connecting a provider
 
