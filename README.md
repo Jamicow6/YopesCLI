@@ -65,6 +65,7 @@ Mouse wheel scrolling is supported. Type `/` to see the available commands in a 
 - `/compact on|off` — turn automatic compaction on or off; `/compact now` compacts without waiting for the context to fill.
 - `/effort` — show the current reasoning effort, or the backend default.
 - `/effort off|none|low|medium|high|xhigh` — set the reasoning effort sent with each request; `off` or `none` returns to the backend default. The setting is saved with the connection.
+- `/skills` — list installed skills, with where each one came from.
 - `/quit` — save and quit.
 
 ### Tools
@@ -83,6 +84,29 @@ When a tool needs approval, yopes shows its arguments and, for `write_file`, `ed
 `run_command` prefers Git Bash (found by probing `where git` on Windows) and otherwise falls back to `cmd /C` on Windows or `sh -c` elsewhere. The background trio uses the same detection; when no bash is found it refuses gracefully and reports that to the model instead of failing the turn. In plan mode plans stay plans — `write_file`, `edit_file`, `multi_edit`, `run_command`, and `bash_background` are denied before they can change anything.
 
 `todo_write` keeps its task list in the saved session rather than a `todo.md` on disk, and the interface shows the list in a Progress panel (one checked or empty box per task) that travels with the session.
+
+`todo_write` keeps its task list in the saved session rather than a `todo.md` on disk, and the interface shows the list in a Progress panel (one checked or empty box per task) that travels with the session.
+
+### Skills
+
+Skills are `SKILL.md` procedure packs the model loads on demand, in the Agent Skills format Claude Code uses. Put one under `.yopes/skills/<name>/` in the workspace (committed, shared) or in `~/.yopes/skills/` (personal, every project); `~/.claude/skills/`, `.claude/commands/`, and project `.claude/skills/` are read too, so existing Claude Code skills work unchanged. Each file holds YAML frontmatter followed by instructions:
+
+```markdown
+---
+name: deploy
+description: Deploy the app. Use when the user asks to ship or release.
+disable-model-invocation: true
+---
+
+## Steps
+1. Commit the work.
+2. Push the tag.
+```
+
+- The builtin system prompt lists every installed skill's name and `description`; the model reads the file with `read_file` and applies it whenever the situation matches, so a skill costs nothing until it is used.
+- Type `/<name>` (for example `/deploy`) to invoke a skill directly; the content is injected into the turn with your arguments, even when tools are off.
+- `~/.yopes/skills` and `~/.claude/skills` win over the workspace copies of the same name; builtins keep their `/name` regardless.
+- `when_to_use` extends the description shown to the model; `disable-model-invocation: true` keeps the model from auto-loading it (you still can), and `user-invocable: false` hides it from `/name` (the model still may use it). Only these fields are known; others are ignored.
 
 ### Connecting a provider
 
