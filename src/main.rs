@@ -284,7 +284,7 @@ fn dispatch(
             let sender = paste_sender.clone();
             tokio::spawn(async move {
                 // Anyhow's chain needs rendering before crossing the channel.
-                let read = match tokio::task::spawn_blocking(read_clipboard_image).await {
+                let read = match tokio::task::spawn_blocking(read_clipboard).await {
                     Ok(Ok(result)) => Ok(result),
                     Ok(Err(error)) => Err(format!("{error:#}")),
                     Err(join) => Err(format!("paste task failed: {join}")),
@@ -373,12 +373,69 @@ fn ctrl_c_interrupt() -> Pin<Box<dyn Future<Output = ()> + Send>> {
     })
 }
 
-/// Read the clipboard as a PNG via PowerShell, returning its base64 text.
+/// Read the clipboard, preferring an image; through PowerShell on Windows.
+#[cfg(windows)]
+fn read_clipboard() -> Result<(String, String), String> {
+    let image = read_clipboard_image().map_err(|error| format!("{error:#}"))?;
+    if let Some(found) = image {
+        return Ok(found);
+    }
+    match read_clipboard_text() {
+        Some(text) => Ok(("text".to_owned(), text)),
+        None => Err("the clipboard holds neither text nor an image".to_owned()),
+    }
+}
+
+#[cfg(not(windows))]
+fn read_clipboard() -> Result<(String, String), String> {
+    for argv in [
+        vec!["pbpaste"],
+        vec!["xclip", "-selection", "clipboard", "-o"],
+        vec!["wl-paste", "--no-newline"],
+    ] {
+        if let Ok(output) = std::process::Command::new(argv[0]).args(&argv[1..]).output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let text = text.trim();
+                if !text.is_empty() {
+                    return Ok(("text".to_owned(), text.to_owned()));
+                }
+            }
+        }
+    }
+    Err("the clipboard holds neither text nor an image on this platform".to_owned())
+}
+
+/// Read clipboard text with `Get-Clipboard -Raw`; `None` when it has none.
+#[cfg(windows)]
+fn read_clipboard_text() -> Option<String> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-STA",
+            "-Command",
+            "[Console]::Out.Write((Get-Clipboard -Raw))",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// Read the clipboard as a PNG via PowerShell, returning `None` when the
+/// clipboard holds no image.
 ///
 /// PowerShell encodes the image itself so binary data never crosses stdout,
 /// which Windows PowerShell would otherwise re-encode.
 #[cfg(windows)]
-fn read_clipboard_image() -> Result<(String, String)> {
+fn read_clipboard_image() -> Result<Option<(String, String)>> {
     use std::process::Command as ProcessCommand;
 
     const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; \
@@ -393,18 +450,18 @@ fn read_clipboard_image() -> Result<(String, String)> {
         .output()
         .context("running powershell to read the clipboard")?;
     if output.status.code() == Some(2) {
-        bail!("the clipboard does not hold an image");
+        return Ok(None);
     }
     let encoded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || encoded.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("could not read the clipboard image: {}", stderr.trim());
     }
-    Ok(("paste".to_owned(), encoded))
+    Ok(Some(("paste".to_owned(), encoded)))
 }
 
 #[cfg(not(windows))]
-fn read_clipboard_image() -> Result<(String, String)> {
+fn read_clipboard_image() -> Result<Option<(String, String)>> {
     bail!("image paste is currently only supported on windows")
 }
 
