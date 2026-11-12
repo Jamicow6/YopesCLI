@@ -42,7 +42,7 @@ use crate::{
     app::{Action, App, ToolEvent},
     backend::{Backend, StreamEvent},
     catalog::FetchResult,
-    config::{AuthKind, Cli, Command, Config, load_session},
+    config::{Cli, Command, Config, load_session},
 };
 
 #[tokio::main]

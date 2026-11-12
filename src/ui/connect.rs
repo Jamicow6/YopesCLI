@@ -69,7 +69,14 @@ pub(super) fn draw_connect(
     frame.render_widget(Paragraph::new(Line::from(spans)), rows[index]);
     index += 1;
 
-    draw_connect_list(frame, app, connect, spinner, logo, rows[index]);
+    draw_connect_list(
+        frame,
+        app,
+        connect,
+        spinner,
+        logo.map(|v| &**v),
+        rows[index],
+    );
     draw_connect_hint(frame, connect, rows[index + 1]);
 }
 
