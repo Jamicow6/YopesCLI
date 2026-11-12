@@ -927,6 +927,7 @@ impl App {
             | ConnectStage::ModelId
             | ConnectStage::ModelName
             | ConnectStage::Password
+            | ConnectStage::Unlock
             | ConnectStage::FasfasKey => {}
         }
         if finish_now {
@@ -1110,7 +1111,7 @@ impl App {
         // endpoint, reuse the live key so switching models never asks for the
         // encryption password again.
         let runtime_key = if auth.requires_token() {
-            stored_key.clone().or(unlocked).or_else(|| {
+            stored_key.clone().or_else(|| unlocked.clone()).or_else(|| {
                 (self.backend.base_url().trim_end_matches('/') == endpoint.trim_end_matches('/'))
                     .then(|| self.backend.api_key().map(str::to_owned))
                     .flatten()

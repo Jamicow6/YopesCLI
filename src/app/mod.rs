@@ -565,7 +565,10 @@ impl ConnectState {
                     .collect();
                 // A stored key is reused when a model is picked, so the row
                 // that replaces it has to be there too.
-                if self.stored_secret.is_some_and(|secret| secret.has_key())
+                if self
+                    .stored_secret
+                    .as_ref()
+                    .is_some_and(|secret| secret.has_key())
                     && (filter.is_empty() || "change api key".contains(filter.as_str()))
                 {
                     items.push(ConnectItem {
