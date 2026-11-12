@@ -3,11 +3,11 @@
 //!
 //! `mod.rs` holds the contract shared by every tool: the JSON schema in
 //! `definitions`, the approval and preview rules, and `execute`. The tools
-//! themselves live in one module per family: `fs` (read, write, edit),
+//! themselves live in one module per family: `files` (read, write, edit),
 //! `search` (glob, grep), `shell` (commands and background jobs), `web`
 //! (search, fetch) and `todo`.
 
-mod fs;
+mod files;
 mod search;
 mod shell;
 mod todo;
@@ -19,6 +19,8 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+pub(crate) use files::{change_preview, edit_targets};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -656,18 +658,18 @@ pub fn command_text(call: &ToolCall) -> Option<String> {
 pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) -> Option<FileDiff> {
     match call.function.name.as_str() {
         "write_file" => {
-            let args: fs::WriteFileArgs = parse(&call.function.arguments).ok()?;
+            let args: files::WriteFileArgs = parse(&call.function.arguments).ok()?;
             let before = before.unwrap_or_default();
             Some(FileDiff::new(args.path, &before, &args.content, !existed))
         }
         "edit_file" => {
-            let args: fs::EditFileArgs = parse(&call.function.arguments).ok()?;
+            let args: files::EditFileArgs = parse(&call.function.arguments).ok()?;
             if args.old_text.is_empty() {
                 return None;
             }
             let after = fs::read_to_string(resolve(&args.path)).ok()?;
             let before = before.or_else(|| {
-                fs::apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
+                files::apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
                     .map(|(text, _)| text)
             })?;
             if before == after {
@@ -690,17 +692,17 @@ pub fn applied_change_all(
 ) -> Vec<FileDiff> {
     if call.function.name == "multi_edit" {
         let arguments = call.function.arguments.clone();
-        return fs::multi_edit_applied(&arguments, targets);
+        return files::multi_edit_applied(&arguments, targets);
     }
     applied_change(call, before, existed).into_iter().collect()
 }
 
 fn write_file_preview(arguments: &str) -> ChangePreview {
-    let args: fs::WriteFileArgs = match parse(arguments) {
+    let args: files::WriteFileArgs = match parse(arguments) {
         Ok(args) => args,
         Err(error) => return preview_error(error),
     };
-    let fs::WriteFileArgs { path, content } = args;
+    let files::WriteFileArgs { path, content } = args;
     let resolved = resolve(&path);
     let exists = resolved.exists();
     let before = match read_preview(&resolved, &path) {
@@ -715,11 +717,11 @@ fn write_file_preview(arguments: &str) -> ChangePreview {
 }
 
 fn edit_file_preview(arguments: &str) -> ChangePreview {
-    let args: fs::EditFileArgs = match parse(arguments) {
+    let args: files::EditFileArgs = match parse(arguments) {
         Ok(args) => args,
         Err(error) => return preview_error(error),
     };
-    let fs::EditFileArgs {
+    let files::EditFileArgs {
         path,
         old_text,
         new_text,
@@ -733,7 +735,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
     let attempted = if old_text.is_empty() {
         None
     } else {
-        fs::apply_text_edit(&before, &old_text, &new_text, replace_all)
+        files::apply_text_edit(&before, &old_text, &new_text, replace_all)
     };
     let matches = attempted.as_ref().map_or(0, |(_, count)| *count);
     let note = if old_text.is_empty() {
@@ -787,13 +789,13 @@ fn read_preview(path: &Path, display: &str) -> Result<String> {
 
 pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
-        "list_dir" => fs::list_dir(&call.function.arguments),
-        "read_file" => fs::read_file(&call.function.arguments),
+        "list_dir" => files::list_dir(&call.function.arguments),
+        "read_file" => files::read_file(&call.function.arguments),
         "glob" => search::glob(&call.function.arguments),
         "grep" => search::grep(&call.function.arguments),
-        "write_file" => fs::write_file(&call.function.arguments),
-        "edit_file" => fs::edit_file(&call.function.arguments),
-        "multi_edit" => fs::multi_edit(&call.function.arguments),
+        "write_file" => files::write_file(&call.function.arguments),
+        "edit_file" => files::edit_file(&call.function.arguments),
+        "multi_edit" => files::multi_edit(&call.function.arguments),
         "run_command" => shell::run_command(&call.function.arguments),
         "bash_background" => shell::bash_background(&call.function.arguments),
         "bash_output" => shell::bash_output(&call.function.arguments),

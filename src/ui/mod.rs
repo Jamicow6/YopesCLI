@@ -28,8 +28,7 @@ mod help;
 mod pickers;
 mod transcript;
 
-#[cfg(test)]
-use approval::{approval_lines, frame_lines};
+use self::{approval::*, composer::*, connect::*, help::*, pickers::*, transcript::*};
 
 /// How a `read_file` result surfaces in the transcript: quiet. The header and
 /// range lines render instead of the contents; a click still expands it.
@@ -237,13 +236,12 @@ fn truncate(text: &str, width: usize) -> String {
 fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
     let mut output = Vec::new();
     let mut in_code = false;
-    let mut language = String::new();
 
     for raw in markdown.split('\n') {
         let trimmed = raw.trim();
         if let Some(fence) = trimmed.strip_prefix("```") {
             if !in_code {
-                language = fence.trim().to_owned();
+                let language = fence.trim();
                 in_code = true;
                 output.push(Line::styled(
                     format!(
@@ -251,7 +249,7 @@ fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
                         if language.is_empty() {
                             "code"
                         } else {
-                            language.as_str()
+                            language
                         }
                     ),
                     Style::default().fg(MUTED),
