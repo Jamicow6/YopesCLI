@@ -1018,14 +1018,14 @@ mod tests {
     }
     #[test]
     fn escaped_pipes_inside_code_spans_stay_in_one_table_cell() {
-        let lines = render("| expression | meaning |\\n|---|---|\\n| `a\\\\|b` | literal pipe |");
+        let lines = render("| expression | meaning |\n|---|---|\n| `a\\|b` | literal pipe |");
         assert!(lines.iter().any(|line| line.contains("`a|b`")));
-        assert!(!lines.iter().any(|line| line.contains("\\\\|")));
+        assert!(!lines.iter().any(|line| line.contains("\\|")));
     }
 
     #[test]
     fn headings_preserve_language_names_ending_in_hashes() {
-        let lines = render("# C#\\n\\n# Closing marker ##");
+        let lines = render("# C#\n\n# Closing marker ##");
         assert!(lines.iter().any(|line| line.contains("C#")));
         assert!(lines.iter().any(|line| line.contains("Closing marker")));
         assert!(!lines.iter().any(|line| line.contains("Closing marker ##")));
