@@ -131,6 +131,9 @@ pub(super) fn glob_matches(segments: &[String], path: &[String]) -> bool {
 /// One path segment: `*`, `?`, and literals, case-insensitive like paths on
 /// Windows.
 pub(super) fn glob_segment(pattern: &[char], text: &[char]) -> bool {
+    if text.contains(&'/') {
+        return false;
+    }
     let Some((&head, rest)) = pattern.split_first() else {
         return text.is_empty();
     };
