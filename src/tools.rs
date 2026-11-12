@@ -98,7 +98,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Start long-running or detached work with bash_background, then read it with \
              bash_output and stop it with bash_kill when it has served its purpose. \
              For multi-step work or when the user asks for a todo list, maintain the \
-             checklist with todo_write: send the whole list each call, marking done items. \
+             checklist with todo_write: send the whole list each call, marking done items, \
+             and send an empty list to close the checklist. \
              For an independent subtask use delegate: hand the subagent one self-contained \
              task with all the context it needs — it has no tools and returns a final answer. \
              Keep responses short and concrete. Paths may be relative to the working directory."
@@ -421,7 +422,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "todo_write",
-                "description": "Maintain the session task checklist. Rewrite the whole list each call: every item is an object with the task text and a done flag. The list is stored with the session, not as a file. Use it whenever the user asks for a todo list or a multi-step plan.",
+                "description": "Maintain the session task checklist. Rewrite the whole list each call: every item is an object with the task text and a done flag. Send an empty items list to close the checklist once everything is done. The list is stored with the session, not as a file. Use it whenever the user asks for a todo list or a multi-step plan.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2009,12 +2010,10 @@ const MAX_TODO_TEXT: usize = 500;
 /// the session, so the list never needs a workspace file.
 ///
 /// The model owns the list content: it sends the whole list every time, so
-/// the stored checklist is always what the model believes.
+/// the stored checklist is always what the model believes. An empty list is
+/// a deliberate close of the finished checklist, not a spill.
 fn todo_write(arguments: &str) -> Result<String> {
     let args: TodoWriteArgs = parse(arguments)?;
-    if args.items.is_empty() {
-        bail!("items cannot be empty");
-    }
     if args.items.len() > MAX_TODO_ITEMS {
         bail!("too many items; the checklist is capped at {MAX_TODO_ITEMS}");
     }
@@ -2523,11 +2522,10 @@ mod tests {
     }
 
     #[test]
-    fn todo_write_rejects_an_empty_list_and_previews_the_count() {
+    fn todo_write_allows_an_empty_list_to_clear_and_previews_the_count() {
         use super::execute;
         let empty = ToolCall::new("call_5", "todo_write", r#"{"items":[]}"#);
-        let error = execute(&empty, None).unwrap_err().to_string();
-        assert!(error.contains("items cannot be empty"));
+        assert_eq!(execute(&empty, None).unwrap(), "[]");
 
         let call = ToolCall::new(
             "call_6",
