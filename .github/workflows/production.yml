@@ -112,7 +112,12 @@ jobs:
           notes=notes.md
           echo "## What's Changed" > "$notes"
 
-          prev=$(git tag --list 'v*' --sort=-version:refname | head -1)
+          # The checkout does not fetch tags; pull them for the range below.
+          git fetch --tags -q origin
+
+          # The tag being published does not exist yet; exclude it anyway so a
+          # re-run of Production cannot compare against itself.
+          prev=$(git tag --list 'v*' --sort=-version:refname | grep -v -- "^$TAG$" | head -1 || true)
           seen=0
 
           if [ -n "$prev" ]; then
@@ -132,13 +137,17 @@ jobs:
               echo "- $subject ($(echo "$sha" | cut -c1-7))" >> "$notes"
               seen=1
             done < <(git log --no-merges --format='%H %s' "$prev..$GITHUB_SHA")
+
+            if [ "$seen" = 0 ]; then
+              echo "- No changes since $prev" >> "$notes"
+            fi
+
+            {
+              echo ""
+              echo "**Full Changelog:** https://github.com/$REPO/compare/$prev...$TAG"
+            } >> "$notes"
+          else
+            echo "- Initial release" >> "$notes"
           fi
-
-          [ "$seen" = 1 ] || echo "- Initial release" >> "$notes"
-
-          {
-            echo ""
-            echo "**Full Changelog:** https://github.com/$REPO/compare/$prev...$TAG"
-          } >> "$notes"
 
           gh release create "$TAG" dist/* --title "$TAG" --notes-file "$notes" --target "$GITHUB_SHA"
