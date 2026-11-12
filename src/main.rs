@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod catalog;
+mod clipboard;
 mod config;
 mod credentials;
 mod diff;
@@ -8,35 +9,26 @@ mod logos;
 mod session;
 mod skills;
 mod temp;
+mod terminal;
 mod tools;
 mod ui;
 mod update;
 
-use std::{
-    future::Future,
-    io::{self, Stdout},
-    pin::Pin,
-    time::Instant,
-};
+use std::{future::Future, io, pin::Pin, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    cursor::Show,
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, MouseEventKind,
-    },
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind},
     execute,
-    terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
-    },
 };
 use futures_util::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::{sync::mpsc, task::JoinHandle, time::Duration};
+
+use clipboard::read_clipboard;
+use terminal::{TerminalGuard, ctrl_c_interrupt};
 
 use crate::{
     app::{Action, App, ToolEvent},
@@ -482,100 +474,6 @@ fn dispatch(
     }
 }
 
-/// Resolves when the user interrupts. Works on every platform, including when
-/// the key event itself is swallowed.
-fn ctrl_c_interrupt() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-}
-
-/// Read the clipboard, preferring an image; through PowerShell on Windows.
-#[cfg(windows)]
-fn read_clipboard() -> Result<(String, String), String> {
-    let image = read_clipboard_image().map_err(|error| format!("{error:#}"))?;
-    if let Some(found) = image {
-        return Ok(found);
-    }
-    match read_clipboard_text() {
-        Some(text) => Ok(("text".to_owned(), text)),
-        None => Err("the clipboard holds neither text nor an image".to_owned()),
-    }
-}
-
-#[cfg(not(windows))]
-fn read_clipboard() -> Result<(String, String), String> {
-    for argv in [
-        vec!["pbpaste"],
-        vec!["xclip", "-selection", "clipboard", "-o"],
-        vec!["wl-paste", "--no-newline"],
-    ] {
-        if let Ok(output) = std::process::Command::new(argv[0])
-            .args(&argv[1..])
-            .output()
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let text = text.trim();
-                if !text.is_empty() {
-                    return Ok(("text".to_owned(), text.to_owned()));
-                }
-            }
-        }
-    }
-    Err("the clipboard holds neither text nor an image on this platform".to_owned())
-}
-
-/// Read clipboard text with `Get-Clipboard -Raw`; `None` when it has none.
-#[cfg(windows)]
-fn read_clipboard_text() -> Option<String> {
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-STA",
-            "-Command",
-            "[Console]::Out.Write((Get-Clipboard -Raw))",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() { None } else { Some(text) }
-}
-
-/// Read the clipboard as a PNG via PowerShell, returning `None` when the
-/// clipboard holds no image.
-///
-/// PowerShell encodes the image itself so binary data never crosses stdout,
-/// which Windows PowerShell would otherwise re-encode.
-#[cfg(windows)]
-fn read_clipboard_image() -> Result<Option<(String, String)>> {
-    use std::process::Command as ProcessCommand;
-
-    const SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; \
-        Add-Type -AssemblyName System.Drawing; \
-        $img = [System.Windows.Forms.Clipboard]::GetImage(); \
-        if ($img -eq $null) { exit 2 } \
-        $ms = New-Object System.IO.MemoryStream; \
-        $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); \
-        [Convert]::ToBase64String($ms.ToArray())";
-    let output = ProcessCommand::new("powershell")
-        .args(["-NoProfile", "-STA", "-Command", SCRIPT])
-        .output()
-        .context("running powershell to read the clipboard")?;
-    if output.status.code() == Some(2) {
-        return Ok(None);
-    }
-    let encoded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !output.status.success() || encoded.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("could not read the clipboard image: {}", stderr.trim());
-    }
-    Ok(Some(("paste".to_owned(), encoded)))
-}
-
 fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64) {
     if active_task
         .as_ref()
@@ -584,63 +482,5 @@ fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64)
         if let Some((_, task)) = active_task.take() {
             task.abort();
         }
-    }
-}
-
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-}
-
-impl TerminalGuard {
-    fn new() -> Result<Self> {
-        enable_raw_mode().context("enabling terminal raw mode")?;
-        let mut stdout = io::stdout();
-        if let Err(error) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture,
-            SetTitle("yopes"),
-            Show
-        ) {
-            let _ = disable_raw_mode();
-            let _ = execute!(
-                io::stdout(),
-                DisableMouseCapture,
-                DisableBracketedPaste,
-                LeaveAlternateScreen,
-                Show
-            );
-            return Err(error).context("initializing terminal");
-        }
-        let backend = CrosstermBackend::new(stdout);
-        match Terminal::new(backend) {
-            Ok(terminal) => Ok(Self { terminal }),
-            Err(error) => {
-                let _ = disable_raw_mode();
-                let _ = execute!(
-                    io::stdout(),
-                    DisableMouseCapture,
-                    DisableBracketedPaste,
-                    LeaveAlternateScreen,
-                    Show
-                );
-                Err(error).context("creating terminal")
-            }
-        }
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-            Show
-        );
-        let _ = self.terminal.show_cursor();
     }
 }
