@@ -1679,7 +1679,8 @@ fn bash_output(arguments: &str) -> Result<String> {
 
 fn bash_kill(arguments: &str) -> Result<String> {
     let args: BashJobArgs = parse(arguments)?;
-    let Some(job) = bash_jobs().get_mut(&args.job_id) else {
+    let mut jobs = bash_jobs();
+    let Some(job) = jobs.get_mut(&args.job_id) else {
         bail!("no bash job with id {}; it was never started or was already read", args.job_id);
     };
     let Some(child) = job.child.as_mut() else {
