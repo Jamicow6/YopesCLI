@@ -1133,17 +1133,23 @@ impl App {
         self.connect.as_ref()
     }
 
-    /// An image arrived from the clipboard: queue it and confirm briefly.
+    /// A clipboard read arrived: queue it as an image or insert its text.
     pub fn on_paste_image(&mut self, result: Result<(String, String), String>) -> Action {
         match result {
-            Ok((_, data)) => {
-                let name = format!("paste-{}.png", self.next_image);
-                self.next_image += 1;
-                self.attachments.push(ImageAttachment { name, data });
-                self.info(format!(
-                    "Image {} attached — send it with the next message.",
-                    self.attachments.len()
-                ));
+            Ok((kind, payload)) => {
+                if kind == "text" {
+                    // The same route as a bracketed paste keeps the caret,
+                    // connect fields and help overlay behaving the same.
+                    self.handle_paste(&payload);
+                } else {
+                    let name = format!("paste-{}.png", self.next_image);
+                    self.next_image += 1;
+                    self.attachments.push(ImageAttachment { name, data: payload });
+                    self.info(format!(
+                        "Image {} attached — send it with the next message.",
+                        self.attachments.len()
+                    ));
+                }
             }
             Err(error) => self.error(error),
         }
