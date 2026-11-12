@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
-use reqwest::{Client, Response};
+use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -268,7 +268,6 @@ impl Backend {
             builder
         })
         .await?;
-        let response = check_response(response, "OpenAI-compatible API").await?;
         let mut state = OpenAiState::default();
         consume_lines(response, |line| {
             let (parsed, done) = parse_openai_line(line, &mut state)?;
@@ -305,9 +304,7 @@ impl Backend {
                 .post(format!("{}/api/chat", self.base_url))
                 .json(&request)
         })
-        .await
-        .context("connecting to Ollama; is `ollama serve` running?")?;
-        let response = check_response(response, "Ollama").await?;
+        .await?;
         consume_lines(response, |line| {
             let (parsed, done) = parse_ollama_line(line)?;
             send_parsed(request_id, parsed, done, events)
@@ -440,15 +437,28 @@ fn request_messages(
     Ok(request)
 }
 
-/// How long to wait between connection retries, doubling up to the cap.
+/// How long to wait between retries, doubling up to the cap.
 const RETRY_MIN_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
-/// Send a request, retrying forever while the provider is unreachable.
+/// Whether a failed response is worth another try.
+///
+/// Client errors are the provider rejecting the request (bad key, unknown
+/// model, malformed body), so retrying cannot change the answer. Timeouts and
+/// rate limits are also 4xx, but they explicitly ask the caller to try again.
+fn retryable_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Send a request, retrying until it succeeds or the provider rejects it.
 ///
 /// DNS failures and refused connections are usually a dropped network or a
 /// sleeping server, so giving up wastes a turn the user can do nothing about.
-/// HTTP error statuses are *not* retried; those are answered by `check_response`.
+/// Server errors and rate limits are just as temporary. A rejected request
+/// (a 4xx other than 408/429) will not change on a retry, so it is returned
+/// to the caller.
 async fn send_with_retry<F>(provider: &str, build: F) -> Result<Response>
 where
     F: Fn() -> reqwest::RequestBuilder + Send,
@@ -457,35 +467,36 @@ where
     let mut attempt: u32 = 0;
     loop {
         attempt = attempt.saturating_add(1);
-        match build().send().await {
-            Ok(response) => return Ok(response),
+        let error = match build().send().await {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let detail = response_error_detail(&body);
+                let error = anyhow!("{provider} returned {}: {detail}", status.as_u16());
+                if !retryable_status(status) {
+                    return Err(error);
+                }
+                error
+            }
             Err(error) => {
                 let transient = error.is_connect() || error.is_timeout() || error.is_request();
                 if !transient {
                     return Err(error).with_context(|| format!("connecting to {provider}"));
                 }
-                // Long outages should not look like a hang.
-                if attempt > 3 {
-                    eprintln!(
-                        "{provider} unreachable ({attempt} tries); retrying in {}s · ctrl+c to stop",
-                        delay.as_secs()
-                    );
-                }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(RETRY_MAX_DELAY);
+                error.into()
             }
+        };
+        // Long outages should not look like a hang.
+        if attempt > 3 {
+            eprintln!(
+                "{provider} failed ({attempt} tries: {error:#}); retrying in {}s · ctrl+c to stop",
+                delay.as_secs()
+            );
         }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(RETRY_MAX_DELAY);
     }
-}
-
-async fn check_response(response: Response, provider: &str) -> Result<Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    let body = response.text().await.unwrap_or_default();
-    let detail = response_error_detail(&body);
-    bail!("{provider} returned {}: {detail}", status.as_u16());
 }
 
 fn response_error_detail(body: &str) -> String {
@@ -852,7 +863,7 @@ fn parse_ollama_line(line: &str) -> Result<(Vec<ParsedEvent>, bool)> {
 mod tests {
     use super::{
         ImageStyle, OpenAiState, ParsedEvent, completion_url, parse_ollama_line, parse_openai_line,
-        progress_detail, request_messages, response_error_detail,
+        progress_detail, request_messages, response_error_detail, retryable_status,
     };
     use crate::session::{Message, Role, ToolCall};
 
@@ -1050,6 +1061,30 @@ mod tests {
             parse_ollama_line(r#"{"done":true}"#).unwrap(),
             (Vec::new(), true)
         );
+    }
+
+    #[test]
+    fn rejected_requests_are_not_retried() {
+        use reqwest::StatusCode;
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ] {
+            assert!(!retryable_status(status), "{status} should not be retried");
+        }
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(retryable_status(status), "{status} should be retried");
+        }
     }
 
     #[test]
