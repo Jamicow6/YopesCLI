@@ -1052,8 +1052,7 @@ mod tests {
         let lines = markdown_lines("*Use `*` literally*", 40);
         assert_eq!(text_of(&lines[0]), "Use * literally");
         assert!(lines[0].spans.iter().any(|span| {
-            span.content.as_ref() == "*"
-                && span.style.add_modifier.contains(Modifier::ITALIC)
+            span.content.as_ref() == "*" && span.style.add_modifier.contains(Modifier::ITALIC)
         }));
     }
 }
