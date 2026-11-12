@@ -56,8 +56,11 @@ cargo run --release -- --provider ollama --model llama3.2
 ## Tests
 
 ```sh
-cargo test
+cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-GitHub Actions uses the **On-the-line** workflow as a compile-only gate on Linux and Windows before the **Production** workflow publishes release builds.
+GitHub Actions runs the same three checks plus a release compile in the
+**On-the-line** workflow on Linux and Windows before the **Production**
+workflow publishes release builds.
