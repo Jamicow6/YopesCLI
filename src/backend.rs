@@ -398,7 +398,7 @@ fn request_messages(
                 let images = attached
                     .iter()
                     .filter_map(|image| image.get("data").and_then(serde_json::Value::as_str))
-                    .map(serde_json::Value::String)
+                    .map(|data| serde_json::Value::String(data.to_owned()))
                     .collect::<Vec<_>>();
                 object.insert("images".to_owned(), serde_json::Value::from(images));
             }

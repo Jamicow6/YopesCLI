@@ -98,7 +98,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Start long-running or detached work with bash_background, then read it with \
              bash_output and stop it with bash_kill when it has served its purpose. \
              For multi-step work or when the user asks for a todo list, maintain the \
-             checklist with todo_write: send the whole list each call, marking done items. \             For an independent subtask use delegate: hand the subagent one self-contained \
+             checklist with todo_write: send the whole list each call, marking done items. \
+             For an independent subtask use delegate: hand the subagent one self-contained \
              task with all the context it needs — it has no tools and returns a final answer. \
              Keep responses short and concrete. Paths may be relative to the working directory."
         )
@@ -664,7 +665,7 @@ pub fn edit_targets(call: &ToolCall) -> Vec<(String, bool)> {
         Err(_) => return Vec::new(),
     };
     let mut targets: Vec<(String, bool)> = Vec::new();
-    let mut seen = |path: &str, targets: &mut Vec<(String, bool)>| {
+    let seen = |path: &str, targets: &mut Vec<(String, bool)>| {
         if path.is_empty() || targets.iter().any(|(tracked, _)| tracked == path) {
             return;
         }
@@ -1527,10 +1528,8 @@ fn detect_bash() -> Option<PathBuf> {
     if !probe.status.success() {
         return None;
     }
-    let git = String::from_utf8_lossy(&probe.stdout)
-        .lines()
-        .next()?
-        .trim();
+    let lossy = String::from_utf8_lossy(&probe.stdout);
+    let git = lossy.lines().next()?.trim();
     // git.exe usually lives in …\cmd or …\bin; bash.exe in …\bin or …\usr\bin.
     let root = PathBuf::from(git).parent()?.to_path_buf();
     let step_up = root.parent().map(|root| root.join("bin").join("bash.exe"));
@@ -1681,16 +1680,16 @@ fn bash_output(arguments: &str) -> Result<String> {
 fn bash_kill(arguments: &str) -> Result<String> {
     let args: BashJobArgs = parse(arguments)?;
     let Some(job) = bash_jobs().get_mut(&args.job_id) else {
-        bail!("no bash job with id {args.job_id}; it was never started or was already read");
+        bail!("no bash job with id {}; it was never started or was already read", args.job_id);
     };
     let Some(child) = job.child.as_mut() else {
-        return Ok(format!("Bash job {args.job_id} already finished."));
+        return Ok(format!("Bash job {} already finished.", args.job_id));
     };
     let _ = child.kill();
     let _ = child.wait();
     job.child = None;
     job.exit = Some(-1);
-    Ok(format!("Killed bash job {args.job_id}. It reported no exit code."))
+    Ok(format!("Killed bash job {}. It reported no exit code.", args.job_id))
 }
 
 #[derive(Deserialize)]
