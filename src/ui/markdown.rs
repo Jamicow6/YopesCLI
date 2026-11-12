@@ -192,7 +192,17 @@ fn heading(line: &str) -> Option<(usize, &str)> {
         return None;
     }
     let title = line.get(level..)?.strip_prefix(' ')?.trim();
-    let title = title.trim_end_matches('#').trim_end();
+    let trailing_hashes = title.chars().rev().take_while(|ch| *ch == '#').count();
+    let title = if trailing_hashes > 0 {
+        let before_hashes = &title[..title.len() - trailing_hashes];
+        if before_hashes.chars().next_back().is_some_and(char::is_whitespace) {
+            before_hashes.trim_end()
+        } else {
+            title
+        }
+    } else {
+        title
+    };
     if title.is_empty() {
         return None;
     }
@@ -332,7 +342,7 @@ fn list_line(line: &str) -> Option<Line<'static>> {
     let (task, content) = task_box(rest);
 
     let (marker, marker_style, content_style) = match (task, kind) {
-        (Some(checked), _) => {
+        (Some(checked), ListKind::Bullet) => {
             let style = if checked {
                 Style::default().fg(MUTED)
             } else {
@@ -345,6 +355,20 @@ fn list_line(line: &str) -> Option<Line<'static>> {
                 Style::default().fg(TEXT)
             };
             (text.to_owned(), style, content)
+        }
+        (Some(checked), ListKind::Ordered(number)) => {
+            let style = if checked {
+                Style::default().fg(MUTED)
+            } else {
+                Style::default().fg(ACCENT)
+            };
+            let checkbox = if checked { "[x] " } else { "[ ] " };
+            let content = if checked {
+                Style::default().fg(MUTED)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            (format!("{number}{checkbox}"), style, content)
         }
         (None, ListKind::Bullet) => {
             let symbol = match indent / 2 {
@@ -421,10 +445,14 @@ fn split_cells(line: &str) -> Vec<String> {
     let mut escaped = false;
     for ch in line.trim().chars() {
         if escaped {
+            // A backslash only escapes a table delimiter here. Preserve other
+            // Markdown escapes for the inline renderer to interpret later.
+            if ch != '|' {
+                current.push('\\');
+            }
             current.push(ch);
             escaped = false;
         } else if ch == '\\' {
-            current.push(ch);
             escaped = true;
         } else if ch == '|' {
             cells.push(current.trim().to_owned());
@@ -432,6 +460,9 @@ fn split_cells(line: &str) -> Vec<String> {
         } else {
             current.push(ch);
         }
+    }
+    if escaped {
+        current.push('\\');
     }
     cells.push(current.trim().to_owned());
     if cells.first().is_some_and(|cell| cell.is_empty()) {
@@ -646,6 +677,9 @@ fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
             if !rest.starts_with(marker) {
                 continue;
             }
+            if !emphasis_opens(text, index, marker.len()) {
+                continue;
+            }
             if marker.starts_with('_') && !underscore_opens(text, index, marker.len()) {
                 continue;
             }
@@ -762,24 +796,47 @@ fn is_url(text: &str) -> bool {
     text.starts_with("http://") || text.starts_with("https://") || text.starts_with("mailto:")
 }
 
+fn emphasis_opens(text: &str, at: usize, length: usize) -> bool {
+    text[at + length..]
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_whitespace())
+}
+
 fn closing_marker(text: &str, marker: &str) -> Option<usize> {
     let marker_char = marker.chars().next()?;
     let mut search = 0;
     while search < text.len() {
-        let found = text[search..].find(marker)?;
-        let at = search + found;
-        if !is_escaped(text, at) {
-            if marker.len() == 1 {
-                let before = text[..at].chars().next_back();
-                let after = text[at + marker_char.len_utf8()..].chars().next();
-                if before != Some(marker_char) && after != Some(marker_char) {
-                    return Some(at);
-                }
-            } else {
-                return Some(at);
+        let rest = &text[search..];
+        let ch = rest.chars().next()?;
+
+        // Delimiters inside code spans are literal and cannot close emphasis.
+        if ch == '`' {
+            if let Some((_, consumed)) = code_span(rest) {
+                search += consumed;
+                continue;
             }
         }
-        search = at + marker.len();
+
+        // Backslash-escaped delimiters are literal too.
+        if ch == '\\' {
+            search += ch.len_utf8();
+            if let Some(next) = text[search..].chars().next() {
+                search += next.len_utf8();
+            }
+            continue;
+        }
+
+        if rest.starts_with(marker) && !is_escaped(text, search) {
+            let before = text[..search].chars().next_back();
+            let after = text[search + marker.len()..].chars().next();
+            let not_adjacent = marker.len() != 1
+                || (before != Some(marker_char) && after != Some(marker_char));
+            if not_adjacent && before.is_some_and(|ch| !ch.is_whitespace()) {
+                return Some(search);
+            }
+        }
+        search += ch.len_utf8();
     }
     None
 }
@@ -959,4 +1016,41 @@ mod tests {
             assert!(!spans.is_empty(), "{text:?}");
         }
     }
+    #[test]
+    fn escaped_pipes_inside_code_spans_stay_in_one_table_cell() {
+        let lines = render("| expression | meaning |\\n|---|---|\\n| `a\\\\|b` | literal pipe |");
+        assert!(lines.iter().any(|line| line.contains("`a|b`")));
+        assert!(!lines.iter().any(|line| line.contains("\\\\|")));
+    }
+
+    #[test]
+    fn headings_preserve_language_names_ending_in_hashes() {
+        let lines = render("# C#\\n\\n# Closing marker ##");
+        assert!(lines.iter().any(|line| line.contains("C#")));
+        assert!(lines.iter().any(|line| line.contains("Closing marker")));
+        assert!(!lines.iter().any(|line| line.contains("Closing marker ##")));
+    }
+
+    #[test]
+    fn ordered_task_lists_keep_their_numbers() {
+        let lines = render("3. [ ] first\\n4. [x] second");
+        assert!(lines.iter().any(|line| line.contains("3. [ ] first")));
+        assert!(lines.iter().any(|line| line.contains("4. [x] second")));
+    }
+
+    #[test]
+    fn emphasis_does_not_consume_whitespace_separated_asterisks() {
+        assert_eq!(render("a * b * c")[0], "a * b * c");
+    }
+
+    #[test]
+    fn emphasis_closers_inside_code_spans_are_ignored() {
+        let lines = markdown_lines("*Use `*` literally*", 40);
+        assert_eq!(text_of(&lines[0]), "Use * literally");
+        assert!(lines[0].spans.iter().any(|span| {
+            span.content.as_ref() == "Use * literally"
+                && span.style.add_modifier.contains(Modifier::ITALIC)
+        }));
+    }
+
 }
