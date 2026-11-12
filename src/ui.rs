@@ -374,9 +374,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         if !message.content.is_empty() {
-            for content_line in message.content.split('\n') {
-                lines.push(message_line(content_line));
-            }
+            lines.extend(markdown_lines(&message.content));
         }
         // Pasted screenshots show up as pixel art directly under the text.
         for image in &message.images {
@@ -1638,6 +1636,88 @@ fn truncate(text: &str, width: usize) -> String {
 /// Reasoning shows live while streaming and collapsed afterwards, always dim.
 /// One line of assistant text, with light inline markdown: `**bold**`,
 /// `` `code` ``, and `-`/`*`/`1.` bullets rendered with a coloured marker.
+/// Render block-level Markdown before the transcript paragraph wraps it.
+/// Fences are tracked across lines so code is never mistaken for inline text.
+fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let mut output = Vec::new();
+    let mut in_code = false;
+    let mut language = String::new();
+
+    for raw in markdown.split('\n') {
+        let trimmed = raw.trim();
+        if let Some(fence) = trimmed.strip_prefix("```") {
+            if !in_code {
+                language = fence.trim().to_owned();
+                in_code = true;
+                output.push(Line::styled(
+                    format!("╭─ {} ", if language.is_empty() { "code" } else { language.as_str() }),
+                    Style::default().fg(MUTED),
+                ));
+            } else {
+                in_code = false;
+                output.push(Line::styled("╰─", Style::default().fg(MUTED)));
+            }
+            continue;
+        }
+
+        if in_code {
+            output.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(MUTED)),
+                Span::styled(raw.to_owned(), Style::default().fg(Color::LightCyan)),
+            ]));
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            output.push(Line::raw(""));
+            continue;
+        }
+        if trimmed.chars().all(|c| c == '-' || c == '*' || c == '_') && trimmed.len() >= 3 {
+            output.push(Line::styled("────────────────", Style::default().fg(MUTED)));
+            continue;
+        }
+
+        let heading_level = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&heading_level) && trimmed.chars().nth(heading_level) == Some(' ') {
+            let title = trimmed[heading_level + 1..].trim();
+            output.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", "▰".repeat(heading_level.min(3))),
+                    Style::default().fg(ACCENT),
+                ),
+                Span::styled(
+                    title.to_owned(),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            continue;
+        }
+
+        if let Some(quote) = trimmed.strip_prefix("> ") {
+            let mut spans = vec![Span::styled("│ ", Style::default().fg(MUTED))];
+            spans.extend(inline_spans(quote));
+            output.push(Line::from(spans));
+            continue;
+        }
+
+        let indent = raw.len() - raw.trim_start().len();
+        let body = &raw[indent..];
+        let bullet = bullet_marker(body);
+        let marker = if bullet { "• " } else { "" };
+        let mut spans = vec![Span::styled(
+            format!("{}{}", " ".repeat(indent), marker),
+            Style::default().fg(if bullet { ACCENT } else { TEXT }),
+        )];
+        spans.extend(inline_spans(if bullet { strip_bullet(body) } else { body }));
+        output.push(Line::from(spans));
+    }
+
+    if in_code {
+        output.push(Line::styled("╰─ (unterminated code fence)", Style::default().fg(MUTED)));
+    }
+    output
+}
+
 fn message_line(raw: &str) -> Line<'static> {
     let trimmed = raw.trim_start();
     let (indent, body) = raw.split_at(raw.len() - trimmed.len());
