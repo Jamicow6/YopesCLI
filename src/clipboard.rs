@@ -1,7 +1,10 @@
 //! Clipboard reads, platform-gated: image first, then text. Windows goes
 //! through PowerShell, so binary image data never crosses stdout.
 
-use anyhow::{Context, Result};
+// `context` is only called from the PowerShell path below.
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::Result;
 
 /// Read the clipboard, preferring an image; through PowerShell on Windows.
 #[cfg(windows)]
