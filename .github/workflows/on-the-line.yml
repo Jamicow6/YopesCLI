@@ -29,16 +29,5 @@ jobs:
       - name: Compile release
         run: cargo build --release --locked
 
-  publish:
-    name: Dispatch Production
-    needs: compile
-    # Only a main push may release; pull requests compile without touching it.
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Dispatch Production
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run production.yml --ref main -R "$GITHUB_REPOSITORY"
+# Releases stay manual: `gh workflow run production.yml --ref main`.
+# Nothing here dispatches them, so main pushes never tag or publish.
