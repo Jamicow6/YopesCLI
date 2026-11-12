@@ -17,7 +17,6 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) use files::{change_preview, edit_targets};
@@ -869,10 +868,7 @@ fn truncate_output(mut text: String) -> String {
 }
 
 fn temporary_log_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    env::temp_dir().join(format!("yopes-tool-{}-{nanos}.log", std::process::id()))
+    crate::temp::unique_path("yopes-tool", "log")
 }
 
 fn read_log(path: &Path) -> String {
