@@ -98,8 +98,7 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              Start long-running or detached work with bash_background, then read it with \
              bash_output and stop it with bash_kill when it has served its purpose. \
              For multi-step work or when the user asks for a todo list, maintain the \
-             checklist with todo_write: send the whole list each call, marking done items. \
-             For an independent subtask use delegate: hand the subagent one self-contained \
+             checklist with todo_write: send the whole list each call, marking done items. \             For an independent subtask use delegate: hand the subagent one self-contained \
              task with all the context it needs — it has no tools and returns a final answer. \
              Keep responses short and concrete. Paths may be relative to the working directory."
         )
@@ -421,7 +420,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "todo_write",
-                "description": "Write the workspace task checklist to todo.md. Rewrite the whole list each call: every item is an object with the task text and a done flag. Use it whenever the user asks for a todo list or a multi-step plan.",
+                "description": "Maintain the session task checklist. Rewrite the whole list each call: every item is an object with the task text and a done flag. The list is stored with the session, not as a file. Use it whenever the user asks for a todo list or a multi-step plan.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1931,10 +1930,11 @@ struct TodoWriteArgs {
 const MAX_TODO_ITEMS: usize = 100;
 const MAX_TODO_TEXT: usize = 500;
 
-/// Rewrite the workspace checklist as `todo.md` with checkbox lines.
+/// Validate the checklist and return it as JSON: the app keeps the tasks in
+/// the session, so the list never needs a workspace file.
 ///
-/// The model owns the list content: it sends the whole list every time, so the
-/// file is always a faithful mirror of what the model believes.
+/// The model owns the list content: it sends the whole list every time, so
+/// the stored checklist is always what the model believes.
 fn todo_write(arguments: &str) -> Result<String> {
     let args: TodoWriteArgs = parse(arguments)?;
     if args.items.is_empty() {
@@ -1943,24 +1943,18 @@ fn todo_write(arguments: &str) -> Result<String> {
     if args.items.len() > MAX_TODO_ITEMS {
         bail!("too many items; the checklist is capped at {MAX_TODO_ITEMS}");
     }
-    let mut file = String::new();
-    for item in &args.items {
-        let text = item.text.trim();
-        if text.is_empty() {
-            bail!("item text cannot be empty");
-        }
-        let text = clip(text, MAX_TODO_TEXT);
-        let mark = if item.done { "x" } else { " " };
-        file.push_str(&format!("- [{mark}] {text}\n"));
-    }
-    let path = workspace().join("todo.md");
-    fs::write(&path, file).with_context(|| format!("writing {}", path.display()))?;
-    let done = args.items.iter().filter(|item| item.done).count();
-    Ok(format!(
-        "todo.md written: {} item{} ({done} done)",
-        args.items.len(),
-        if args.items.len() == 1 { "" } else { "s" }
-    ))
+    let items = args
+        .items
+        .iter()
+        .map(|item| {
+            let text = clip(item.text.trim(), MAX_TODO_TEXT);
+            if text.is_empty() {
+                bail!("item text cannot be empty");
+            }
+            Ok(json!({ "text": text, "done": item.done }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!(items).to_string())
 }
 
 fn workspace() -> PathBuf {

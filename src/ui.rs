@@ -111,6 +111,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let picker = app.model_picker.clone();
     let session_picker = app.session_picker.clone();
+    let tasks = !app.session.tasks.is_empty();
     let palette = if app.show_help
         || app.connect_open()
         || app.approval.is_some()
@@ -139,10 +140,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let popup_height = palette_height + picker_height + session_height;
     let composer_height = composer_height(app, area.width);
+    let progress_height = if tasks { (app.session.tasks.len().min(6) as u16) + 2 } else { 0 };
 
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(2)];
     if popup_height > 0 {
         constraints.push(Constraint::Length(popup_height));
+    }
+    if progress_height > 0 {
+        constraints.push(Constraint::Length(progress_height));
     }
     constraints.push(Constraint::Length(1));
     constraints.push(Constraint::Length(composer_height));
@@ -166,11 +171,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_palette(frame, app, &palette, chunks[index]);
         }
         index += 1;
-    } else {
+    }
+    if progress_height > 0 {
+        draw_progress(frame, app, chunks[index]);
+        index += 1;
+    } else if popup_height == 0 {
         draw_separator(frame, chunks[index]);
     }
-    draw_composer(frame, app, chunks[index + 1]);
-    draw_footer(frame, app, chunks[index + 2]);
+    // The separator slot is reserved even when an overlay or the panel takes
+    // that row instead.
+    index += 1;
+    draw_composer(frame, app, chunks[index]);
+    draw_footer(frame, app, chunks[index + 1]);
 
     let spinner = app.spinner;
     let sides = app.diff_sides;
@@ -728,6 +740,40 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
             .scroll((app.input_scroll.min(u16::MAX as usize) as u16, 0)),
         target,
     );
+}
+
+/// The native progress panel: the session's task checklist above the composer.
+fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height < 3 || area.width < 20 {
+        return;
+    }
+    let inner = padded(area, 2);
+    let done = app.session.tasks.iter().filter(|task| task.done).count();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("Progress {done}/{}", app.session.tasks.len()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · todo_write", Style::default().fg(MUTED)),
+    ])];
+    for (index, task) in app.session.tasks.iter().enumerate() {
+        if index == 6 {
+            lines.push(Line::styled(
+                format!("… {} more", app.session.tasks.len() - 6),
+                Style::default().fg(MUTED),
+            ));
+            break;
+        }
+        let mark = if task.done { "[x]" } else { "[ ]" };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(if task.done { MUTED } else { ACCENT }),
+            ),
+            Span::styled(task.text.clone(), Style::default().fg(TEXT)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
