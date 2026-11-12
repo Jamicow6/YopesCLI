@@ -148,3 +148,29 @@ impl App {
             .map(Vec::as_slice)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_image_rows;
+    use base64::Engine as _;
+
+    #[test]
+    fn an_image_renders_as_half_block_pixel_rows() {
+        use ratatui::style::Color;
+
+        let png = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(2, 2, |_, _| {
+            image::Rgb([255u8, 0, 0])
+        }));
+        let mut bytes = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut bytes);
+        png.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        let rows = build_image_rows(&data, 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].spans.len(), 4);
+        assert_eq!(rows[0].spans[0].content, "▄");
+        assert_eq!(rows[0].spans[0].style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(rows[0].spans[3].style.fg, Some(Color::Rgb(255, 0, 0)));
+    }
+}
