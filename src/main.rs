@@ -456,7 +456,7 @@ fn read_clipboard_image() -> Result<Option<(String, String)>> {
     let encoded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || encoded.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("could not read the clipboard image: {}", stderr.trim());
+        anyhow::bail!("could not read the clipboard image: {}", stderr.trim());
     }
     Ok(Some(("paste".to_owned(), encoded)))
 }
