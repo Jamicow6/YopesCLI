@@ -149,13 +149,24 @@ fn parse_skill(text: &str, fallback: &str, path: PathBuf, personal: bool) -> Opt
     })
 }
 
-#[derive(Default)]
 struct Fields {
     name: Option<String>,
     description: Option<String>,
     when_to_use: Option<String>,
     disable_model_invocation: bool,
     user_invocable: bool,
+}
+
+impl Default for Fields {
+    fn default() -> Self {
+        Self {
+            name: None,
+            description: None,
+            when_to_use: None,
+            disable_model_invocation: false,
+            user_invocable: true,
+        }
+    }
 }
 
 /// Parse the frontmatter rows, or everything as body when the opening `---`

@@ -1182,10 +1182,7 @@ mod tests {
                     .all(|event| !matches!(event, ParsedEvent::ToolProgress { .. }))
             );
         }
-        let big = format!(
-            r#"{{"path":"test.html","content":"{}"}}"#,
-            "x".repeat(2048)
-        );
+        let big = format!(r#"{{"path":"test.html","content":"{}"}}"#, "x".repeat(2048));
         let chunk = serde_json::json!({
             "choices": [{
                 "delta": {

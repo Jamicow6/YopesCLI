@@ -17,7 +17,7 @@ pub(super) fn build_image_rows(encoded: &str, cols: u16) -> Vec<Line<'static>> {
         Ok(image) => image.into_rgba8(),
         Err(_) => return vec![unreadable()],
     };
-    let cols = usize::from(cols).max(4);
+    let cols = usize::from(cols).max(1);
     let (width, height) = (rendered.width().max(1), rendered.height().max(1));
     // Cells are twice as wide as tall, and one `▄` carries two pixel rows,
     // so two pixels per cell in both directions keep the aspect square.
