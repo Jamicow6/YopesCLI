@@ -978,9 +978,6 @@ pub enum Action {
     },
     /// Read the clipboard on Ctrl+V and attach an image when it holds one.
     PasteImage,
-    /// Turn mouse capture off so the terminal's own text selection works,
-    /// or back on to keep the app interactive.
-    ToggleMouseCapture,
     Quit,
     LoadCatalog,
     /// Fetch models.dev again, bypassing the cached copy.
@@ -1211,9 +1208,6 @@ pub struct App {
     pub show_help: bool,
     /// How far the help popup is scrolled down.
     pub help_scroll: usize,
-    /// Whether the app captures the mouse; off, the terminal's own text
-    /// selection and copy work.
-    pub mouse_capture: bool,
     pub should_quit: bool,
     pub notice: Option<Notice>,
     /// A request being retried, shown in the footer while it waits.
@@ -1305,7 +1299,6 @@ impl App {
             follow_tail: true,
             show_help: false,
             help_scroll: 0,
-            mouse_capture: true,
             should_quit: false,
             notice: None,
             retry: None,

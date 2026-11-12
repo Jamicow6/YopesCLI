@@ -362,14 +362,6 @@ fn dispatch(
                 let _ = sender.send(read);
             });
         }
-        Action::ToggleMouseCapture => {
-            app.mouse_capture = !app.mouse_capture;
-            if app.mouse_capture {
-                let _ = execute!(io::stdout(), EnableMouseCapture);
-            } else {
-                let _ = execute!(io::stdout(), DisableMouseCapture);
-            }
-        }
         Action::RunTool { call } => {
             let sender = tool_events.clone();
             if call.function.name == "delegate" {
