@@ -322,16 +322,18 @@ impl App {
         } else {
             let wanted = name.to_ascii_lowercase();
             let connected = config::load_connected_providers(&self.config_path);
+            let custom = self
+                .custom_providers
+                .iter()
+                .find(|provider| provider.name.to_ascii_lowercase() == wanted)
+                .map(|provider| provider.base_url.clone());
             match connected
                 .into_iter()
                 .find(|provider| provider.name.to_ascii_lowercase() == wanted)
-                .or_else(|| {
-                    self.custom_providers
-                        .iter()
-                        .find(|provider| provider.name.to_ascii_lowercase() == wanted)
-                        .map(|provider| provider.base_url.clone())
-                }) {
-                Some(provider) => provider.base_url,
+                .map(|provider| provider.base_url)
+                .or(custom)
+            {
+                Some(base_url) => base_url,
                 None => {
                     self.error(format!("No connected provider named {name}."));
                     return;
