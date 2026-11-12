@@ -9,16 +9,17 @@ Legend: `[ ]` open · `[~]` in progress, uncommitted · `[x]` done
 ## Resume here — state at handoff
 
 Branch `feature/provider-keys` (off `main`), pushed to `origin`, PR #27 open.
-Last pushed commit: `2907ac0 feat(mascot) - Give the cat a flicking tail and a
-rolling ball of yarn`.
+Last pushed commits: `31950e7 fix(ui) - Put the caret inside the tool frame,
+scroll the help, and unstick the PR` and `882e2d8 fix(logos) - Correct the
+pixel colour type and the borrowed logo id`. The working tree is clean —
+everything below is on the PR.
 
-Uncommitted changes in the working tree (do `cargo fmt --all`, commit, push,
-then check CI):
+What `31950e7` contains (all previously uncommitted work, now on origin):
 
 - `.github/workflows/on-the-line.yml` — Windows jobs (Test/Compile matrix)
-  now run **only on push to main**; PRs run ubuntu-only. Reason: GitHub-hosted
-  Windows runners were never picked up, so PR runs hung queued and had to be
-  cancelled. This makes PR CI finish with Linux runners alone.
+  run **only on push to main**; PRs run ubuntu-only. Reason: hosted Windows
+  runners were never picked up, so PR runs hung queued and had to be
+  cancelled. Verified working: the PR run now shows no Windows jobs.
 - `src/app/keys.rs` — fixed the dead `Ctrl+V` arm: `KeyCode::Char('v')` with
   CONTROL was unreachable (the CONTROL match at the top of `handle_key`
   returns first). `Ctrl+V => Action::PasteImage` now lives inside the CONTROL
@@ -36,13 +37,17 @@ then check CI):
   `lines[len-2]` (last body line inside the frame) when the last line starts
   with `╰`, else on the last line (narrow-terminal unframed case).
 - `src/tools/mod.rs` — `collect_agents_files` now collects only `AGENTS.md`
-  (was: every `.md`, so the README went into the system prompt). Issue #5
-  finding from the user list.
+  (was: every `.md`, so the README went into the system prompt).
 
-First action on resume: `cargo fmt --all` (parser check), commit with the
-trailer `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
-(same as previous commits), push, then `gh pr checks 27`. Only Linux jobs will
-run on the PR now.
+What `882e2d8` fixed (first CI run of the above): `logos.rs::pixel_color`
+takes `Option<PremultipliedColorU8>` + `.demultiply()` (Pixmap::pixel returns
+premultiplied), and `ui/connect.rs::selected_logo_id` returns
+`Option<String>` (it borrowed a local `Vec`).
+
+First action on resume: `gh pr checks 27` — the run for `882e2d8` was
+in flight at handoff. If clippy still fails, read it with
+`gh run view --job <id> --log-failed` and fix; the known past error classes
+are listed at the bottom of this file.
 
 ## Batch A — Provider keys, connection lifecycle — all done, on the PR
 
