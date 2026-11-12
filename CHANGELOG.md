@@ -40,6 +40,9 @@ All notable changes to YopesCLI are recorded here. The format follows
 - Palette rows pad by display width, so CJK text and emoji keep their columns.
 - The tool frame caret stays inside the frame's bottom border.
 - `/tools` is deprecated and marked as such; it still works.
+- Releases build for Linux and Windows only; the hosted macOS runners
+  starved the publish job, so the macOS archive is gone until capacity
+  improves. macOS still works from a checkout (`cargo build --release`).
 
 ## [0.1.0]
 
