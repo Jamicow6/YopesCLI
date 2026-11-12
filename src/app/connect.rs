@@ -1200,5 +1200,48 @@ impl App {
                 connect.error = Some(error);
             }
         }
+        // The provider list is on screen, so its logos are wanted.
+        self.request_visible_logos();
+    }
+
+    /// A logo arrived: keep it for the next draw, and cache it on disk.
+    pub(crate) fn on_logo(&mut self, provider_id: String, result: Result<crate::logos::Logo, String>) {
+        if let Ok(logo) = result {
+            self.logos.cache(&provider_id, &logo);
+            self.logos.insert(&provider_id, logo);
+        }
+    }
+
+    /// The logos that still have to be fetched, taken out of the queue.
+    pub(crate) fn take_pending_logos(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_logos)
+    }
+
+    /// Ask for the logos of the providers currently on screen.
+    ///
+    /// Only the ones that are not drawn yet are fetched, and the ones already
+    /// on disk are read instead of downloaded again.
+    pub(crate) fn request_visible_logos(&mut self) {
+        let Some(connect) = self.connect.as_ref() else {
+            return;
+        };
+        let ids: Vec<String> = connect
+            .items()
+            .into_iter()
+            .filter(|item| item.custom_id.is_none())
+            .map(|item| item.id)
+            .filter(|id| id != CUSTOM_PROVIDER_ID)
+            .collect();
+        for id in ids {
+            if self.logos.has(&id) || self.pending_logos.contains(&id) {
+                continue;
+            }
+            if self.logos.load_cached(&id) {
+                continue;
+            }
+            // The catalog id names the logo file, so a provider without one
+            // simply never appears.
+            self.pending_logos.push(id);
+        }
     }
 }

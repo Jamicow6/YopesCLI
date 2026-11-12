@@ -6,7 +6,7 @@
 
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 /// The directory yopes writes its temporary files to.
@@ -55,11 +55,6 @@ pub fn unique_dir(prefix: &str) -> PathBuf {
     let path = temp_root().join(format!("{prefix}-{}-{nanos}", std::process::id()));
     let _ = fs::create_dir_all(&path);
     path
-}
-
-/// Remove a directory and everything in it, ignoring what is already gone.
-pub fn remove_dir_all(path: &Path) {
-    let _ = fs::remove_dir_all(path);
 }
 
 #[cfg(test)]
