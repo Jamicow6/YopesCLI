@@ -21,10 +21,23 @@ pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(4), Constraint::Length(right_width)])
         .split(inner);
 
+    // The mode sits next to the name: a coloured dot plus its name, so the
+    // active mode is visible without reading the footer.
     let title = Line::from(vec![
         Span::styled(
             "yopes",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            "●",
+            Style::default()
+                .fg(app.mode.color())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", app.mode.label()),
+            Style::default().fg(app.mode.color()),
         ),
         Span::styled("  ", Style::default()),
         Span::styled(app.session.title.trim(), Style::default().fg(MUTED)),
