@@ -232,6 +232,9 @@ struct SavedConfig {
     /// Whether compaction summarizes older turns automatically.
     #[serde(default = "auto_compact_default")]
     auto_compact: bool,
+    /// Reasoning effort sent with OpenAI-compatible requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 fn auto_compact_default() -> bool {
@@ -303,6 +306,7 @@ impl SavedConfig {
             secret: StoredSecret::default(),
             tavily_api_key: None,
             auto_compact: true,
+            reasoning_effort: None,
         }
     }
 }
@@ -361,6 +365,7 @@ impl Config {
                 config_path,
                 tavily_api_key: None,
                 auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
+                reasoning_effort: saved.as_ref().and_then(|saved| saved.reasoning_effort.clone()),
             });
         }
 
@@ -448,6 +453,7 @@ impl Config {
             config_path,
             tavily_api_key,
             auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
+            reasoning_effort: saved.as_ref().and_then(|saved| saved.reasoning_effort.clone()),
         })
     }
 }
@@ -706,6 +712,15 @@ pub fn save_auto_compact(path: &Path, value: bool) -> Result<()> {
     save_saved(path, &saved)
 }
 
+/// Store or clear the reasoning effort, in place; an empty value clears.
+pub fn save_reasoning_effort(path: &Path, value: Option<String>) -> Result<()> {
+    let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
+    saved.reasoning_effort = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    save_saved(path, &saved)
+}
+
 fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
     if !path.exists() {
         return Ok(None);
@@ -936,6 +951,25 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.get("system_prompt"), None);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_reasoning_effort_saves_and_clears() {
+        use super::save_reasoning_effort;
+        use std::fs;
+
+        let path =
+            std::env::temp_dir().join(format!("yopes-effort-test-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        save_reasoning_effort(&path, Some(" high ".to_owned())).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["reasoning_effort"], "high");
+        save_reasoning_effort(&path, None).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.get("reasoning_effort"), None);
         let _ = fs::remove_file(&path);
     }
 

@@ -27,6 +27,8 @@ use crate::{
 };
 
 const MAX_TOOL_ROUNDS: usize = 24;
+/// The choices the /effort command accepts, printed in its messages.
+const EFFORT_CHOICES: &str = "Usage: /effort off|none|low|medium|high|xhigh";
 
 /// Estimated prompt tokens that trigger compaction of older turns.
 const COMPACTION_THRESHOLD_TOKENS: u64 = 32_000;
@@ -68,7 +70,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 9] = [
+pub const COMMANDS: [CommandSpec; 10] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -108,6 +110,11 @@ pub const COMMANDS: [CommandSpec; 9] = [
         name: "/compact",
         description: "Compact history now; auto on|off",
         argument: Some("on|off|now"),
+    },
+    CommandSpec {
+        name: "/effort",
+        description: "Show or set reasoning effort",
+        argument: Some("level"),
     },
     CommandSpec {
         name: "/quit",
@@ -3186,6 +3193,29 @@ impl App {
                     self.error("Usage: /compact on|off|now");
                 }
             }
+            "/effort" => {
+                let value = parts.next().unwrap_or_default().to_ascii_lowercase();
+                if value.is_empty() {
+                    match self.backend.reasoning_effort() {
+                        Some(effort) => self.info(format!(
+                            "Reasoning effort: {effort} · /effort to toggle, {EFFORT_CHOICES}"
+                        )),
+                        None => self.info(format!(
+                            "Reasoning effort: backend default · {EFFORT_CHOICES}"
+                        )),
+                    }
+                } else if matches!(value.as_str(), "off" | "none") {
+                    self.persist_reasoning_effort(None);
+                    self.backend.set_reasoning_effort(None);
+                    self.info("Reasoning effort off — the backend default applies");
+                } else if matches!(value.as_str(), "low" | "medium" | "high" | "xhigh") {
+                    self.persist_reasoning_effort(Some(value.clone()));
+                    self.backend.set_reasoning_effort(Some(value.clone()));
+                    self.info(format!("Reasoning effort set to {value}"));
+                } else {
+                    self.error(format!("Usage: {EFFORT_CHOICES}"));
+                }
+            }
             "/quit" => {
                 self.should_quit = true;
                 return Action::Quit;
@@ -3533,6 +3563,13 @@ impl App {
         }
     }
 
+    /// Store the reasoning effort in the saved config.
+    fn persist_reasoning_effort(&mut self, value: Option<String>) {
+        if let Err(error) = config::save_reasoning_effort(&self.config_path, value) {
+            self.error(format!("Could not save the reasoning effort: {error:#}"));
+        }
+    }
+
     pub fn persist(&self) -> Result<()> {
         self.session_path
             .as_ref()
@@ -3657,12 +3694,13 @@ mod tests {
             command_names("/"),
             vec![
                 "/help", "/new", "/connect", "/model", "/sessions", "/tools", "/system", "/compact",
-                "/quit",
+                "/effort", "/quit",
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect", "/compact"]);
         assert_eq!(command_names("/m"), vec!["/model"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
+        assert_eq!(command_names("/e"), vec!["/effort"]);
         assert_eq!(command_names("/MO"), vec!["/model"]);
         assert!(command_names("/model gpt").is_empty());
         assert!(command_names("hello").is_empty());

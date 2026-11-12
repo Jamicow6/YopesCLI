@@ -57,6 +57,8 @@ pub struct Backend {
     models: Vec<SavedModel>,
     /// Custom system prompt text, appended to the built-in one.
     custom_prompt: Option<String>,
+    /// Reasoning effort hint sent with OpenAI-compatible requests.
+    reasoning_effort: Option<String>,
     client: Client,
 }
 
@@ -76,6 +78,7 @@ impl Backend {
             auth: config.auth,
             models: config.models.clone(),
             custom_prompt: config.system_prompt.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
             client,
         })
     }
@@ -122,6 +125,14 @@ impl Backend {
 
     pub fn set_system_prompt(&mut self, value: Option<String>) {
         self.custom_prompt = value;
+    }
+
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.reasoning_effort.as_deref()
+    }
+
+    pub fn set_reasoning_effort(&mut self, value: Option<String>) {
+        self.reasoning_effort = value;
     }
 
     pub fn configure(
@@ -225,6 +236,13 @@ impl Backend {
         });
         if tooling {
             request["tools"] = tools::definitions();
+        }
+        if let Some(effort) = self
+            .reasoning_effort
+            .as_deref()
+            .filter(|effort| !effort.trim().is_empty())
+        {
+            request["reasoning_effort"] = serde_json::Value::String(effort.to_owned());
         }
         let response = send_with_retry("OpenAI-compatible API", || {
             let mut builder = self
