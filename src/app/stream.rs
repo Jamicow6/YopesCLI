@@ -79,7 +79,23 @@ impl App {
                 self.save_session();
                 Action::None
             }
+            StreamEvent::Retrying {
+                request_id,
+                attempt,
+                delay_secs,
+                reason,
+            } if self.active_request_id() == Some(request_id) => {
+                // The wait is shown in the footer, so a slow provider does not
+                // look like a hang.
+                self.retry = Some(RetryNotice {
+                    attempt,
+                    delay_secs,
+                    reason,
+                });
+                Action::None
+            }
             StreamEvent::Done { request_id } if self.active_request_id() == Some(request_id) => {
+                self.retry = None;
                 // Fold this request's billed tokens into the session total.
                 if let Some((prompt, completion)) = self.active.as_ref().and_then(|a| a.usage) {
                     self.spent_prompt_tokens = self.spent_prompt_tokens.saturating_add(prompt);
@@ -142,6 +158,8 @@ impl App {
                     .active
                     .as_ref()
                     .is_some_and(|active| active.compacting.is_some());
+                self.active = None;
+                self.retry = None;
                 self.active = None;
                 if compacting {
                     // The queued turn never started, so continue without the

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -148,6 +149,8 @@ pub struct CustomProvider {
     /// Plaintext token when stored without encryption; `None` when encrypted or absent.
     pub token: Option<String>,
     pub encrypted: bool,
+    /// The stored secret, encrypted or not.
+    pub secret: StoredSecret,
 }
 
 impl CustomProvider {
@@ -164,8 +167,32 @@ impl CustomProvider {
                 saved.secret.api_key.clone()
             },
             encrypted: saved.secret.encrypted,
+            secret: saved.secret.clone(),
         }
     }
+}
+
+/// A provider the user has connected, remembered so its key survives a switch
+/// to another provider.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SavedProvider {
+    /// The models.dev provider id, when the key came from the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub provider_name: String,
+    #[serde(default)]
+    pub secret: StoredSecret,
+}
+
+/// A connected provider, for the interface to show what is already set up.
+#[derive(Clone, Debug)]
+pub struct ConnectedProvider {
+    pub base_url: String,
+    pub provider_id: Option<String>,
+    pub name: String,
+    pub has_key: bool,
+    pub encrypted: bool,
 }
 
 pub struct Config {
@@ -202,6 +229,11 @@ pub struct Connection {
     pub models: Vec<SavedModel>,
     /// Id of the saved custom provider to update; `None` creates a new entry.
     pub custom_provider_id: Option<String>,
+    /// The models.dev provider id, when the connection came from the catalog.
+    pub provider_id: Option<String>,
+    /// The key for this endpoint is already stored: keep that secret as it is
+    /// rather than writing a new one.
+    pub reuse_secret: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,6 +260,11 @@ struct SavedConfig {
     custom_providers: Vec<SavedCustomProvider>,
     #[serde(default)]
     secret: StoredSecret,
+    /// Keys for every provider the user has connected, keyed by base URL.
+    /// Without this, connecting a second provider overwrites the first one's
+    /// key and the user has to type it again.
+    #[serde(default)]
+    provider_keys: BTreeMap<String, SavedProvider>,
     /// Tavily key for the web_search tool; `TAVILY_API_KEY` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tavily_api_key: Option<String>,
@@ -255,21 +292,51 @@ struct SavedCustomProvider {
     secret: StoredSecret,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct StoredSecret {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StoredSecret {
     #[serde(default)]
-    encrypted: bool,
+    pub encrypted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    api_key: Option<String>,
+    pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    salt: Option<String>,
+    pub salt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    nonce: Option<String>,
+    pub nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    ciphertext: Option<String>,
+    pub ciphertext: Option<String>,
 }
 
 impl StoredSecret {
+    /// Whether a key is stored here at all.
+    pub fn has_key(&self) -> bool {
+        self.api_key.is_some() || self.ciphertext.is_some()
+    }
+
+    /// The key as stored, when it was saved without a password.
+    pub fn plaintext(&self) -> Option<&str> {
+        if self.encrypted {
+            return None;
+        }
+        self.api_key
+            .as_deref()
+            .filter(|api_key| !api_key.trim().is_empty())
+    }
+
+    /// Unlock the key with a password. A secret saved without one opens with
+    /// any password, so callers can treat the two the same way.
+    pub fn unlock(&self, password: &str) -> Result<String> {
+        if !self.encrypted {
+            return Ok(self.plaintext().unwrap_or_default().to_owned());
+        }
+        let (Some(salt), Some(nonce), Some(ciphertext)) =
+            (&self.salt, &self.nonce, &self.ciphertext)
+        else {
+            bail!("the stored API key is missing its encryption data");
+        };
+        credentials::open(password, salt, nonce, ciphertext)
+    }
+
+    /// Prompt for the password and unlock the key.
     fn resolve(&self) -> Result<Option<String>> {
         if !self.encrypted {
             return Ok(self
@@ -277,17 +344,11 @@ impl StoredSecret {
                 .clone()
                 .filter(|api_key| !api_key.trim().is_empty()));
         }
-        let (Some(salt), Some(nonce), Some(ciphertext)) =
-            (&self.salt, &self.nonce, &self.ciphertext)
-        else {
-            bail!("the stored API key is missing its encryption data");
-        };
         let password = credentials::prompt_password("API key password: ")?;
         if password.is_empty() {
             bail!("an encryption password is required to unlock the stored API key");
         }
-        let api_key = credentials::open(&password, salt, nonce, ciphertext)?;
-        Ok(Some(api_key))
+        Ok(Some(self.unlock(&password)?))
     }
 }
 
@@ -306,6 +367,7 @@ impl SavedConfig {
             system_prompt: None,
             custom_providers: Vec::new(),
             secret: StoredSecret::default(),
+            provider_keys: BTreeMap::new(),
             tavily_api_key: None,
             auto_compact: true,
             reasoning_effort: None,
@@ -496,6 +558,7 @@ fn custom_providers(saved: Option<&SavedConfig>) -> Vec<CustomProvider> {
                 saved.secret.api_key.clone()
             },
             encrypted: saved.secret.encrypted,
+            secret: saved.secret.clone(),
         });
     }
     providers
@@ -540,8 +603,17 @@ fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Resu
                 return Ok(Some(api_key));
             }
         }
-        if let Some(api_key) = saved.secret.resolve()? {
-            return Ok(Some(api_key));
+        // The active secret is the one for the active endpoint. Only when it
+        // is missing does the per-provider map answer, so a password is never
+        // asked for twice.
+        if saved.secret.has_key() {
+            return saved.secret.resolve();
+        }
+        // The active endpoint may have a key of its own in the per-provider
+        // map, kept when the user connected another provider afterwards.
+        let endpoint = saved.base_url.trim_end_matches('/');
+        if let Some(stored) = saved.provider_keys.get(endpoint) {
+            return stored.secret.resolve();
         }
         return Ok(None);
     }
@@ -579,22 +651,28 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
     } else {
         None
     };
-    let provided_secret = match (api_key, password.filter(|password| !password.is_empty())) {
-        (Some(api_key), Some(password)) => {
-            let sealed = credentials::seal(password, api_key)?;
-            StoredSecret {
-                encrypted: true,
-                salt: Some(sealed.salt),
-                nonce: Some(sealed.nonce),
-                ciphertext: Some(sealed.ciphertext),
-                ..StoredSecret::default()
+    let provided_secret = if connection.reuse_secret {
+        // The key is already on disk for this endpoint: keep it as it is, so
+        // an encrypted key stays encrypted and is not written again.
+        StoredSecret::default()
+    } else {
+        match (api_key, password.filter(|password| !password.is_empty())) {
+            (Some(api_key), Some(password)) => {
+                let sealed = credentials::seal(password, api_key)?;
+                StoredSecret {
+                    encrypted: true,
+                    salt: Some(sealed.salt),
+                    nonce: Some(sealed.nonce),
+                    ciphertext: Some(sealed.ciphertext),
+                    ..StoredSecret::default()
+                }
             }
+            (Some(api_key), None) => StoredSecret {
+                api_key: Some(api_key.to_owned()),
+                ..StoredSecret::default()
+            },
+            _ => StoredSecret::default(),
         }
-        (Some(api_key), None) => StoredSecret {
-            api_key: Some(api_key.to_owned()),
-            ..StoredSecret::default()
-        },
-        _ => StoredSecret::default(),
     };
     let mut models = Vec::new();
     for model in &connection.models {
@@ -608,6 +686,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
         });
     }
     let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
+    let endpoint = connection.base_url.trim_end_matches('/').to_owned();
     // Switching a model must not wipe or downgrade an existing key: when no new
     // key was supplied, keep whatever is already stored for this endpoint.
     let secret = if provided_secret.api_key.is_none() && provided_secret.ciphertext.is_none() {
@@ -628,12 +707,17 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
                 .unwrap_or_default(),
             (ProviderKind::Custom, None) => StoredSecret::default(),
             _ => {
-                if saved.base_url.trim_end_matches('/') == connection.base_url.trim_end_matches('/')
-                {
-                    saved.secret.clone()
-                } else {
-                    Default::default()
-                }
+                // A catalog provider keeps its key under its own endpoint, so
+                // connecting another provider does not take this one away.
+                saved
+                    .provider_keys
+                    .get(&endpoint)
+                    .map(|stored| stored.secret.clone())
+                    .or_else(|| {
+                        (saved.base_url.trim_end_matches('/') == endpoint)
+                            .then(|| saved.secret.clone())
+                    })
+                    .unwrap_or_default()
             }
         }
     } else {
@@ -647,6 +731,12 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
     saved.auth = connection.auth;
     saved.models = models.clone();
     saved.secret = secret.clone();
+    // Every connected provider keeps its own key, so the next /connect run
+    // finds it instead of asking again.
+    let entry = saved.provider_keys.entry(endpoint.clone()).or_default();
+    entry.provider_id = connection.provider_id.clone();
+    entry.provider_name = connection.provider_name.clone();
+    entry.secret = secret.clone();
     if connection.provider == ProviderKind::Custom {
         let display_name = if connection.provider_name.trim().is_empty() {
             "Custom".to_owned()
@@ -712,6 +802,72 @@ fn update_saved(path: &Path, change: impl FnOnce(&mut SavedConfig)) -> Result<()
     let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
     change(&mut saved);
     save_saved(path, &saved)
+}
+
+/// The secret stored for an endpoint, if the user ever connected it.
+///
+/// The lookup is by base URL, which is what identifies an endpoint across
+/// providers: two providers can share a name but not a URL.
+pub fn load_endpoint_secret(path: &Path, base_url: &str) -> Option<StoredSecret> {
+    let endpoint = base_url.trim_end_matches('/');
+    let saved = load_saved(path).ok().flatten()?;
+    let stored = saved.provider_keys.get(endpoint)?;
+    stored.secret.has_key().then(|| stored.secret.clone())
+}
+
+/// Every provider with a stored key, for the interface to show what is set up.
+pub fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
+    let Some(saved) = load_saved(path).ok().flatten() else {
+        return Vec::new();
+    };
+    let mut providers: Vec<ConnectedProvider> = saved
+        .provider_keys
+        .iter()
+        .map(|(base_url, stored)| ConnectedProvider {
+            base_url: base_url.clone(),
+            provider_id: stored.provider_id.clone(),
+            name: stored.provider_name.clone(),
+            has_key: stored.secret.has_key(),
+            encrypted: stored.secret.encrypted,
+        })
+        .collect();
+    providers.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    });
+    providers
+}
+
+/// Forget a provider's stored key and every model it offered.
+pub fn disconnect_provider(path: &Path, base_url: &str) -> Result<()> {
+    let endpoint = base_url.trim_end_matches('/');
+    update_saved(path, |saved| {
+        saved.provider_keys.remove(endpoint);
+        saved
+            .custom_providers
+            .retain(|stored| stored.base_url.trim_end_matches('/') != endpoint);
+        if saved.base_url.trim_end_matches('/') == endpoint {
+            saved.provider = ProviderKind::Unconfigured;
+            saved.provider_name = String::new();
+            saved.model = String::new();
+            saved.base_url = String::new();
+            saved.secret = StoredSecret::default();
+            saved.models = Vec::new();
+        }
+    })
+}
+
+/// Store the active model of the current connection, so the choice survives a
+/// restart.
+pub fn save_model(path: &Path, model: &str) -> Result<()> {
+    let model = model.trim().to_owned();
+    if model.is_empty() {
+        return Ok(());
+    }
+    update_saved(path, |saved| {
+        saved.model = model.clone();
+    })
 }
 
 /// Store or clear the custom system prompt, in place.
@@ -910,6 +1066,8 @@ mod tests {
                 name: String::new(),
             }],
             custom_provider_id: None,
+            provider_id: None,
+            reuse_secret: false,
         };
         save_connection(&path, &connection, None).unwrap();
 
@@ -950,6 +1108,92 @@ mod tests {
             Some("my-provider-3")
         );
         assert_eq!(slug_provider_name("  !!  ", &[]), None);
+    }
+
+    #[test]
+    fn every_provider_keeps_its_own_key() {
+        use super::{Connection, ProviderKind, SavedModel, load_endpoint_secret, save_connection};
+        use std::fs;
+
+        let path =
+            std::env::temp_dir().join(format!("yopes-keys-test-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let connection = |name: &str, base_url: &str, key: &str| Connection {
+            provider: ProviderKind::OpenAi,
+            provider_name: name.to_owned(),
+            model: "one".to_owned(),
+            base_url: base_url.to_owned(),
+            api_key: Some(key.to_owned()),
+            api_key_env: None,
+            auth: super::AuthKind::Bearer,
+            models: vec![SavedModel {
+                id: "one".to_owned(),
+                name: String::new(),
+            }],
+            custom_provider_id: None,
+            provider_id: Some(name.to_owned()),
+            reuse_secret: false,
+        };
+
+        // Connecting a second provider must not take the first one's key away.
+        save_connection(
+            &path,
+            &connection("one", "https://one.test/v1", "sk-one"),
+            None,
+        )
+        .unwrap();
+        save_connection(
+            &path,
+            &connection("two", "https://two.test/v1", "sk-two"),
+            None,
+        )
+        .unwrap();
+
+        let one = load_endpoint_secret(&path, "https://one.test/v1").unwrap();
+        let two = load_endpoint_secret(&path, "https://two.test/v1").unwrap();
+        assert_eq!(one.plaintext(), Some("sk-one"));
+        assert_eq!(two.plaintext(), Some("sk-two"));
+
+        // Switching models on one of them keeps its key too.
+        let mut switched = connection("one", "https://one.test/v1", "sk-one");
+        switched.model = "two-models".to_owned();
+        switched.api_key = None;
+        switched.reuse_secret = true;
+        save_connection(&path, &switched, None).unwrap();
+        let one = load_endpoint_secret(&path, "https://one.test/v1").unwrap();
+        assert_eq!(one.plaintext(), Some("sk-one"));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn disconnecting_forgets_the_key() {
+        use super::{disconnect_provider, load_endpoint_secret};
+        use std::fs;
+
+        let path =
+            std::env::temp_dir().join(format!("yopes-disconnect-test-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let connection = super::Connection {
+            provider: ProviderKind::OpenAi,
+            provider_name: "One".to_owned(),
+            model: "m".to_owned(),
+            base_url: "https://one.test/v1".to_owned(),
+            api_key: Some("sk-one".to_owned()),
+            api_key_env: None,
+            auth: super::AuthKind::Bearer,
+            models: Vec::new(),
+            custom_provider_id: None,
+            provider_id: Some("one".to_owned()),
+            reuse_secret: false,
+        };
+        super::save_connection(&path, &connection, None).unwrap();
+        assert!(load_endpoint_secret(&path, "https://one.test/v1").is_some());
+
+        disconnect_provider(&path, "https://one.test/v1").unwrap();
+        assert!(load_endpoint_secret(&path, "https://one.test/v1").is_none());
+
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -1018,6 +1262,8 @@ mod tests {
                 },
             ],
             custom_provider_id: None,
+            provider_id: None,
+            reuse_secret: false,
         };
         save_connection(&path, &connection, None).unwrap();
         let id = load_custom_providers(&path)[0].id.clone();

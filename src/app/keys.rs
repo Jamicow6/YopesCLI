@@ -12,7 +12,7 @@ impl App {
                 .collect::<String>();
             match connect.stage {
                 ConnectStage::ApiKey | ConnectStage::FasfasKey => connect.api_key.push_str(&clean),
-                ConnectStage::Password => connect.password.push_str(&clean),
+                ConnectStage::Password | ConnectStage::Unlock => connect.password.push_str(&clean),
                 ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
@@ -49,6 +49,14 @@ impl App {
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.connect_move(false),
                 MouseEventKind::ScrollDown => self.connect_move(true),
+                _ => {}
+            }
+            return;
+        }
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => self.help_scroll = self.help_scroll.saturating_add(3),
                 _ => {}
             }
             return;
@@ -97,11 +105,25 @@ impl App {
         }
         if key.code == KeyCode::F(1) {
             self.show_help = !self.show_help;
+            self.help_scroll = 0;
             return Action::None;
         }
         if self.show_help {
-            if key.code == KeyCode::Esc {
-                self.show_help = false;
+            match key.code {
+                KeyCode::Esc | KeyCode::F(1) => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Left => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+                _ => {}
             }
             return Action::None;
         }
@@ -127,6 +149,8 @@ impl App {
                     self.reset_palette();
                 }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
+                KeyCode::Char('v') => return Action::PasteImage,
+                KeyCode::Char('g') => return Action::ToggleMouseCapture,
                 _ => {}
             }
             return Action::None;
@@ -170,9 +194,6 @@ impl App {
                     self.mode.label()
                 ));
                 Action::None
-            }
-            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::PasteImage
             }
             KeyCode::Backspace => {
                 self.input.backspace();

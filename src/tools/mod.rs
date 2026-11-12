@@ -17,7 +17,6 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) use files::{change_preview, edit_targets};
@@ -90,11 +89,13 @@ pub fn command_risk(arguments: &str) -> bool {
 pub fn system_prompt(tools_enabled: bool) -> String {
     let cwd = env::current_dir().map_or_else(|_| ".".to_owned(), |path| path.display().to_string());
     let os = env::consts::OS;
+    let temp = crate::temp::platform_temp_root().display().to_string();
     let base = if tools_enabled {
         format!(
             "You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Operating system: {os}\n\
+             Scratch files (scripts, downloads, logs) go in {temp}: that is where the user looks for them.\n\
              Use the provided tools to inspect and change files and to run commands. \
              Prefer tools over guessing, read a file before editing it, and never claim \
              that a file changed unless a tool result confirms it. Set run_command risk to \
@@ -193,7 +194,9 @@ fn collect_agents_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>
         }
         if path.is_dir() {
             collect_agents_files(&path, depth + 1, files);
-        } else if path.extension().is_some_and(|extension| extension == "md") {
+        } else if name == "AGENTS.md" {
+            // Only the instruction file counts. Collecting every Markdown file
+            // would put the README into the system prompt.
             files.push(path);
         }
     }
@@ -869,10 +872,7 @@ fn truncate_output(mut text: String) -> String {
 }
 
 fn temporary_log_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    env::temp_dir().join(format!("yopes-tool-{}-{nanos}.log", std::process::id()))
+    crate::temp::unique_path("yopes-tool", "log")
 }
 
 fn read_log(path: &Path) -> String {

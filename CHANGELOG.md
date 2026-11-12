@@ -12,12 +12,34 @@ All notable changes to YopesCLI are recorded here. The format follows
   code with language labels, nested lists and task boxes, blockquotes, rules,
   and compact tables. The system prompt now asks the model for terminal-friendly
   Markdown.
+- Per-provider key storage: API keys are saved per endpoint and reused across
+  connections, so connecting a second time never asks for the key again.
+- `/disconnect [name]` forgets a provider's stored key and model list, and
+  resets the active connection when it matches.
+- `/version` shows the version the app is running.
+- `/model` switches persist with the connection.
+- Provider logos from models.dev, rasterised and cached on disk, drawn above
+  the connect list.
+- An animated mascot: flicking tail, blinking, and a rolling ball of yarn.
+- Visible retries: a footer line shows the attempt, the delay, and the reason
+  while a failed request retries (bounded, honouring `Retry-After`).
+- Read-only commands work while a response is streaming.
+- The system prompt tells the model where scratch files belong
+  (`%USERPROFILE%\Temp` on Windows).
+- Help popup scrolls with ↑↓/PgUp/PgDn and the mouse wheel.
+- `Ctrl+G` toggles mouse capture: with capture off the terminal's own text
+  selection and copy work over the transcript.
 
 ### Changed
 
 - Split `src/app.rs` into `src/app/` modules (input, turns, streaming,
   `/connect`, palette, pickers, images, formatting, modes) and `src/ui.rs` into
   `src/ui/` modules, one per panel. No behaviour change.
+- Only `AGENTS.md` files feed the project instructions; other Markdown files
+  in the workspace are no longer sent to the model.
+- Palette rows pad by display width, so CJK text and emoji keep their columns.
+- The tool frame caret stays inside the frame's bottom border.
+- `/tools` is deprecated and marked as such; it still works.
 
 ## [0.1.0]
 

@@ -44,15 +44,20 @@ pub(super) fn draw_connect(
         return;
     }
 
+    // The logo of the provider being picked is drawn above the list.
+    let logo = selected_logo_id(connect).and_then(|id| app.logos.get(id.as_str()));
+    let logo_height = logo.map_or(0, |logo| logo.len() as u16);
+    let mut constraints = vec![Constraint::Length(1)];
+    if logo_height > 0 {
+        constraints.push(Constraint::Length(logo_height));
+    }
+    constraints.push(Constraint::Min(2));
+    constraints.push(Constraint::Length(1));
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
+        .constraints(constraints)
         .split(inner);
+    let mut index = 0;
 
     let mut spans = vec![
         Span::styled(
@@ -64,10 +69,43 @@ pub(super) fn draw_connect(
     if connect.uses_cursor() {
         spans.push(Span::styled("▌", Style::default().fg(ACCENT)));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+    frame.render_widget(Paragraph::new(Line::from(spans)), rows[index]);
+    index += 1;
 
-    draw_connect_list(frame, app, connect, spinner, rows[2]);
-    draw_connect_hint(frame, connect, rows[3]);
+    if let Some(logo) = logo {
+        let area = rows[index];
+        // The logo sits in the middle of the width it needs.
+        let width = logo
+            .first()
+            .map_or(0, |line| line.spans.len() as u16)
+            .min(area.width);
+        let left = area.x + area.width.saturating_sub(width) / 2;
+        for (offset, line) in logo.iter().enumerate() {
+            let row = Rect::new(left, area.y + offset as u16, width, 1);
+            frame.render_widget(Paragraph::new(line.clone()), row);
+        }
+        index += 1;
+    }
+
+    draw_connect_list(frame, app, connect, spinner, rows[index]);
+    draw_connect_hint(frame, connect, rows[index + 1]);
+}
+
+/// The provider whose logo is shown above the list.
+fn selected_logo_id(connect: &ConnectState) -> Option<String> {
+    match connect.stage {
+        ConnectStage::Models => connect.provider_id.clone(),
+        ConnectStage::Providers => {
+            let items = connect.items();
+            let item = items.get(connect.selected.min(items.len().saturating_sub(1)))?;
+            // A saved endpoint and the "add provider" row have no logo.
+            if item.custom_id.is_some() || item.id == CUSTOM_PROVIDER_ID {
+                return None;
+            }
+            Some(item.id.clone())
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn draw_connect_list(
@@ -212,7 +250,7 @@ pub(super) fn draw_connect_list(
             Span::styled(item.logo.to_string(), logo_style),
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("{:<title_width$}", truncate(&item.title, title_width)),
+                pad_to(&truncate(&item.title, title_width), title_width),
                 title_style,
             ),
         ];
@@ -260,6 +298,7 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }
+        ConnectStage::Unlock => "enter unlock · esc back".to_owned(),
     };
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(MUTED)), area);
 }
