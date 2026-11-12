@@ -85,8 +85,6 @@ When a tool needs approval, yopes shows its arguments and, for `write_file`, `ed
 
 `todo_write` keeps its task list in the saved session rather than a `todo.md` on disk, and the interface shows the list in a Progress panel (one checked or empty box per task) that travels with the session.
 
-`todo_write` keeps its task list in the saved session rather than a `todo.md` on disk, and the interface shows the list in a Progress panel (one checked or empty box per task) that travels with the session.
-
 ### Skills
 
 Skills are `SKILL.md` procedure packs the model loads on demand, in the Agent Skills format Claude Code uses. Put one under `.yopes/skills/<name>/` in the workspace (committed, shared) or in `~/.yopes/skills/` (personal, every project); `~/.claude/skills/`, `.claude/commands/`, and project `.claude/skills/` are read too, so existing Claude Code skills work unchanged. Each file holds YAML frontmatter followed by instructions:
@@ -153,6 +151,14 @@ CLI flags override environment variables.
 Models.dev providers use Bearer authentication with the provider's environment variable (for example `OPENAI_API_KEY` or `OPENROUTER_API_KEY`) or a key saved with `/connect`. Custom providers use the authorization type, token, and models saved with `/connect`. Saved connections are applied immediately and restored on the next launch; keys and tokens are never written to the session file.
 
 Use `--no-save` for an ephemeral session. Session writes happen after submitted prompts and completed, stopped, or failed responses—not for every streamed token.
+
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md) — module map, data flow, where to add things.
+- [Adding a tool](docs/ADDING-A-TOOL.md) — the lockstep checklist for a new tool.
+- [Roadmap](docs/ROADMAP.md) — what is planned next.
+- [Changelog](CHANGELOG.md) — what shipped in each release.
+- [Security policy](SECURITY.md) — how to report a vulnerability.
 
 ## License
 

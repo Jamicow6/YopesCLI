@@ -17,7 +17,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     cursor::Show,
@@ -250,6 +250,7 @@ async fn run() -> Result<()> {
     app.persist()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     action: Action,
     app: &mut App,
@@ -394,7 +395,10 @@ fn read_clipboard() -> Result<(String, String), String> {
         vec!["xclip", "-selection", "clipboard", "-o"],
         vec!["wl-paste", "--no-newline"],
     ] {
-        if let Ok(output) = std::process::Command::new(argv[0]).args(&argv[1..]).output() {
+        if let Ok(output) = std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .output()
+        {
             if output.status.success() {
                 let text = String::from_utf8_lossy(&output.stdout);
                 let text = text.trim();
@@ -423,11 +427,7 @@ fn read_clipboard_text() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 /// Read the clipboard as a PNG via PowerShell, returning `None` when the
@@ -459,11 +459,6 @@ fn read_clipboard_image() -> Result<Option<(String, String)>> {
         bail!("could not read the clipboard image: {}", stderr.trim());
     }
     Ok(Some(("paste".to_owned(), encoded)))
-}
-
-#[cfg(not(windows))]
-fn read_clipboard_image() -> Result<Option<(String, String)>> {
-    bail!("image paste is currently only supported on windows")
 }
 
 fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64) {

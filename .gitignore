@@ -1,5 +1,4 @@
 /target
-.tmp-shots/
 **/*.rs.bk
 *.tmp
 .DS_Store

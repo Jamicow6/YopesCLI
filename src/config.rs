@@ -366,8 +366,10 @@ impl Config {
                 sessions_dir,
                 config_path,
                 tavily_api_key: None,
-                auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
-                reasoning_effort: saved.as_ref().and_then(|saved| saved.reasoning_effort.clone()),
+                auto_compact: saved.as_ref().is_none_or(|saved| saved.auto_compact),
+                reasoning_effort: saved
+                    .as_ref()
+                    .and_then(|saved| saved.reasoning_effort.clone()),
             });
         }
 
@@ -454,8 +456,10 @@ impl Config {
             sessions_dir,
             config_path,
             tavily_api_key,
-            auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
-            reasoning_effort: saved.as_ref().and_then(|saved| saved.reasoning_effort.clone()),
+            auto_compact: saved.as_ref().is_none_or(|saved| saved.auto_compact),
+            reasoning_effort: saved
+                .as_ref()
+                .and_then(|saved| saved.reasoning_effort.clone()),
         })
     }
 }
@@ -516,7 +520,7 @@ fn slug_provider_name(name: &str, existing_ids: &[String]) -> Option<String> {
     }
     let mut candidate = base.to_owned();
     let mut suffix = 2;
-    while existing_ids.iter().any(|id| *id == candidate) {
+    while existing_ids.contains(&candidate) {
         candidate = format!("{base}-{suffix}");
         suffix += 1;
     }
@@ -623,10 +627,14 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
                 })
                 .unwrap_or_default(),
             (ProviderKind::Custom, None) => StoredSecret::default(),
-            _ => (saved.base_url.trim_end_matches('/')
-                == connection.base_url.trim_end_matches('/'))
-            .then(|| saved.secret.clone())
-            .unwrap_or_default(),
+            _ => {
+                if saved.base_url.trim_end_matches('/') == connection.base_url.trim_end_matches('/')
+                {
+                    saved.secret.clone()
+                } else {
+                    Default::default()
+                }
+            }
         }
     } else {
         provided_secret
@@ -696,31 +704,36 @@ pub fn delete_saved_model(path: &Path, custom_provider_id: &str, model_id: &str)
     save_saved(path, &saved)
 }
 
-/// Store or clear the custom system prompt, in place.
+/// Read the saved config, apply `change`, and write it back.
 ///
-/// Works before the first connection too: a config with just the prompt is
+/// Works before the first connection too: a config holding just the change is
 /// created when none exists yet.
-pub fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
+fn update_saved(path: &Path, change: impl FnOnce(&mut SavedConfig)) -> Result<()> {
     let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
-    saved.system_prompt = value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+    change(&mut saved);
     save_saved(path, &saved)
 }
 
+/// Store or clear the custom system prompt, in place.
+pub fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
+    update_saved(path, |saved| {
+        saved.system_prompt = value
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    })
+}
+
 pub fn save_auto_compact(path: &Path, value: bool) -> Result<()> {
-    let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
-    saved.auto_compact = value;
-    save_saved(path, &saved)
+    update_saved(path, |saved| saved.auto_compact = value)
 }
 
 /// Store or clear the reasoning effort, in place; an empty value clears.
 pub fn save_reasoning_effort(path: &Path, value: Option<String>) -> Result<()> {
-    let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
-    saved.reasoning_effort = value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    save_saved(path, &saved)
+    update_saved(path, |saved| {
+        saved.reasoning_effort = value
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    })
 }
 
 fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
@@ -812,7 +825,9 @@ fn default_session_with_history() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis());
     if legacy.exists()
-        && fs::metadata(&legacy).map(|metadata| metadata.len() > 0).unwrap_or(false)
+        && fs::metadata(&legacy)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
         && fs::rename(&legacy, named(stamp)).is_ok()
     {
         // The legacy session becomes the newest entry, so it is what opens.
@@ -1017,13 +1032,12 @@ mod tests {
         // stays so the running session is untouched.
         let saved: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            saved["models"]
+        assert!(
+            !saved["models"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|model| model["id"] == "one"),
-            false
+                .any(|model| model["id"] == "one")
         );
         assert_eq!(saved["model"], "one");
         let _ = fs::remove_file(&path);
