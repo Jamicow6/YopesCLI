@@ -1455,23 +1455,20 @@ impl App {
         Session::estimate_tokens(&self.session.messages)
     }
 
-    /// Context-window size of the active model from the catalog, if known.
-    /// For custom providers, checks the manually saved context_window first.
+    /// Context-window size of the active model from its saved metadata, if known.
     pub fn model_context_window(&self) -> Option<u64> {
         let model_id = self.backend.model();
-        // Custom provider models carry a manually set limit.
-        if let Some(w) = self
-            .custom_providers
+        // The backend's active model list carries the limit saved at connect
+        // time, so this survives self.connect being cleared, and it is scoped
+        // to the active provider: model ids are not globally unique.
+        self.backend
+            .saved_models()
             .iter()
-            .flat_map(|p| p.models.iter())
-            .find(|m| m.id == model_id)
-            .and_then(|m| m.context_window)
-        {
-            return Some(w);
-        }
-        // Fall back to the catalog from /connect.
-        let catalog = self.connect.as_ref()?.catalog.as_ref()?;
-        catalog::context_window(catalog, model_id)
+            .find(|saved| {
+                saved.id.eq_ignore_ascii_case(model_id)
+                    || (!saved.name.is_empty() && saved.name.eq_ignore_ascii_case(model_id))
+            })
+            .and_then(|saved| saved.context_window)
     }
 
     pub fn tick(&mut self) {

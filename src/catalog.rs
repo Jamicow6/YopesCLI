@@ -246,17 +246,6 @@ pub fn connectable_providers(catalog: &Catalog) -> Vec<(&str, &Provider)> {
     providers
 }
 
-/// Context-window size for a model id, searching across all providers.
-/// Returns `None` when the model is not in the catalog or has no limit.
-pub fn context_window(catalog: &Catalog, model_id: &str) -> Option<u64> {
-    catalog
-        .providers
-        .values()
-        .find_map(|p| p.models.get(model_id))
-        .and_then(|m| m.limit.as_ref())
-        .and_then(|l| l.context)
-}
-
 pub fn provider_models(provider: &Provider) -> Vec<(&str, &Model)> {
     let mut models = provider
         .models

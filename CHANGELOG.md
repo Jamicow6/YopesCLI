@@ -6,6 +6,12 @@ All notable changes to YopesCLI are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Release builds are self-contained on Ubuntu runners: the Windows binary is
+  cross-compiled with MinGW instead of running on the Windows hosted pool, so
+  release creation no longer depends on Windows runner availability.
+
 ### Added
 
 - Rich Markdown rendering in the transcript: headings, emphasis, links, fenced
