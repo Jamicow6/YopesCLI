@@ -150,6 +150,7 @@ impl App {
                 }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 KeyCode::Char('v') => return Action::PasteImage,
+                KeyCode::Char('g') => return Action::ToggleMouseCapture,
                 _ => {}
             }
             return Action::None;
