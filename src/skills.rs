@@ -165,8 +165,10 @@ fn frontmatter(text: &str) -> (Fields, String) {
     if !matches!(lines.next(), Some(first) if first.trim() == "---") {
         return (Fields::default(), text.to_owned());
     }
-    let mut fields = Fields::default();
-    fields.user_invocable = true;
+    let mut fields = Fields {
+        user_invocable: true,
+        ..Fields::default()
+    };
     let mut body = Vec::new();
     let mut closed = false;
     for line in lines {
@@ -178,8 +180,9 @@ fn frontmatter(text: &str) -> (Fields, String) {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
+            let key = unquote(key.trim());
             let value = unquote(value.trim());
-            match key.trim().to_ascii_lowercase().as_str() {
+            match key.to_ascii_lowercase().as_str() {
                 "name" if !value.is_empty() => fields.name = Some(value),
                 "description" if !value.is_empty() => fields.description = Some(value),
                 "when_to_use" if !value.is_empty() => fields.when_to_use = Some(value),

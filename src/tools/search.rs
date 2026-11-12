@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 
 #[derive(Deserialize)]
@@ -41,7 +43,7 @@ pub(super) fn glob(arguments: &str) -> Result<String> {
     }
     let mut matches = Vec::new();
     let mut walked = 0usize;
-    walk_glob(&root, &String::new(), &segments, &mut matches, &mut walked)?;
+    walk_glob(&root, "", &segments, &mut matches, &mut walked)?;
     matches.sort();
     matches.dedup();
     let mut output = format!("{pattern} ({} matches)\n", matches.len());
@@ -87,7 +89,7 @@ fn walk_glob(
         } else {
             format!("{display}/{name}")
         };
-        if match_path(&segments, &path) {
+        if match_path(segments, &path) {
             matches.push(path.clone());
         }
         if is_dir && !SKIP_DIRS.contains(&name.as_str()) {
@@ -129,6 +131,9 @@ pub(super) fn glob_matches(segments: &[String], path: &[String]) -> bool {
 /// One path segment: `*`, `?`, and literals, case-insensitive like paths on
 /// Windows.
 pub(super) fn glob_segment(pattern: &[char], text: &[char]) -> bool {
+    if text.contains(&'/') {
+        return false;
+    }
     let Some((&head, rest)) = pattern.split_first() else {
         return text.is_empty();
     };
@@ -149,8 +154,7 @@ pub(super) fn glob_segment(pattern: &[char], text: &[char]) -> bool {
     }
     match text.split_first() {
         Some((character, rest_text)) => {
-            character.to_ascii_lowercase() == head.to_ascii_lowercase()
-                && glob_segment(rest, rest_text)
+            character.eq_ignore_ascii_case(&head) && glob_segment(rest, rest_text)
         }
         None => false,
     }

@@ -366,7 +366,7 @@ impl Config {
                 sessions_dir,
                 config_path,
                 tavily_api_key: None,
-                auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
+                auto_compact: saved.as_ref().is_none_or(|saved| saved.auto_compact),
                 reasoning_effort: saved
                     .as_ref()
                     .and_then(|saved| saved.reasoning_effort.clone()),
@@ -456,7 +456,7 @@ impl Config {
             sessions_dir,
             config_path,
             tavily_api_key,
-            auto_compact: saved.as_ref().map_or(true, |saved| saved.auto_compact),
+            auto_compact: saved.as_ref().is_none_or(|saved| saved.auto_compact),
             reasoning_effort: saved
                 .as_ref()
                 .and_then(|saved| saved.reasoning_effort.clone()),
@@ -520,7 +520,7 @@ fn slug_provider_name(name: &str, existing_ids: &[String]) -> Option<String> {
     }
     let mut candidate = base.to_owned();
     let mut suffix = 2;
-    while existing_ids.iter().any(|id| *id == candidate) {
+    while existing_ids.contains(&candidate) {
         candidate = format!("{base}-{suffix}");
         suffix += 1;
     }
@@ -627,10 +627,14 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
                 })
                 .unwrap_or_default(),
             (ProviderKind::Custom, None) => StoredSecret::default(),
-            _ => (saved.base_url.trim_end_matches('/')
-                == connection.base_url.trim_end_matches('/'))
-            .then(|| saved.secret.clone())
-            .unwrap_or_default(),
+            _ => {
+                if saved.base_url.trim_end_matches('/') == connection.base_url.trim_end_matches('/')
+                {
+                    saved.secret.clone()
+                } else {
+                    Default::default()
+                }
+            }
         }
     } else {
         provided_secret
@@ -1028,13 +1032,12 @@ mod tests {
         // stays so the running session is untouched.
         let saved: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            saved["models"]
+        assert!(
+            !saved["models"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|model| model["id"] == "one"),
-            false
+                .any(|model| model["id"] == "one")
         );
         assert_eq!(saved["model"], "one");
         let _ = fs::remove_file(&path);

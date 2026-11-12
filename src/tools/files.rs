@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs};
 
 use super::*;
 
@@ -118,8 +118,8 @@ pub(super) fn read_file(arguments: &str) -> Result<String> {
 
 #[derive(Deserialize)]
 pub(super) struct WriteFileArgs {
-    path: String,
-    content: String,
+    pub(super) path: String,
+    pub(super) content: String,
 }
 
 pub(super) fn write_file(arguments: &str) -> Result<String> {
@@ -147,11 +147,11 @@ pub(super) fn write_file(arguments: &str) -> Result<String> {
 
 #[derive(Deserialize)]
 pub(super) struct EditFileArgs {
-    path: String,
-    old_text: String,
-    new_text: String,
+    pub(super) path: String,
+    pub(super) old_text: String,
+    pub(super) new_text: String,
     #[serde(default)]
-    replace_all: bool,
+    pub(super) replace_all: bool,
 }
 
 pub(super) fn edit_file(arguments: &str) -> Result<String> {
@@ -412,7 +412,7 @@ pub fn change_preview(call: &ToolCall) -> ChangePreview {
     match call.function.name.as_str() {
         "write_file" => write_file_preview(&call.function.arguments),
         "edit_file" => edit_file_preview(&call.function.arguments),
-        "multi_edit" => fs::multi_edit_preview(&call.function.arguments),
+        "multi_edit" => multi_edit_preview(&call.function.arguments),
         _ => ChangePreview {
             diffs: Vec::new(),
             before: None,
