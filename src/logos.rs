@@ -185,21 +185,34 @@ fn pixel_color(pixel: Option<tiny_skia::PremultipliedColorU8>) -> Color {
 
 /// Encode the rows so they can be cached on disk.
 ///
-/// Each row is one line of hex colours: two bytes per cell, the lower pixel
-/// first, then the upper one.
+/// Each cell is seven bytes of hex: a flag nibble pair marking which
+/// channels are `Color::Reset`, then the lower pixel's blue, green, red and
+/// the upper pixel's. `Color::Reset` (an undrawn pixel) is encoded as zeros
+/// plus its flag bit, so transparent cells survive the round trip.
 fn encode(logo: &Logo) -> Option<String> {
     let mut text = String::new();
     for line in logo {
         let mut row = String::new();
         for span in &line.spans {
-            let Color::Rgb(red, green, blue) = span.style.fg.unwrap_or(Color::Reset) else {
-                continue;
+            let mut flag = 0u8;
+            let fg = match span.style.fg.unwrap_or(Color::Reset) {
+                Color::Rgb(red, green, blue) => [blue, green, red],
+                _ => {
+                    flag |= 1;
+                    [0, 0, 0]
+                }
             };
-            let Color::Rgb(bred, bgreen, bblue) = span.style.bg.unwrap_or(Color::Reset) else {
-                continue;
+            let bg = match span.style.bg.unwrap_or(Color::Reset) {
+                Color::Rgb(red, green, blue) => [blue, green, red],
+                _ => {
+                    flag |= 2;
+                    [0, 0, 0]
+                }
             };
-            row.push_str(&format!("{blue:02x}{green:02x}{red:02x}"));
-            row.push_str(&format!("{bblue:02x}{bgreen:02x}{bred:02x}"));
+            row.push_str(&format!(
+                "{flag:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                fg[0], fg[1], fg[2], bg[0], bg[1], bg[2]
+            ));
         }
         text.push_str(&row);
         text.push('\n');
@@ -215,11 +228,25 @@ fn decode(text: &str) -> Option<Logo> {
             continue;
         }
         let bytes = hex_decode(line)?;
-        let mut spans = Vec::with_capacity(bytes.len() / 6);
-        for cell in bytes.chunks_exact(6) {
-            let lower = Color::Rgb(cell[2], cell[1], cell[0]);
-            let upper = Color::Rgb(cell[5], cell[4], cell[3]);
-            spans.push(Span::styled("▄", Style::default().fg(lower).bg(upper)));
+        // Not a multiple of the seven-byte cell: a cache written by an
+        // older format. Reject it so the logo is fetched again.
+        if bytes.len() % 7 != 0 {
+            return None;
+        }
+        let mut spans = Vec::with_capacity(bytes.len() / 7);
+        for cell in bytes.chunks_exact(7) {
+            let flag = cell[0];
+            let fg = if flag & 1 != 0 {
+                Color::Reset
+            } else {
+                Color::Rgb(cell[3], cell[2], cell[1])
+            };
+            let bg = if flag & 2 != 0 {
+                Color::Reset
+            } else {
+                Color::Rgb(cell[6], cell[5], cell[4])
+            };
+            spans.push(Span::styled("▄", Style::default().fg(fg).bg(bg)));
         }
         rows.push(Line::from(spans));
     }
@@ -273,6 +300,16 @@ mod tests {
         let read = decode(&text).unwrap();
         assert_eq!(read.len(), logo.len());
         assert_eq!(read[0].spans.len(), logo[0].spans.len());
+        // A transparent cell keeps its `Color::Reset` channels.
+        let reset_cells = logo[0]
+            .spans
+            .iter()
+            .zip(read[0].spans.iter())
+            .filter(|(original, read)| {
+                original.style.fg == Some(Color::Reset) && read.style.fg == Some(Color::Reset)
+            })
+            .count();
+        assert!(reset_cells > 0);
     }
 
     #[test]
