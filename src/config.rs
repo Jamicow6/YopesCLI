@@ -187,6 +187,8 @@ pub struct Config {
     pub tavily_api_key: Option<String>,
     /// Whether compaction runs automatically when the context grows large.
     pub auto_compact: bool,
+    /// Reasoning effort to request from OpenAI-compatible backends.
+    pub reasoning_effort: Option<String>,
 }
 
 pub struct Connection {
