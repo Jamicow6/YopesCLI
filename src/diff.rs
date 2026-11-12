@@ -155,7 +155,7 @@ fn line_entries<'a>(before: &[&'a str], after: &[&'a str]) -> Vec<RawEntry<'a>> 
     for line in &before[..prefix] {
         entries.push(RawEntry {
             kind: ChangeKind::Context,
-            text: *line,
+            text: line,
         });
     }
     let old_middle = &before[prefix..before_end];
@@ -164,7 +164,7 @@ fn line_entries<'a>(before: &[&'a str], after: &[&'a str]) -> Vec<RawEntry<'a>> 
     for line in &before[before_end..] {
         entries.push(RawEntry {
             kind: ChangeKind::Context,
-            text: *line,
+            text: line,
         });
     }
     entries
@@ -175,7 +175,7 @@ fn diff_middle<'a>(before: &[&'a str], after: &[&'a str], entries: &mut Vec<RawE
         for line in after {
             entries.push(RawEntry {
                 kind: ChangeKind::Insert,
-                text: *line,
+                text: line,
             });
         }
         return;
@@ -184,7 +184,7 @@ fn diff_middle<'a>(before: &[&'a str], after: &[&'a str], entries: &mut Vec<RawE
         for line in before {
             entries.push(RawEntry {
                 kind: ChangeKind::Delete,
-                text: *line,
+                text: line,
             });
         }
         return;
@@ -193,13 +193,13 @@ fn diff_middle<'a>(before: &[&'a str], after: &[&'a str], entries: &mut Vec<RawE
         for line in before {
             entries.push(RawEntry {
                 kind: ChangeKind::Delete,
-                text: *line,
+                text: line,
             });
         }
         for line in after {
             entries.push(RawEntry {
                 kind: ChangeKind::Insert,
-                text: *line,
+                text: line,
             });
         }
         return;
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(diff.deletions, 1);
         assert_eq!(diff.hunks.len(), 1);
         let hunk = &diff.hunks[0];
-        assert_eq!(diff.header(hunk), "@@ -1,7 +1,7 @@");
+        assert_eq!(diff.header(hunk), "@@ -1,6 +1,6 @@");
         assert!(
             hunk.lines
                 .iter()

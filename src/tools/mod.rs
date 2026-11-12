@@ -3,11 +3,11 @@
 //!
 //! `mod.rs` holds the contract shared by every tool: the JSON schema in
 //! `definitions`, the approval and preview rules, and `execute`. The tools
-//! themselves live in one module per family: `fs` (read, write, edit),
+//! themselves live in one module per family: `files` (read, write, edit),
 //! `search` (glob, grep), `shell` (commands and background jobs), `web`
 //! (search, fetch) and `todo`.
 
-mod fs;
+mod files;
 mod search;
 mod shell;
 mod todo;
@@ -19,6 +19,8 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+pub(crate) use files::{change_preview, edit_targets};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -112,25 +114,22 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              and send an empty list to close the checklist. \
              For an independent subtask use delegate: hand the subagent one self-contained \
              task with all the context it needs — it has no tools and returns a final answer. \
-             Your user-facing replies are rendered as Markdown in the terminal: use ## headings for \
-             sections, bullets or numbered lists for multiple items, **bold** for key terms, and \
-             fenced code blocks with a language tag for code or commands. Use inline code for paths, \
-             commands, identifiers, and short snippets. Use > for quoted output and a compact table \
-             only when a table is clearer than a list. Keep paragraphs readable; do not flatten \
-             lists or code into plain prose, and never use HTML or images. Keep responses short and \
-             concrete. Paths may be relative to the working directory."
+             Format user-facing replies with Markdown by default: use ## headings for sections, \
+             bullets or numbered lists for multiple items, **bold** for key terms, and fenced \
+             code blocks with a language tag for code or commands. Use inline code for paths, \
+             commands, identifiers, and short snippets. Keep paragraphs readable; do not flatten \
+             lists or code into plain prose. Keep responses short and concrete. Paths may be relative to the working directory."
         )
     } else {
         format!(
             "You are yopes, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Operating system: {os}\n\
-             Your replies are rendered as Markdown in the terminal: use ## headings for sections, \
-             bullets or numbered lists for multiple items, **bold** for key terms, and fenced code \
-             blocks with language tags for code. Use inline code for paths, commands, and \
-             identifiers. Use > for quoted output and a compact table only when a table is clearer \
-             than a list. Keep paragraphs readable; do not flatten lists or code into plain prose, \
-             and never use HTML or images. Keep responses short and concrete."
+             Format replies with Markdown by default: use ## headings for sections, bullets or \
+             numbered lists for multiple items, **bold** for key terms, and fenced code blocks \
+             with language tags for code. Use inline code for paths, commands, and identifiers. \
+             Keep paragraphs readable; do not flatten lists or code into plain prose. \
+             Keep responses short and concrete."
         )
     };
     let project_instructions =
@@ -659,18 +658,18 @@ pub fn command_text(call: &ToolCall) -> Option<String> {
 pub fn applied_change(call: &ToolCall, before: Option<String>, existed: bool) -> Option<FileDiff> {
     match call.function.name.as_str() {
         "write_file" => {
-            let args: fs::WriteFileArgs = parse(&call.function.arguments).ok()?;
+            let args: files::WriteFileArgs = parse(&call.function.arguments).ok()?;
             let before = before.unwrap_or_default();
             Some(FileDiff::new(args.path, &before, &args.content, !existed))
         }
         "edit_file" => {
-            let args: fs::EditFileArgs = parse(&call.function.arguments).ok()?;
+            let args: files::EditFileArgs = parse(&call.function.arguments).ok()?;
             if args.old_text.is_empty() {
                 return None;
             }
             let after = fs::read_to_string(resolve(&args.path)).ok()?;
             let before = before.or_else(|| {
-                fs::apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
+                files::apply_text_edit(&after, &args.new_text, &args.old_text, args.replace_all)
                     .map(|(text, _)| text)
             })?;
             if before == after {
@@ -693,17 +692,17 @@ pub fn applied_change_all(
 ) -> Vec<FileDiff> {
     if call.function.name == "multi_edit" {
         let arguments = call.function.arguments.clone();
-        return fs::multi_edit_applied(&arguments, targets);
+        return files::multi_edit_applied(&arguments, targets);
     }
     applied_change(call, before, existed).into_iter().collect()
 }
 
 fn write_file_preview(arguments: &str) -> ChangePreview {
-    let args: fs::WriteFileArgs = match parse(arguments) {
+    let args: files::WriteFileArgs = match parse(arguments) {
         Ok(args) => args,
         Err(error) => return preview_error(error),
     };
-    let fs::WriteFileArgs { path, content } = args;
+    let files::WriteFileArgs { path, content } = args;
     let resolved = resolve(&path);
     let exists = resolved.exists();
     let before = match read_preview(&resolved, &path) {
@@ -718,11 +717,11 @@ fn write_file_preview(arguments: &str) -> ChangePreview {
 }
 
 fn edit_file_preview(arguments: &str) -> ChangePreview {
-    let args: fs::EditFileArgs = match parse(arguments) {
+    let args: files::EditFileArgs = match parse(arguments) {
         Ok(args) => args,
         Err(error) => return preview_error(error),
     };
-    let fs::EditFileArgs {
+    let files::EditFileArgs {
         path,
         old_text,
         new_text,
@@ -736,7 +735,7 @@ fn edit_file_preview(arguments: &str) -> ChangePreview {
     let attempted = if old_text.is_empty() {
         None
     } else {
-        fs::apply_text_edit(&before, &old_text, &new_text, replace_all)
+        files::apply_text_edit(&before, &old_text, &new_text, replace_all)
     };
     let matches = attempted.as_ref().map_or(0, |(_, count)| *count);
     let note = if old_text.is_empty() {
@@ -790,13 +789,13 @@ fn read_preview(path: &Path, display: &str) -> Result<String> {
 
 pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
-        "list_dir" => fs::list_dir(&call.function.arguments),
-        "read_file" => fs::read_file(&call.function.arguments),
+        "list_dir" => files::list_dir(&call.function.arguments),
+        "read_file" => files::read_file(&call.function.arguments),
         "glob" => search::glob(&call.function.arguments),
         "grep" => search::grep(&call.function.arguments),
-        "write_file" => fs::write_file(&call.function.arguments),
-        "edit_file" => fs::edit_file(&call.function.arguments),
-        "multi_edit" => fs::multi_edit(&call.function.arguments),
+        "write_file" => files::write_file(&call.function.arguments),
+        "edit_file" => files::edit_file(&call.function.arguments),
+        "multi_edit" => files::multi_edit(&call.function.arguments),
         "run_command" => shell::run_command(&call.function.arguments),
         "bash_background" => shell::bash_background(&call.function.arguments),
         "bash_output" => shell::bash_output(&call.function.arguments),
@@ -891,6 +890,7 @@ fn read_log(path: &Path) -> String {
 mod tests {
     use super::{TOOL_NAMES, applied_change, definitions, preview, requires_approval};
     use crate::session::ToolCall;
+    use serde_json::json;
 
     #[test]
     fn definitions_cover_every_tool() {
@@ -966,13 +966,13 @@ mod tests {
         let b = dir.join("b.txt").display().to_string();
         let batch = json!({
             "edits": [
-                { "path": a, "old_text": "alpha", "new_text": "A" },
+                { "path": a, "old_text": "alpha", "new_text": "A", "replace_all": true },
                 { "path": a, "old_text": "beta", "new_text": "B", "replace_all": true },
                 { "path": b, "old_text": "one", "new_text": "uno" },
             ]
         });
         let output = execute(
-            &ToolCall::new("call_20", "multi_edit", &batch.to_string()),
+            &ToolCall::new("call_20", "multi_edit", batch.to_string()),
             None,
         )
         .unwrap();
@@ -991,7 +991,7 @@ mod tests {
             ]
         });
         let error = execute(
-            &ToolCall::new("call_21", "multi_edit", &broken.to_string()),
+            &ToolCall::new("call_21", "multi_edit", broken.to_string()),
             None,
         )
         .unwrap_err()
@@ -1026,7 +1026,7 @@ mod tests {
             "new_text": "beta = 20\n",
         });
         let output = execute(
-            &ToolCall::new("call_23", "edit_file", &single.to_string()),
+            &ToolCall::new("call_23", "edit_file", single.to_string()),
             None,
         )
         .unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
             "replace_all": true,
         });
         execute(
-            &ToolCall::new("call_24", "edit_file", &all.to_string()),
+            &ToolCall::new("call_24", "edit_file", all.to_string()),
             None,
         )
         .unwrap();
@@ -1070,7 +1070,7 @@ mod tests {
                 { "path": dir.join("m.txt").display().to_string(), "old_text": "cc", "new_text": "dd" },
             ]
         });
-        let call = ToolCall::new("call_23", "multi_edit", &args.to_string());
+        let call = ToolCall::new("call_23", "multi_edit", args.to_string());
         let change = change_preview(&call);
         assert_eq!(change.diffs.len(), 2);
         assert!(change.before.is_none());
@@ -1250,19 +1250,19 @@ mod tests {
                 dir.display().to_string()
             )
         };
-        let all = ToolCall::new("call_10", "glob", &args("**/*.md"));
+        let all = ToolCall::new("call_10", "glob", args("**/*.md"));
         let output = execute(&all, None).unwrap();
         assert!(output.contains("README.md"), "{output}");
         assert!(output.contains("sub/note.md"), "{output}");
         assert!(output.contains("sub/deep/last.md"), "{output}");
         assert!(!output.contains("target"), "{output}");
 
-        let shallow = ToolCall::new("call_11", "glob", &args("*.md"));
+        let shallow = ToolCall::new("call_11", "glob", args("*.md"));
         let output = execute(&shallow, None).unwrap();
         assert!(output.contains("README.md"));
         assert!(!output.contains("note.md"), "{output}");
 
-        let missing = ToolCall::new("call_12", "glob", &args("*.toml"));
+        let missing = ToolCall::new("call_12", "glob", args("*.toml"));
         let output = execute(&missing, None).unwrap();
         assert!(output.contains("(no matches)"), "{output}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1286,14 +1286,14 @@ mod tests {
                 dir.display().to_string()
             )
         };
-        let every = execute(&ToolCall::new("call_13", "grep", &args("")), None).unwrap();
+        let every = execute(&ToolCall::new("call_13", "grep", args("")), None).unwrap();
         assert!(every.contains("top.txt:1:"), "{every}");
         assert!(every.contains("top.txt:3:"), "{every}");
         assert!(every.contains("code.rs:1:"), "{every}");
         assert!(!every.contains("skip.bin"), "{every}");
 
         let only_rust = execute(
-            &ToolCall::new("call_14", "grep", &args(r#","include":"*.rs""#)),
+            &ToolCall::new("call_14", "grep", args(r#","include":"*.rs""#)),
             None,
         )
         .unwrap();
@@ -1301,14 +1301,18 @@ mod tests {
         assert!(!only_rust.contains("top.txt"), "{only_rust}");
 
         let insensitive = execute(
-            &ToolCall::new("call_15", "grep", &args(r#","ignore_case":true"#)),
+            &ToolCall::new("call_15", "grep", args(r#","ignore_case":true"#)),
             None,
         )
         .unwrap();
         assert!(insensitive.contains("top.txt:1:"), "{insensitive}");
 
+        let absent_args = format!(
+            r#"{{"pattern":"absent-nowhere","path":{:?}}}"#,
+            dir.display().to_string()
+        );
         let absent = execute(
-            &ToolCall::new("call_16", "grep", r#"{"pattern":"absent-nowhere"}"#),
+            &ToolCall::new("call_16", "grep", absent_args),
             None,
         )
         .unwrap();
@@ -1327,7 +1331,7 @@ mod tests {
         let call = ToolCall::new(
             "call_7",
             "read_file",
-            &format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
+            format!(r#"{{"path":{:?}}}"#, dir.display().to_string()),
         );
         let output = execute(&call, None).unwrap();
         assert!(output.contains("note.txt"), "{output}");

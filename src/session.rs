@@ -189,16 +189,13 @@ impl Session {
     }
 
     fn repair_messages(&mut self) {
-        loop {
-            let Some(position) = self.messages.iter().rposition(|message| {
-                message.role == Role::Assistant
-                    && message
-                        .tool_calls
-                        .as_ref()
-                        .is_some_and(|calls| !calls.is_empty())
-            }) else {
-                break;
-            };
+        while let Some(position) = self.messages.iter().rposition(|message| {
+            message.role == Role::Assistant
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        }) {
             let expected = self.messages[position]
                 .tool_calls
                 .as_ref()

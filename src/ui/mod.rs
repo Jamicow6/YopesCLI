@@ -29,8 +29,7 @@ mod markdown;
 mod pickers;
 mod transcript;
 
-#[cfg(test)]
-use approval::{approval_lines, frame_lines};
+use self::{approval::*, composer::*, connect::*, help::*, pickers::*, transcript::*};
 
 /// How a `read_file` result surfaces in the transcript: quiet. The header and
 /// range lines render instead of the contents; a click still expands it.
@@ -142,12 +141,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let picker_height = if picker.is_some() {
         // A long list scrolls inside the bordered popup instead of growing.
-        (app.model_picker_count().min(12).max(1) as u16).saturating_add(2)
+        (app.model_picker_count().clamp(1, 12) as u16).saturating_add(2)
     } else {
         0
     };
     let session_height = if session_picker.is_some() {
-        (app.session_picker_count().min(12).max(1) as u16).saturating_add(2)
+        (app.session_picker_count().clamp(1, 12) as u16).saturating_add(2)
     } else {
         0
     };

@@ -17,7 +17,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     cursor::Show,
@@ -250,6 +250,7 @@ async fn run() -> Result<()> {
     app.persist()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     action: Action,
     app: &mut App,
@@ -458,11 +459,6 @@ fn read_clipboard_image() -> Result<Option<(String, String)>> {
         bail!("could not read the clipboard image: {}", stderr.trim());
     }
     Ok(Some(("paste".to_owned(), encoded)))
-}
-
-#[cfg(not(windows))]
-fn read_clipboard_image() -> Result<Option<(String, String)>> {
-    bail!("image paste is currently only supported on windows")
 }
 
 fn cancel_task(active_task: &mut Option<(u64, JoinHandle<()>)>, request_id: u64) {

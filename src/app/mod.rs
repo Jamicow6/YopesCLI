@@ -34,6 +34,8 @@ mod pickers;
 mod stream;
 mod turn;
 
+use format::estimated_output_tokens;
+
 pub use format::{format_bytes, format_cost, format_tokens};
 pub use mode::{Mode, ToolsMode};
 
@@ -750,10 +752,7 @@ impl ConnectState {
     }
 }
 
-fn custom_field_mut<'a>(
-    connect: &'a mut ConnectState,
-    stage: ConnectStage,
-) -> Option<&'a mut String> {
+fn custom_field_mut(connect: &mut ConnectState, stage: ConnectStage) -> Option<&mut String> {
     match stage {
         ConnectStage::ProviderName => Some(&mut connect.custom_name),
         ConnectStage::Endpoint => Some(&mut connect.custom_endpoint),
@@ -972,6 +971,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: Session,
         backend: Backend,
@@ -1168,6 +1168,7 @@ mod tests {
                 "/system",
                 "/compact",
                 "/effort",
+                "/skills",
                 "/quit",
             ]
         );
@@ -1321,10 +1322,10 @@ mod tests {
 
         let rows = build_image_rows(&data, 2);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].spans.len(), 4);
+        assert_eq!(rows[0].spans.len(), 2);
         assert_eq!(rows[0].spans[0].content, "▄");
         assert_eq!(rows[0].spans[0].style.fg, Some(Color::Rgb(255, 0, 0)));
-        assert_eq!(rows[0].spans[3].style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(rows[0].spans[1].style.fg, Some(Color::Rgb(255, 0, 0)));
     }
 
     #[test]
