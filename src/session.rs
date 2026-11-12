@@ -65,6 +65,9 @@ pub struct Message {
     /// Images the user pasted with this message, stored as base64 PNG data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
+    /// A provider failure shown in place of the reply. Never sent upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One attached screenshot: name for display, PNG bytes base64-encoded so the
@@ -110,7 +113,16 @@ impl Message {
             tool_call_id: None,
             usage: None,
             images: Vec::new(),
+            error: None,
         }
+    }
+
+    /// A failed request, kept in the transcript where the reply would have
+    /// been so the provider message lands under the model label.
+    pub fn provider_error(message: impl Into<String>) -> Self {
+        let mut msg = Self::new(Role::Assistant, "");
+        msg.error = Some(message.into());
+        msg
     }
 
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -122,6 +134,7 @@ impl Message {
             tool_call_id: Some(call_id.into()),
             usage: None,
             images: Vec::new(),
+            error: None,
         }
     }
 }

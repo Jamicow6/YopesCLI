@@ -1,5 +1,9 @@
 use super::*;
 
+fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
+}
+
 /// Whether a command can run while the model is still answering.
 ///
 /// Commands that only read state or change a setting are safe: they do not
@@ -9,7 +13,7 @@ fn command_is_safe_while_streaming(prompt: &str) -> bool {
     let name = prompt.split_whitespace().next().unwrap_or_default();
     matches!(
         name,
-        "/help" | "/model" | "/tools" | "/system" | "/effort" | "/skills" | "/version" | "/quit"
+        "/help" | "/models" | "/tools" | "/system" | "/effort" | "/skills" | "/version" | "/quit"
     )
 }
 
@@ -86,6 +90,21 @@ impl App {
             // fold the steer into the conversation and restart the turn.
             self.discard_pending_tools("The user steered the response before this tool could run.");
             self.remove_empty_response();
+            // Several steers before the model answered read as one message
+            // block, not one bubble per line.
+            if let Some(last) = self
+                .session
+                .messages
+                .last_mut()
+                .filter(|message| message.role == Role::User)
+            {
+                if !last.content.trim().is_empty() && !value.trim().is_empty() {
+                    last.content.push_str("\n\n");
+                }
+                last.content.push_str(&value);
+                last.images.extend(std::mem::take(&mut self.attachments));
+                return self.begin_turn();
+            }
         }
         let mut message = Message::new(Role::User, value);
         message.images = std::mem::take(&mut self.attachments);
@@ -182,7 +201,11 @@ impl App {
             "/help" => self.show_help = true,
             "/new" => self.new_session(),
             "/connect" => return self.begin_connect(),
-            "/model" => {
+            "/cd" => {
+                let path = parts.collect::<Vec<_>>().join(" ");
+                self.change_directory(&path);
+            }
+            "/models" => {
                 let model = parts.collect::<Vec<_>>().join(" ");
                 if model.is_empty() {
                     self.open_model_picker();
@@ -194,10 +217,6 @@ impl App {
             }
             "/version" => {
                 self.info(format!("yopes {}", crate::update::current_version()));
-            }
-            "/disconnect" => {
-                let rest = parts.collect::<Vec<_>>().join(" ");
-                self.disconnect(rest.trim());
             }
             "/sessions" => self.open_session_picker(),
             "/system" => {
@@ -327,63 +346,71 @@ impl App {
         self.info(message);
     }
 
-    /// Drop a provider's key so it is asked for again next time.
-    ///
-    /// With no argument the active provider is disconnected; with a name the
-    /// matching saved provider is.
-    pub(crate) fn disconnect(&mut self, name: &str) {
+    /// Switch the process working directory, so every path-based tool and the
+    /// next session resolve from there.
+    pub(crate) fn change_directory(&mut self, value: &str) {
+        let value = value.trim();
+        if value.is_empty() {
+            match std::env::current_dir() {
+                Ok(cwd) => self.info(format!("Working directory: {}", cwd.display())),
+                Err(error) => self.error(format!("Could not read the working directory: {error}")),
+            }
+            return;
+        }
+        let expanded = if let Some(rest) = value
+            .strip_prefix("~/")
+            .or_else(|| value.strip_prefix("~\\"))
+        {
+            home_dir().map(|home| home.join(rest))
+        } else if value == "~" {
+            home_dir()
+        } else {
+            Some(PathBuf::from(value))
+        };
+        let Some(path) = expanded else {
+            self.error("Could not resolve the home directory.");
+            return;
+        };
+        let path = if path.is_absolute() {
+            path
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                Err(error) => {
+                    self.error(format!("Could not read the working directory: {error}"));
+                    return;
+                }
+            }
+        };
+        let path = match path.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                self.error(format!("Could not open {}: {error}", path.display()));
+                return;
+            }
+        };
+        if !path.is_dir() {
+            self.error(format!("{} is not a directory.", path.display()));
+            return;
+        }
+        match std::env::set_current_dir(&path) {
+            Ok(()) => {
+                self.scroll = 0;
+                self.follow_tail = true;
+                self.info(format!("Working directory: {}", path.display()));
+            }
+            Err(error) => self.error(format!("Could not change directory: {error}")),
+        }
+    }
+
+    /// Forget the key stored for one endpoint, resetting the session when it is
+    /// the provider in use.
+    pub(crate) fn disconnect_endpoint(&mut self, target: &str) {
         if self.is_busy() {
             self.info("Finish the current turn before disconnecting.");
             return;
         }
-        let target = if name.is_empty() {
-            self.backend.base_url().to_owned()
-        } else {
-            let wanted = name.to_ascii_lowercase();
-            let connected = config::load_connected_providers(&self.config_path);
-            // A provider can be named by its display name or its catalog id.
-            let found = connected.into_iter().find(|provider| {
-                provider.name.to_ascii_lowercase() == wanted
-                    || provider
-                        .provider_id
-                        .as_deref()
-                        .is_some_and(|id| id.to_ascii_lowercase() == wanted)
-            });
-            let custom = self.custom_providers.iter().find(|provider| {
-                provider.name.to_ascii_lowercase() == wanted
-                    || provider.id.to_ascii_lowercase() == wanted
-            });
-            match found {
-                Some(provider) => {
-                    if !provider.has_key {
-                        self.info(format!(
-                            "{} is connected but has no saved key.",
-                            provider.name
-                        ));
-                        return;
-                    }
-                    if provider.encrypted {
-                        self.info(format!(
-                            "{} was encrypted; its key is removed now.",
-                            provider.name
-                        ));
-                    }
-                    provider.base_url
-                }
-                None => match custom.map(|provider| provider.base_url.clone()) {
-                    Some(base_url) => base_url,
-                    None => {
-                        self.error(format!("No connected provider named {name}."));
-                        return;
-                    }
-                },
-            }
-        };
-        if target.trim().is_empty() {
-            self.error("No provider is connected.");
-            return;
-        }
-        match config::disconnect_provider(&self.config_path, &target) {
+        match config::disconnect_provider(&self.config_path, target) {
             Ok(()) => {
                 // The active connection goes with it.
                 if self.backend.base_url().trim_end_matches('/') == target.trim_end_matches('/') {
@@ -398,6 +425,11 @@ impl App {
                     );
                 }
                 self.custom_providers = config::load_custom_providers(&self.config_path);
+                if let Some(connect) = self.connect.as_mut() {
+                    // The row loses its tick immediately.
+                    connect.saved_custom = self.custom_providers.clone();
+                    connect.error = None;
+                }
                 self.info("Disconnected. The key is asked for again next time.");
             }
             Err(error) => self.error(format!("Could not disconnect: {error:#}")),

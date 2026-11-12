@@ -28,7 +28,9 @@ use crossterm::{
         Event, EventStream, MouseEventKind,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
+    },
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -79,6 +81,8 @@ async fn run() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel::<StreamEvent>();
     let (tool_sender, mut tool_receiver) = mpsc::unbounded_channel::<ToolEvent>();
     let (catalog_sender, mut catalog_receiver) = mpsc::unbounded_channel::<FetchResult>();
+    let (models_sender, mut models_receiver) =
+        mpsc::unbounded_channel::<Result<Vec<(String, String)>, String>>();
     let (logo_sender, mut logo_receiver) =
         mpsc::unbounded_channel::<(String, Result<crate::logos::Logo, String>)>();
     let (paste_sender, mut paste_receiver) =
@@ -141,6 +145,7 @@ async fn run() -> Result<()> {
                             &sender,
                             &tool_sender,
                             &catalog_sender,
+                            &models_sender,
                             &logo_sender,
                             &paste_sender,
                             &title_sender,
@@ -206,7 +211,8 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
-                            &logo_sender,
+                    &models_sender,
+                    &logo_sender,
                     &paste_sender,
                     &title_sender,
                     &mut active_task,
@@ -226,7 +232,8 @@ async fn run() -> Result<()> {
                     &sender,
                     &tool_sender,
                     &catalog_sender,
-                            &logo_sender,
+                    &models_sender,
+                    &logo_sender,
                     &paste_sender,
                     &title_sender,
                     &mut active_task,
@@ -244,11 +251,18 @@ async fn run() -> Result<()> {
                         &sender,
                         &tool_sender,
                         &catalog_sender,
+                        &models_sender,
                         &logo_sender,
                         &paste_sender,
                         &title_sender,
                         &mut active_task,
                     );
+                }
+                redraw_now = true;
+            }
+            result = models_receiver.recv() => {
+                if let Some(result) = result {
+                    app.on_custom_models(result);
                 }
                 redraw_now = true;
             }
@@ -296,6 +310,7 @@ fn dispatch(
     events: &mpsc::UnboundedSender<StreamEvent>,
     tool_events: &mpsc::UnboundedSender<ToolEvent>,
     catalog_events: &mpsc::UnboundedSender<FetchResult>,
+    models_events: &mpsc::UnboundedSender<Result<Vec<(String, String)>, String>>,
     logo_events: &mpsc::UnboundedSender<(String, Result<crate::logos::Logo, String>)>,
     paste_sender: &mpsc::UnboundedSender<Result<(String, String), String>>,
     title_sender: &mpsc::UnboundedSender<(u64, String)>,
@@ -315,9 +330,22 @@ fn dispatch(
             let backend = app.backend.clone();
             let sender = events.clone();
             let task = tokio::spawn(async move {
-                backend
-                    .stream(request_id, messages, tools_enabled, mode_note, sender)
-                    .await;
+                // A panic in the request task must not leave the UI streaming a
+                // response that will never arrive.
+                let stream = std::panic::AssertUnwindSafe(backend.stream(
+                    request_id,
+                    messages,
+                    tools_enabled,
+                    mode_note,
+                    sender.clone(),
+                ));
+                if futures_util::FutureExt::catch_unwind(stream).await.is_err() {
+                    let _ = sender.send(StreamEvent::Error {
+                        request_id,
+                        message: "The response task stopped unexpectedly. Send another message to continue."
+                            .to_owned(),
+                    });
+                }
             });
             *active_task = Some((request_id, task));
         }
@@ -384,8 +412,29 @@ fn dispatch(
         }
         Action::LoadCatalog => {
             let sender = catalog_events.clone();
+            let config_path = app.config_path().to_path_buf();
+            tokio::spawn(async move {
+                // The catalog is loaded once and kept next to the config; a
+                // later /connect reuses it instead of downloading it again.
+                if let Some(cached) = catalog::load_cached(&config_path) {
+                    let _ = sender.send(Ok(cached));
+                    return;
+                }
+                let result = catalog::fetch().await.map_err(|error| format!("{error:#}"));
+                if let Ok(catalog) = &result {
+                    let _ = catalog::save_cached(&config_path, catalog);
+                }
+                let _ = sender.send(result);
+            });
+        }
+        Action::RefreshCatalog => {
+            let sender = catalog_events.clone();
+            let config_path = app.config_path().to_path_buf();
             tokio::spawn(async move {
                 let result = catalog::fetch().await.map_err(|error| format!("{error:#}"));
+                if let Ok(catalog) = &result {
+                    let _ = catalog::save_cached(&config_path, catalog);
+                }
                 let _ = sender.send(result);
             });
         }
@@ -393,6 +442,15 @@ fn dispatch(
             let sender = catalog_events.clone();
             tokio::spawn(async move {
                 let result = catalog::fetch_fasfas(&key)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(result);
+            });
+        }
+        Action::FetchCustomModels { url, token, auth } => {
+            let sender = models_events.clone();
+            tokio::spawn(async move {
+                let result = catalog::fetch_models(&url, auth, token.as_deref())
                     .await
                     .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
@@ -542,6 +600,7 @@ impl TerminalGuard {
             EnterAlternateScreen,
             EnableBracketedPaste,
             EnableMouseCapture,
+            SetTitle("yopes"),
             Show
         ) {
             let _ = disable_raw_mode();

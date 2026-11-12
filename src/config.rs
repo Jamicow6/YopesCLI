@@ -94,12 +94,18 @@ impl AuthKind {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedModel {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
+    /// Dollars per million input tokens, when models.dev lists a price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cost: Option<f64>,
+    /// Dollars per million output tokens, when models.dev lists a price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_cost: Option<f64>,
 }
 
 #[derive(Debug, Parser)]
@@ -146,6 +152,8 @@ pub struct CustomProvider {
     pub base_url: String,
     pub auth: AuthKind,
     pub models: Vec<SavedModel>,
+    /// Where to fetch the provider's model list; defaults to `<base>/models`.
+    pub models_url: Option<String>,
     /// Plaintext token when stored without encryption; `None` when encrypted or absent.
     pub token: Option<String>,
     pub encrypted: bool,
@@ -161,6 +169,7 @@ impl CustomProvider {
             base_url: saved.base_url.clone(),
             auth: saved.auth,
             models: saved.models.clone(),
+            models_url: saved.models_url.clone(),
             token: if saved.secret.encrypted {
                 None
             } else {
@@ -183,6 +192,10 @@ pub struct SavedProvider {
     pub provider_name: String,
     #[serde(default)]
     pub secret: StoredSecret,
+    /// The model list this provider last offered, so /models can show models
+    /// from every connected provider, not only the active one.
+    #[serde(default)]
+    pub models: Vec<SavedModel>,
 }
 
 /// A connected provider, for the interface to show what is already set up.
@@ -191,8 +204,11 @@ pub struct ConnectedProvider {
     pub base_url: String,
     pub provider_id: Option<String>,
     pub name: String,
+    #[allow(dead_code)]
     pub has_key: bool,
+    #[allow(dead_code)]
     pub encrypted: bool,
+    pub models: Vec<SavedModel>,
 }
 
 pub struct Config {
@@ -227,6 +243,9 @@ pub struct Connection {
     pub api_key_env: Option<String>,
     pub auth: AuthKind,
     pub models: Vec<SavedModel>,
+    /// Endpoint serving the provider's model list, when it differs from the
+    /// default `<base>/models`.
+    pub models_url: Option<String>,
     /// Id of the saved custom provider to update; `None` creates a new entry.
     pub custom_provider_id: Option<String>,
     /// The models.dev provider id, when the connection came from the catalog.
@@ -288,6 +307,8 @@ struct SavedCustomProvider {
     auth: AuthKind,
     #[serde(default)]
     models: Vec<SavedModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    models_url: Option<String>,
     #[serde(default)]
     secret: StoredSecret,
 }
@@ -552,6 +573,7 @@ fn custom_providers(saved: Option<&SavedConfig>) -> Vec<CustomProvider> {
             base_url: saved.base_url.trim_end_matches('/').to_owned(),
             auth: saved.auth,
             models: saved.models.clone(),
+            models_url: None,
             token: if saved.secret.encrypted {
                 None
             } else {
@@ -683,6 +705,8 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
         models.push(SavedModel {
             id: id.to_owned(),
             name: model.name.trim().to_owned(),
+            input_cost: model.input_cost,
+            output_cost: model.output_cost,
         });
     }
     let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);
@@ -737,6 +761,7 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
     entry.provider_id = connection.provider_id.clone();
     entry.provider_name = connection.provider_name.clone();
     entry.secret = secret.clone();
+    entry.models = models.clone();
     if connection.provider == ProviderKind::Custom {
         let display_name = if connection.provider_name.trim().is_empty() {
             "Custom".to_owned()
@@ -759,6 +784,12 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
             base_url: saved.base_url.clone(),
             auth: connection.auth,
             models: models.clone(),
+            models_url: connection
+                .models_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(|url| url.trim_end_matches('/').to_owned()),
             secret: saved.secret.clone(),
         };
         if let Some(existing) = saved
@@ -829,6 +860,14 @@ pub fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
             name: stored.provider_name.clone(),
             has_key: stored.secret.has_key(),
             encrypted: stored.secret.encrypted,
+            // Older configs only kept the active provider's models.
+            models: if stored.models.is_empty()
+                && base_url.trim_end_matches('/') == saved.base_url.trim_end_matches('/')
+            {
+                saved.models.clone()
+            } else {
+                stored.models.clone()
+            },
         })
         .collect();
     providers.sort_by(|left, right| {
@@ -1064,7 +1103,9 @@ mod tests {
             models: vec![SavedModel {
                 id: "one".to_owned(),
                 name: String::new(),
+                ..SavedModel::default()
             }],
+            models_url: None,
             custom_provider_id: None,
             provider_id: None,
             reuse_secret: false,
@@ -1079,6 +1120,7 @@ mod tests {
         connection.models = vec![SavedModel {
             id: "two".to_owned(),
             name: String::new(),
+            ..SavedModel::default()
         }];
         save_connection(&path, &connection, None).unwrap();
 
@@ -1129,7 +1171,9 @@ mod tests {
             models: vec![SavedModel {
                 id: "one".to_owned(),
                 name: String::new(),
+                ..SavedModel::default()
             }],
+            models_url: None,
             custom_provider_id: None,
             provider_id: Some(name.to_owned()),
             reuse_secret: false,
@@ -1183,6 +1227,7 @@ mod tests {
             api_key_env: None,
             auth: super::AuthKind::Bearer,
             models: Vec::new(),
+            models_url: None,
             custom_provider_id: None,
             provider_id: Some("one".to_owned()),
             reuse_secret: false,
@@ -1255,12 +1300,15 @@ mod tests {
                 SavedModel {
                     id: "one".to_owned(),
                     name: String::new(),
+                    ..SavedModel::default()
                 },
                 SavedModel {
                     id: "two".to_owned(),
                     name: String::new(),
+                    ..SavedModel::default()
                 },
             ],
+            models_url: None,
             custom_provider_id: None,
             provider_id: None,
             reuse_secret: false,

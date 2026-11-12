@@ -1,7 +1,12 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
 /// Preferred provider: Fasfas AI, listed in /connect above models.dev.
@@ -15,13 +20,38 @@ const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 pub type FetchResult = std::result::Result<Catalog, String>;
 
-#[derive(Clone, Debug, Default, Deserialize)]
+/// Where the provider catalog is cached: one file next to the config, so a
+/// second /connect does not hit models.dev again.
+pub fn cache_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("models.dev.json")
+}
+
+/// The catalog as last fetched, when it is already on disk.
+pub fn load_cached(config_path: &Path) -> Option<Catalog> {
+    let text = fs::read_to_string(cache_path(config_path)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Keep the fetched catalog for the next run.
+pub fn save_cached(config_path: &Path, catalog: &Catalog) -> Result<()> {
+    let path = cache_path(config_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let json = serde_json::to_string(catalog).context("encoding the model catalog")?;
+    fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Catalog {
     #[serde(flatten)]
     pub providers: BTreeMap<String, Provider>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Provider {
     #[serde(default)]
     pub name: String,
@@ -58,15 +88,27 @@ impl Provider {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Model {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub limit: Option<Limit>,
+    #[serde(default)]
+    pub cost: Option<Cost>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+/// Models.dev prices, in dollars per million tokens. Zero is a real price:
+/// a free model must not be billed at someone else's rate.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Cost {
+    #[serde(default)]
+    pub input: f64,
+    #[serde(default)]
+    pub output: f64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Limit {
     #[serde(default)]
     pub context: Option<u64>,
@@ -114,6 +156,45 @@ pub async fn fetch_fasfas(key: &str) -> Result<Catalog> {
     Ok(fasfas_catalog(parsed))
 }
 
+/// Fetch an OpenAI-compatible model list from a custom provider's endpoint.
+///
+/// The endpoint is whatever the user stored, so providers whose model list
+/// lives somewhere other than `<base>/models` still work.
+pub async fn fetch_models(
+    url: &str,
+    auth: crate::config::AuthKind,
+    key: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .user_agent(concat!("yopes/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("creating the models client")?;
+    let mut request = client.get(url.trim());
+    if let Some(key) = key.map(str::trim).filter(|key| !key.is_empty()) {
+        request = match auth {
+            crate::config::AuthKind::Bearer => request.bearer_auth(key),
+            crate::config::AuthKind::XApiKey => request.header("x-api-key", key),
+            crate::config::AuthKind::None => request,
+        };
+    }
+    let parsed: FasfasModels = request
+        .send()
+        .await
+        .context("contacting the models endpoint")?
+        .error_for_status()
+        .context("fetching the model list")?
+        .json()
+        .await
+        .context("reading the model list")?;
+    Ok(parsed
+        .data
+        .into_iter()
+        .map(|model| (model.id, model.name.trim().to_owned()))
+        .collect())
+}
+
 /// Shape a parsed `/v1/models` response as a one-provider synthetic catalog.
 fn fasfas_catalog(parsed: FasfasModels) -> Catalog {
     let mut models = BTreeMap::new();
@@ -123,6 +204,7 @@ fn fasfas_catalog(parsed: FasfasModels) -> Catalog {
             Model {
                 name: model.name.trim().to_owned(),
                 limit: None,
+                cost: None,
             },
         );
     }
