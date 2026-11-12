@@ -122,6 +122,17 @@ impl Backend {
         &self.models
     }
 
+    /// Dollars per million tokens for the active model, when the catalog that
+    /// saved this connection listed a price.
+    pub fn model_price(&self) -> Option<(f64, f64)> {
+        self.models
+            .iter()
+            .find(|saved| {
+                saved.id.eq_ignore_ascii_case(&self.model)
+                    || (!saved.name.is_empty() && saved.name.eq_ignore_ascii_case(&self.model))
+            })
+            .and_then(|saved| saved.input_cost.zip(saved.output_cost))
+    }
     pub fn set_model(&mut self, model: String) {
         self.model = model;
     }
@@ -347,6 +358,9 @@ fn request_messages(
     mode_note: Option<&'static str>,
 ) -> Result<Vec<serde_json::Value>> {
     let mut request = Vec::with_capacity(messages.len() + 1);
+    // Images returned by tools are sent after the tool messages, so every
+    // tool_call id still gets its own tool message first.
+    let mut tool_images: Vec<&crate::session::ImageAttachment> = Vec::new();
     let mut system = tools::system_prompt(tooling);
     // The user's prompt may duplicate what a built-in line already says: send
     // it anyway, since a provider may also enforce its own system prompt.
@@ -371,22 +385,60 @@ fn request_messages(
         "content": system,
     }));
     for message in messages {
+        // Parts and Ollama branches below carry the images themselves.
+        let openai_parts = image_style == ImageStyle::Parts;
         // A provider failure is transcript decoration, not conversation:
         // sending it back upstream would look like an assistant turn.
         if message.error.is_some() {
             continue;
         }
         if message.role == Role::Tool && !tooling {
-            request.push(serde_json::json!({
-                "role": "user",
-                "content": format!("Tool result:\n{}", message.content),
-            }));
+            if image_style == ImageStyle::Ollama && !message.images.is_empty() {
+                let images = message
+                    .images
+                    .iter()
+                    .map(|image| serde_json::Value::String(image.data.clone()))
+                    .collect::<Vec<_>>();
+                request.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("Tool result:\n{}", message.content),
+                    "images": images,
+                }));
+            } else if image_style == ImageStyle::Parts && !message.images.is_empty() {
+                let mut parts = vec![serde_json::json!({
+                    "type": "text",
+                    "text": format!("Tool result:\n{}", message.content),
+                })];
+                for image in &message.images {
+                    parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:image/png;base64,{}", image.data) }
+                    }));
+                }
+                request.push(serde_json::json!({ "role": "user", "content": parts }));
+            } else {
+                request.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("Tool result:\n{}", message.content),
+                }));
+            }
+            continue;
+        }
+        // A tool message stays text; its images travel in a user message
+        // appended after all tool results, which keeps the tool-call pairing
+        // valid for every provider.
+        if message.role == Role::Tool && openai_parts && !message.images.is_empty() {
+            let mut value = serde_json::to_value(message)?;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("images");
+            }
+            request.push(value);
+            tool_images.extend(message.images.iter());
             continue;
         }
         // Attached screenshots travel so a vision-capable model sees them:
         // multimodal parts for OpenAI-compatible providers, Ollama's own
         // `images` array there.
-        let openai_parts = image_style == ImageStyle::Parts;
         if openai_parts && message.role == Role::User && !message.images.is_empty() {
             let mut parts: Vec<serde_json::Value> = Vec::with_capacity(1 + message.images.len());
             if !message.content.is_empty() {
@@ -445,6 +497,19 @@ fn request_messages(
             object.remove("images");
         }
         request.push(value);
+    }
+    if !tool_images.is_empty() {
+        let mut parts = vec![serde_json::json!({
+            "type": "text",
+            "text": "Images read by the tools:",
+        })];
+        for image in tool_images {
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/png;base64,{}", image.data) }
+            }));
+        }
+        request.push(serde_json::json!({ "role": "user", "content": parts }));
     }
     Ok(request)
 }
