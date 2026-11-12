@@ -142,7 +142,7 @@ pub(super) fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPic
         };
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(format!("{title:<left_width$} "), title_style),
+            Span::styled(format!("{} ", pad_to(&title, left_width)), title_style),
             Span::styled(right, Style::default().fg(MUTED)),
         ]);
         frame.render_widget(Paragraph::new(line), row);
@@ -214,7 +214,7 @@ pub(super) fn draw_palette(
         };
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(format!("{name:<14}"), name_style),
+            Span::styled(pad_to(&name, 14), name_style),
             Span::styled(command.description, description_style),
         ]);
         frame.render_widget(Paragraph::new(line), row);
