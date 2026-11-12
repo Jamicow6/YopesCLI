@@ -64,6 +64,8 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines = Vec::new();
     let mut rows: Vec<(u16, String)> = Vec::new();
+    // Copied out: the summary is owned so the session can stay borrowed.
+    let compaction = app.compaction_text().map(str::to_owned);
     for (index, message) in app.session.messages.iter().enumerate() {
         let has_calls = message
             .tool_calls
@@ -77,6 +79,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             && message.reasoning.trim().is_empty()
             && !has_calls
             && !streaming
+            && message.error.is_none()
         {
             continue;
         }
@@ -123,6 +126,15 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
+        // A failed request shows its provider message here, where the answer
+        // would have been, instead of as a footer notice.
+        if let Some(error) = &message.error {
+            lines.push(Line::styled(
+                format!("✗ {error}"),
+                Style::default().fg(ERROR),
+            ));
+            continue;
+        }
         // Thinking: shown in full while streaming or expanded, otherwise a
         // one-line summary that a click expands like a tool result.
         let reason_key = format!("reason-{index}");
@@ -187,6 +199,26 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(ACCENT),
                 ));
             }
+        }
+    }
+
+    // Compaction streams into its own buffer: show it live so a long summary
+    // does not look like a frozen screen.
+    if let Some(summary) = compaction {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            "compacting context",
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        ));
+        if summary.trim().is_empty() {
+            lines.push(Line::styled(
+                caret(app.spinner),
+                Style::default().fg(ACCENT),
+            ));
+        } else {
+            lines.extend(markdown_lines(&summary, inner.width));
         }
     }
 

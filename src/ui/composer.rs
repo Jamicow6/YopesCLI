@@ -189,33 +189,44 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ACCENT,
         )
     } else if let Some(elapsed) = app.elapsed_seconds() {
-        let progress = match app.stream_tool_progress() {
-            Some((name, detail, bytes)) => {
-                let size = format_bytes(bytes);
-                if detail.is_empty() {
-                    format!("{name} · {size}")
-                } else {
-                    format!("{name} {detail} · {size}")
+        // Compaction is a request of its own: say so instead of "thinking".
+        if app.compaction_active() {
+            (
+                format!(
+                    "{} compacting context · {elapsed:.1}s · esc stop",
+                    SPINNER[app.spinner % SPINNER.len()]
+                ),
+                ACCENT,
+            )
+        } else {
+            let progress = match app.stream_tool_progress() {
+                Some((name, detail, bytes)) => {
+                    let size = format_bytes(bytes);
+                    if detail.is_empty() {
+                        format!("{name} · {size}")
+                    } else {
+                        format!("{name} {detail} · {size}")
+                    }
+                }
+                None => "thinking".to_owned(),
+            };
+            let mut text = format!(
+                "{} {progress} · {elapsed:.1}s",
+                SPINNER[app.spinner % SPINNER.len()]
+            );
+            if let Some((in_tokens, out_tokens)) = app.stream_tokens() {
+                text.push_str(&format!(" · in {}", format_tokens(in_tokens)));
+                if out_tokens > 0 {
+                    let rate = out_tokens as f64 / elapsed.max(0.2);
+                    text.push_str(&format!(
+                        " · out {} · {rate:.0} t/s",
+                        format_tokens(out_tokens)
+                    ));
                 }
             }
-            None => "thinking".to_owned(),
-        };
-        let mut text = format!(
-            "{} {progress} · {elapsed:.1}s",
-            SPINNER[app.spinner % SPINNER.len()]
-        );
-        if let Some((in_tokens, out_tokens)) = app.stream_tokens() {
-            text.push_str(&format!(" · in {}", format_tokens(in_tokens)));
-            if out_tokens > 0 {
-                let rate = out_tokens as f64 / elapsed.max(0.2);
-                text.push_str(&format!(
-                    " · out {} · {rate:.0} t/s",
-                    format_tokens(out_tokens)
-                ));
-            }
+            text.push_str(" · esc stop");
+            (text, ACCENT)
         }
-        text.push_str(" · esc stop");
-        (text, ACCENT)
     } else if let Some(notice) = &app.notice {
         (
             notice.message.clone(),

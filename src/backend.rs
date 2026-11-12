@@ -371,6 +371,11 @@ fn request_messages(
         "content": system,
     }));
     for message in messages {
+        // A provider failure is transcript decoration, not conversation:
+        // sending it back upstream would look like an assistant turn.
+        if message.error.is_some() {
+            continue;
+        }
         if message.role == Role::Tool && !tooling {
             request.push(serde_json::json!({
                 "role": "user",
