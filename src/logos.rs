@@ -116,10 +116,7 @@ pub async fn fetch(provider_id: &str) -> Result<Logo> {
         .with_context(|| format!("fetching the logo for {provider_id}"))?
         .error_for_status()
         .with_context(|| format!("fetching the logo for {provider_id}"))?;
-    let svg = response
-        .text()
-        .await
-        .context("reading the provider logo")?;
+    let svg = response.text().await.context("reading the provider logo")?;
     render_svg(&svg)
 }
 
@@ -129,7 +126,8 @@ pub async fn fetch(provider_id: &str) -> Result<Logo> {
 /// cells stay square, and each cell carries two pixel rows through `▄`.
 pub fn render_svg(svg: &str) -> Result<Logo> {
     let options = usvg::Options::default();
-    let tree = usvg::Tree::from_data(svg.as_bytes(), &options).context("reading the provider logo")?;
+    let tree =
+        usvg::Tree::from_data(svg.as_bytes(), &options).context("reading the provider logo")?;
     let size = tree.size().to_int_size();
     if size.width() == 0 || size.height() == 0 {
         bail!("the provider logo has no size");
@@ -141,8 +139,7 @@ pub fn render_svg(svg: &str) -> Result<Logo> {
         / f64::from(size.width()))
     .round()
     .max(1.0) as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .context("creating the logo bitmap")?;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).context("creating the logo bitmap")?;
     let scale = width as f32 / size.width() as f32;
     let transform = tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
@@ -222,10 +219,7 @@ fn decode(text: &str) -> Option<Logo> {
         for cell in bytes.chunks_exact(6) {
             let lower = Color::Rgb(cell[2], cell[1], cell[0]);
             let upper = Color::Rgb(cell[5], cell[4], cell[3]);
-            spans.push(Span::styled(
-                "▄",
-                Style::default().fg(lower).bg(upper),
-            ));
+            spans.push(Span::styled("▄", Style::default().fg(lower).bg(upper)));
         }
         rows.push(Line::from(spans));
     }
@@ -260,9 +254,9 @@ pub fn cache_dir(config_path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{decode, encode, render_svg};
 
-    const SAMPLE: &str = r#"<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    const SAMPLE: &str = r##"<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
     <path d="M12 2 L22 22 L2 22 Z" fill="#ff8800"/>
-    </svg>"#;
+    </svg>"##;
 
     #[test]
     fn an_svg_becomes_half_block_rows() {

@@ -4,10 +4,7 @@
 //! the user expects to find them. Everywhere else the platform's temporary
 //! directory is used, honouring `TMPDIR` when it is set.
 
-use std::{
-    env, fs,
-    path::PathBuf,
-};
+use std::{env, fs, path::PathBuf};
 
 /// The directory yopes writes its temporary files to.
 ///
