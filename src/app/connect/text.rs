@@ -37,52 +37,17 @@ impl App {
     }
 
     pub(crate) fn back_from_custom_text(&mut self, stage: ConnectStage) {
-        if stage == ConnectStage::ProviderName {
-            self.connect = None;
-            return;
-        }
         let Some(connect) = self.connect.as_mut() else {
             return;
         };
         connect.error = None;
-        // While editing a saved endpoint, back returns to its model list.
-        if connect.custom_provider_id.is_some()
-            && matches!(
-                stage,
-                ConnectStage::Endpoint | ConnectStage::ModelsEndpoint | ConnectStage::CustomToken
-            )
-        {
-            connect.stage = ConnectStage::CustomModels;
-            connect.selected = 0;
-            return;
-        }
         match stage {
-            ConnectStage::Endpoint => {
-                connect.stage = ConnectStage::ProviderName;
+            ConnectStage::Endpoint
+            | ConnectStage::ModelsEndpoint
+            | ConnectStage::CustomToken
+            | ConnectStage::ModelId => {
+                connect.stage = ConnectStage::CustomModels;
                 connect.selected = 0;
-            }
-            ConnectStage::ModelsEndpoint => {
-                connect.stage = ConnectStage::Endpoint;
-                connect.selected = 0;
-            }
-            ConnectStage::CustomToken => {
-                let selected = connect.auth_index();
-                connect.stage = ConnectStage::Auth;
-                connect.selected = selected;
-            }
-            ConnectStage::ModelId => {
-                let stage = if connect.custom_auth.requires_token() {
-                    ConnectStage::CustomToken
-                } else {
-                    ConnectStage::Auth
-                };
-                let selected = if stage == ConnectStage::Auth {
-                    connect.auth_index()
-                } else {
-                    0
-                };
-                connect.stage = stage;
-                connect.selected = selected;
             }
             ConnectStage::ModelName => {
                 connect.stage = ConnectStage::ModelId;
@@ -91,37 +56,21 @@ impl App {
             ConnectStage::ModelContextWindow => {
                 connect.stage = if !connect.custom_flow {
                     ConnectStage::Models
-                } else if connect.custom_provider_id.is_some() {
-                    ConnectStage::CustomModels
                 } else {
                     ConnectStage::ModelName
                 };
                 connect.custom_model_context_window.clear();
                 connect.error = None;
             }
-            _ => {}
+            _ => {
+                connect.stage = ConnectStage::CustomModels;
+                connect.selected = 0;
+            }
         }
     }
 
     pub(crate) fn advance_custom_text(&mut self, stage: ConnectStage) -> Action {
         match stage {
-            ConnectStage::ProviderName => {
-                let name = self
-                    .connect
-                    .as_ref()
-                    .map(|connect| connect.custom_name.trim().to_owned())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    self.connect_error("Enter a name for this provider.");
-                    return Action::None;
-                }
-                if let Some(connect) = self.connect.as_mut() {
-                    connect.custom_name = name;
-                    connect.stage = ConnectStage::Endpoint;
-                    connect.selected = 0;
-                    connect.error = None;
-                }
-            }
             ConnectStage::Endpoint => {
                 let endpoint = self
                     .connect
@@ -138,21 +87,7 @@ impl App {
                 }
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_endpoint = endpoint;
-                    // Editing a saved endpoint returns to its model list; the
-                    // create flow continues on to pick an authorization kind.
-                    if connect.custom_provider_id.is_some() {
-                        connect.stage = ConnectStage::CustomModels;
-                        connect.selected = 0;
-                        connect.error = None;
-                        return Action::None;
-                    }
-                    // The model list almost always lives at <base>/models; the
-                    // field can be changed before continuing.
-                    if connect.custom_models_url.trim().is_empty() {
-                        connect.custom_models_url =
-                            format!("{}/models", connect.custom_endpoint.trim_end_matches('/'));
-                    }
-                    connect.stage = ConnectStage::ModelsEndpoint;
+                    connect.stage = ConnectStage::CustomModels;
                     connect.selected = 0;
                     connect.error = None;
                 }
@@ -167,21 +102,10 @@ impl App {
                     self.connect_error("Models endpoint must start with http:// or https://.");
                     return Action::None;
                 }
-                let auth_index = self
-                    .connect
-                    .as_ref()
-                    .map(ConnectState::auth_index)
-                    .unwrap_or(0);
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_models_url = url;
-                    if connect.custom_provider_id.is_some() {
-                        connect.stage = ConnectStage::CustomModels;
-                        connect.selected = 0;
-                        connect.error = None;
-                        return Action::None;
-                    }
-                    connect.stage = ConnectStage::Auth;
-                    connect.selected = auth_index;
+                    connect.stage = ConnectStage::CustomModels;
+                    connect.selected = 0;
                     connect.error = None;
                 }
             }
@@ -196,26 +120,12 @@ impl App {
                     self.connect_error(format!("Enter a token for {}.", auth.label()));
                     return Action::None;
                 }
-                let mut fetch = false;
                 if let Some(connect) = self.connect.as_mut() {
                     connect.custom_token = token;
                     connect.custom_token_dirty = true;
-                    if connect.custom_provider_id.is_some() {
-                        connect.stage = ConnectStage::CustomModels;
-                        connect.selected = 0;
-                        connect.error = None;
-                        return Action::None;
-                    }
-                    if connect.custom_models_url.trim().is_empty() {
-                        connect.stage = ConnectStage::ModelId;
-                        connect.selected = 0;
-                        connect.error = None;
-                    } else {
-                        fetch = true;
-                    }
-                }
-                if fetch {
-                    return self.fetch_custom_models();
+                    connect.stage = ConnectStage::CustomModels;
+                    connect.selected = 0;
+                    connect.error = None;
                 }
             }
             ConnectStage::ModelId => {

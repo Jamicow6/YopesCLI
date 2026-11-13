@@ -176,13 +176,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if let Some(connect) = self.connect.as_mut() {
-                    // A saved endpoint's manager backs out to the provider list;
-                    // the create flow backs out to the endpoint field.
-                    connect.stage = if connect.custom_provider_id.is_some() {
-                        ConnectStage::Providers
-                    } else {
-                        ConnectStage::Endpoint
-                    };
+                    connect.stage = ConnectStage::Providers;
                     connect.selected = 0;
                     connect.filter.clear();
                     connect.error = None;

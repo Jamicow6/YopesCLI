@@ -3,7 +3,7 @@
 # the user PATH. Works on Windows PowerShell 5.1 and PowerShell 7+.
 #
 # Remote one-liner (defaults, no parameters):
-#   irm https://raw.githubusercontent.com/Jamicow6/YopesCLI/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Jamicaw56/YopesCLI/main/install.ps1 | iex
 #
 # Or download first to pass parameters:
 #   .\install.ps1 [-Destination <dir>] [-NoPath]
@@ -19,7 +19,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Repo = 'Jamicow6/YopesCLI'
+$Repo = 'Jamicaw56/YopesCLI'
 $Asset = 'yopes-Windows-X64.zip'
 
 # Windows PowerShell 5.1 defaults to TLS 1.0 for .NET clients; force 1.2+.
@@ -28,7 +28,7 @@ if ($PSVersionTable.PSVersion.Major -lt 6) {
 }
 
 if ($IsWindows -eq $false) {
-    throw 'install.ps1 is for Windows. Download the matching archive from https://github.com/Jamicow6/YopesCLI/releases'
+    throw 'install.ps1 is for Windows. Download the matching archive from https://github.com/Jamicaw56/YopesCLI/releases'
 }
 
 # An already-installed yopes updates itself in place; replacing a different

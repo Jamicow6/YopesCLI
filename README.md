@@ -13,10 +13,10 @@ A better coding CLI, built with Rust, Ratatui, and Tokio.
 
 ## Install
 
-Download the latest build for your platform from [Releases](https://github.com/Jamicow6/YopesCLI/releases): `yopes-Windows-X64.zip` (Windows) or `yopes-Linux-X64.tar.gz` (Linux), then install it with PowerShell on Windows:
+Download the latest build for your platform from [Releases](https://github.com/Jamicaw56/YopesCLI/releases): `yopes-Windows-X64.zip` (Windows) or `yopes-Linux-X64.tar.gz` (Linux), then install it with PowerShell on Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/Jamicow6/YopesCLI/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Jamicaw56/YopesCLI/main/install.ps1 | iex
 ```
 
 The script picks the latest release, verifies its SHA256SUMS checksum, installs `yopes.exe` to `%LOCALAPPDATA%\Programs\yopes`, and adds it to your user PATH. To build or run from a checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -29,16 +29,16 @@ The script picks the latest release, verifies its SHA256SUMS checksum, installs 
 
 ## Docs
 
-The [wiki](https://github.com/Jamicow6/YopesCLI/wiki) holds the detail:
+The [wiki](https://github.com/Jamicaw56/YopesCLI/wiki) holds the detail:
 
-- [Commands](https://github.com/Jamicow6/YopesCLI/wiki/Commands) — every slash command.
-- [Keys](https://github.com/Jamicow6/YopesCLI/wiki/Keys) — the full keyboard and mouse map.
-- [Connect](https://github.com/Jamicow6/YopesCLI/wiki/Connect) — providers, key storage, `/disconnect`.
-- [Tools](https://github.com/Jamicow6/YopesCLI/wiki/Tools) — the tool surface, approval modes, plan mode.
-- [Skills](https://github.com/Jamicow6/YopesCLI/wiki/Skills) — `SKILL.md` procedure packs.
-- [Configuration](https://github.com/Jamicow6/YopesCLI/wiki/Configuration) — flags, environment, config file schema.
-- [Troubleshooting](https://github.com/Jamicow6/YopesCLI/wiki/Troubleshooting) — common problems.
-- [Architecture](https://github.com/Jamicow6/YopesCLI/wiki/Architecture) — the module map.
+- [Commands](https://github.com/Jamicaw56/YopesCLI/wiki/Commands) — every slash command.
+- [Keys](https://github.com/Jamicaw56/YopesCLI/wiki/Keys) — the full keyboard and mouse map.
+- [Connect](https://github.com/Jamicaw56/YopesCLI/wiki/Connect) — providers, key storage, `/disconnect`.
+- [Tools](https://github.com/Jamicaw56/YopesCLI/wiki/Tools) — the tool surface, approval modes, plan mode.
+- [Skills](https://github.com/Jamicaw56/YopesCLI/wiki/Skills) — `SKILL.md` procedure packs.
+- [Configuration](https://github.com/Jamicaw56/YopesCLI/wiki/Configuration) — flags, environment, config file schema.
+- [Troubleshooting](https://github.com/Jamicaw56/YopesCLI/wiki/Troubleshooting) — common problems.
+- [Architecture](https://github.com/Jamicaw56/YopesCLI/wiki/Architecture) — the module map.
 
 In the checkout: [Architecture](docs/ARCHITECTURE.md), [Adding a tool](docs/ADDING-A-TOOL.md), [Changelog](CHANGELOG.md), [Security policy](SECURITY.md).
 

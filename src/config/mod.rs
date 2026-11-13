@@ -85,18 +85,6 @@ pub enum AuthKind {
 }
 
 impl AuthKind {
-    pub const fn choices() -> [Self; 3] {
-        [Self::Bearer, Self::XApiKey, Self::None]
-    }
-
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Bearer => "bearer",
-            Self::XApiKey => "x-api-key",
-            Self::None => "none",
-        }
-    }
-
     pub const fn label(self) -> &'static str {
         match self {
             Self::Bearer => "Bearer token",
@@ -105,20 +93,8 @@ impl AuthKind {
         }
     }
 
-    pub const fn detail(self) -> &'static str {
-        match self {
-            Self::Bearer => "Authorization: Bearer <token>",
-            Self::XApiKey => "x-api-key: <token>",
-            Self::None => "send no authorization header",
-        }
-    }
-
     pub const fn requires_token(self) -> bool {
         !matches!(self, Self::None)
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::choices().into_iter().find(|auth| auth.id() == value)
     }
 }
 

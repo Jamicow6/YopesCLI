@@ -11,7 +11,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Jamicow6/YopesCLI/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Jamicaw56/YopesCLI/releases/latest";
 const CHECKSUM_ASSET: &str = "SHA256SUMS";
 const INSTALL_FRAMES: [&str; 3] = [".", "..", "..."];
 

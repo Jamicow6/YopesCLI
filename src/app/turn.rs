@@ -97,10 +97,13 @@ impl App {
                 self.info("Usage: !<command>");
                 return Action::None;
             }
-            if steering || tool_busy {
+            if tool_busy {
                 self.input.set(prompt);
-                self.info("Finish or stop the response before running that command.");
+                self.info("Finish or stop the tool before running that command.");
                 return Action::None;
+            }
+            if steering {
+                self.stop_streaming();
             }
             return self.run_user_command(cmd);
         }
@@ -113,12 +116,13 @@ impl App {
                 // A command that only reads or changes a setting is safe to
                 // run while the model is answering or a tool is running; the
                 // ones that would disturb the turn are not.
-                if (steering || tool_busy) && !command_is_safe_while_streaming(&prompt) {
-                    // The command is put back, so it can be run after the
-                    // response finishes.
+                if tool_busy {
                     self.input.set(prompt);
-                    self.info("Finish or stop the response before running that command.");
+                    self.info("Finish or stop the tool before running that command.");
                     return Action::None;
+                }
+                if steering && !command_is_safe_while_streaming(&prompt) {
+                    self.stop_streaming();
                 }
                 return self.command(&prompt);
             }
@@ -129,7 +133,17 @@ impl App {
                 // A skill invocation becomes a normal turn that carries the
                 // skill body, so it works with tools off too.
                 Some(expanded) => value = expanded,
-                None => return self.command(&prompt),
+                None => {
+                    if tool_busy {
+                        self.input.set(prompt);
+                        self.info("Finish or stop the tool before running that command.");
+                        return Action::None;
+                    }
+                    if steering && !command_is_safe_while_streaming(&prompt) {
+                        self.stop_streaming();
+                    }
+                    return self.command(&prompt);
+                }
             }
         }
         if !self.backend.is_configured() {
@@ -822,6 +836,28 @@ mod tests {
     }
 
     #[test]
+    fn submit_command_while_model_streaming_stops_stream_and_runs_command() {
+        let mut app = test_app();
+        app.active = Some(ActiveRequest {
+            id: 1,
+            started: Instant::now(),
+            prompt_tokens: 10,
+            usage: None,
+            tool_progress: None,
+            compacting: None,
+        });
+        assert!(app.is_streaming());
+
+        app.input.set("!echo hello_active");
+        let action = app.submit();
+        assert!(matches!(action, Action::None));
+        assert!(!app.is_streaming());
+        assert_eq!(app.session.messages.len(), 2);
+        assert_eq!(app.session.messages[0].content, "$ echo hello_active");
+        assert!(app.session.messages[1].content.contains("hello_active"));
+    }
+
+    #[test]
     fn user_can_run_commands_via_slash_run_and_exclamation() {
         let mut app = test_app();
         app.input.set("!echo hello_bang");
@@ -841,6 +877,33 @@ mod tests {
         assert_eq!(app.session.messages[2].content, "$ echo hello_slash");
         assert_eq!(app.session.messages[3].role, Role::Tool);
         assert!(app.session.messages[3].content.contains("hello_slash"));
+    }
+
+    #[test]
+    fn connect_custom_provider_without_models() {
+        let temp = crate::temp::unique_dir("config-test");
+        let config_path = temp.join("config.json");
+        let mut app = test_app();
+        app.config_path = config_path;
+        app.begin_connect();
+        if let Some(connect) = app.connect.as_mut() {
+            connect.stage = ConnectStage::AddProvider;
+            connect.custom_name = "Ollama".to_owned();
+            connect.custom_endpoint = "http://localhost:11434/v1".to_owned();
+            connect.custom_model_id = String::new();
+            connect.custom_model_name = String::new();
+        }
+        let action = app.submit_add_provider();
+        assert!(matches!(action, Action::None));
+        assert!(app.connect.is_none());
+        assert_eq!(app.backend.provider_label(), "Ollama");
+        assert_eq!(app.backend.base_url(), "http://localhost:11434/v1");
+        assert_eq!(app.backend.model(), "");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Connected to Ollama"))
+        );
     }
 
     #[test]
