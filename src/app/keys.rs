@@ -26,6 +26,12 @@ impl App {
                     connect.filter.push_str(&clean);
                     connect.selected = 0;
                 }
+                ConnectStage::RenameProvider => connect.custom_name.push_str(&clean),
+                ConnectStage::AddProvider => {
+                    if let Some(target) = connect.active_add_provider_field_mut() {
+                        target.push_str(&clean);
+                    }
+                }
                 ConnectStage::Auth | ConnectStage::CustomModels => {}
             }
             return;
@@ -36,7 +42,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> Action {
         if let Some(approval) = self.approval.as_mut() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -47,15 +53,29 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return Action::None;
         }
-        if self.connect.is_some() {
+        if let Some(connect) = self.connect.as_mut() {
+            if connect.stage == ConnectStage::AddProvider {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    if let Some(field) = connect.field_at_mouse(mouse.column, mouse.row) {
+                        connect.add_provider_field = field;
+                        if field == AddProviderField::Done {
+                            return self.submit_add_provider();
+                        }
+                    }
+                }
+                return Action::None;
+            }
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.connect_move(false),
                 MouseEventKind::ScrollDown => self.connect_move(true),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    return self.select_connect_item();
+                }
                 _ => {}
             }
-            return;
+            return Action::None;
         }
         if self.show_help {
             match mouse.kind {
@@ -63,7 +83,7 @@ impl App {
                 MouseEventKind::ScrollDown => self.help_scroll = self.help_scroll.saturating_add(3),
                 _ => {}
             }
-            return;
+            return Action::None;
         }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(3),
@@ -77,6 +97,7 @@ impl App {
             }
             _ => {}
         }
+        Action::None
     }
 
     /// Expand or collapse the tool output drawn on a screen row.
@@ -160,8 +181,13 @@ impl App {
                 }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 KeyCode::Char('v') => return Action::PasteImage,
-                KeyCode::Char('p') if !self.session.tasks.is_empty() => {
-                    self.progress_collapsed = !self.progress_collapsed;
+                KeyCode::Char('p' | 'P') => {
+                    if self.palette_open() {
+                        self.palette_move(true);
+                    } else {
+                        self.input.set("/");
+                        self.reset_palette();
+                    }
                 }
                 _ => {}
             }

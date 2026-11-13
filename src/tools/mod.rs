@@ -113,6 +113,15 @@ pub fn delegate_task(call: &ToolCall) -> Option<String> {
         })
 }
 
+/// Execute a command directly for a user.
+pub fn run_user_command(command: &str) -> Result<String> {
+    let args = serde_json::json!({
+        "command": command,
+    })
+    .to_string();
+    shell::run_command(&args)
+}
+
 fn workspace() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

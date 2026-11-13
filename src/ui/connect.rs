@@ -1,3 +1,5 @@
+use crate::app::AddProviderField;
+
 use super::*;
 
 pub(super) fn draw_connect(
@@ -7,8 +9,12 @@ pub(super) fn draw_connect(
     spinner: usize,
     area: Rect,
 ) {
-    let width = area.width.saturating_sub(6).min(78);
-    let height = area.height.saturating_sub(4).min(24);
+    let width = (area.width.saturating_sub(4) * 92 / 100)
+        .clamp(60, 120)
+        .min(area.width.saturating_sub(2));
+    let height = (area.height.saturating_sub(2) * 90 / 100)
+        .clamp(16, 40)
+        .min(area.height.saturating_sub(2));
     if width < 34 || height < 10 {
         return;
     }
@@ -44,9 +50,11 @@ pub(super) fn draw_connect(
         return;
     }
 
-    // The logo of the provider being picked is drawn beside its name in the
-    // list, not in a separate block above it.
-    let logo = selected_logo_id(connect).and_then(|id| app.logos.get(id.as_str()));
+    if connect.stage == ConnectStage::AddProvider {
+        draw_add_provider_form(frame, connect, inner);
+        return;
+    }
+
     let mut constraints = vec![Constraint::Length(1)];
     constraints.push(Constraint::Min(2));
     constraints.push(Constraint::Length(1));
@@ -69,32 +77,203 @@ pub(super) fn draw_connect(
     frame.render_widget(Paragraph::new(Line::from(spans)), rows[index]);
     index += 1;
 
-    draw_connect_list(
-        frame,
-        app,
-        connect,
-        spinner,
-        logo.map(|v| &**v),
-        rows[index],
-    );
+    draw_connect_list(frame, app, connect, spinner, rows[index]);
     draw_connect_hint(frame, connect, rows[index + 1]);
 }
 
-/// The provider whose logo is shown above the list.
-fn selected_logo_id(connect: &ConnectState) -> Option<String> {
-    match connect.stage {
-        ConnectStage::Models => connect.provider_id.clone(),
-        ConnectStage::Providers => {
-            let items = connect.items();
-            let item = items.get(connect.selected.min(items.len().saturating_sub(1)))?;
-            // A saved endpoint and the "add provider" row have no logo.
-            if item.custom_id.is_some() || item.id == CUSTOM_PROVIDER_ID {
-                return None;
-            }
-            Some(item.id.clone())
-        }
-        _ => None,
+fn draw_add_provider_form(frame: &mut Frame, connect: &ConnectState, inner: Rect) {
+    connect.popup_inner.set(inner);
+    if inner.width < 30 || inner.height < 12 {
+        return;
     }
+    let active = connect.add_provider_field;
+
+    let field_line =
+        |label: &str, value: &str, is_active: bool, width: u16| -> (Line<'static>, Line<'static>) {
+            let label_style = if is_active {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            let label_line = Line::from(vec![Span::styled(label.to_owned(), label_style)]);
+            let bracket_style = if is_active {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            let text_style = if is_active {
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let mut spans = vec![
+                Span::styled("[ ", bracket_style),
+                Span::styled(
+                    truncate(value, usize::from(width).saturating_sub(6)),
+                    text_style,
+                ),
+            ];
+            if is_active {
+                spans.push(Span::styled("▌", Style::default().fg(ACCENT)));
+            }
+            spans.push(Span::styled(" ]", bracket_style));
+            (label_line, Line::from(spans))
+        };
+
+    let mut lines = Vec::new();
+
+    // 1. Provider name:
+    let (lbl, val) = field_line(
+        "Provider name:",
+        &connect.custom_name,
+        active == AddProviderField::Name,
+        inner.width,
+    );
+    lines.push(lbl);
+    lines.push(val);
+
+    // 2. Completion URL:
+    let (lbl, val) = field_line(
+        "Completion URL:",
+        &connect.custom_endpoint,
+        active == AddProviderField::CompletionUrl,
+        inner.width,
+    );
+    lines.push(lbl);
+    lines.push(val);
+
+    // 3. (optional) Model fetching URL:
+    let (lbl, val) = field_line(
+        "(optional) Model fetching URL:",
+        &connect.custom_models_url,
+        active == AddProviderField::ModelsUrl,
+        inner.width,
+    );
+    lines.push(lbl);
+    lines.push(val);
+
+    // 4. Models: name / modelID (two box split)
+    let models_active =
+        active == AddProviderField::ModelName || active == AddProviderField::ModelId;
+    lines.push(Line::from(vec![Span::styled(
+        "Models:",
+        if models_active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        },
+    )]));
+
+    let half = inner.width.saturating_sub(4) / 2;
+    let name_active = active == AddProviderField::ModelName;
+    let id_active = active == AddProviderField::ModelId;
+
+    let mut models_spans = Vec::new();
+    models_spans.push(Span::styled(
+        "name: [ ",
+        if name_active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        },
+    ));
+    models_spans.push(Span::styled(
+        truncate(
+            &connect.custom_model_name,
+            usize::from(half).saturating_sub(12),
+        ),
+        Style::default().fg(TEXT),
+    ));
+    if name_active {
+        models_spans.push(Span::styled("▌", Style::default().fg(ACCENT)));
+    }
+    models_spans.push(Span::styled(
+        " ]  ",
+        if name_active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        },
+    ));
+
+    models_spans.push(Span::styled(
+        "modelID: [ ",
+        if id_active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        },
+    ));
+    models_spans.push(Span::styled(
+        truncate(
+            &connect.custom_model_id,
+            usize::from(half).saturating_sub(14),
+        ),
+        Style::default().fg(TEXT),
+    ));
+    if id_active {
+        models_spans.push(Span::styled("▌", Style::default().fg(ACCENT)));
+    }
+    models_spans.push(Span::styled(
+        " ]",
+        if id_active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        },
+    ));
+    lines.push(Line::from(models_spans));
+
+    // 5. Context Window:
+    let cw_display = if connect.custom_model_context_window.is_empty() {
+        "128000"
+    } else {
+        &connect.custom_model_context_window
+    };
+    let (lbl, val) = field_line(
+        "Context Window:",
+        cw_display,
+        active == AddProviderField::ContextWindow,
+        inner.width,
+    );
+    lines.push(lbl);
+    lines.push(val);
+
+    lines.push(Line::raw(""));
+
+    // 6. Done button
+    let done_active = active == AddProviderField::Done;
+    let done_style = if done_active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+    };
+    lines.push(Line::from(vec![Span::styled(
+        if done_active {
+            " › [ Done ] ‹ "
+        } else {
+            "   [ Done ]   "
+        },
+        done_style,
+    )]));
+
+    // 7. Hint or error
+    if let Some(error) = &connect.error {
+        lines.push(Line::styled(
+            format!("✗ {error}"),
+            Style::default().fg(ERROR),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "Tab switch box · Enter submit · Esc cancel",
+            Style::default().fg(MUTED),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 pub(super) fn draw_connect_list(
@@ -102,7 +281,6 @@ pub(super) fn draw_connect_list(
     app: &App,
     connect: &ConnectState,
     spinner: usize,
-    logo: Option<&[Line<'static>]>,
     area: Rect,
 ) {
     if connect.loading {
@@ -187,22 +365,8 @@ pub(super) fn draw_connect_list(
     let selected_row = selected + extra;
     let start_row = selected_row.saturating_sub(height.saturating_sub(1));
     let start = start_row.min(rows.len().saturating_sub(height));
-    // A logo, when drawn, gets a gutter on the left: the name then reads next
-    // to its provider's artwork instead of under a separate block.
-    let logo_width = logo
-        .and_then(|logo| logo.first())
-        .map_or(0, |line| line.spans.len() as u16);
-    let gutter = if logo_width > 0 && area.width > logo_width.saturating_add(30) {
-        logo_width.saturating_add(2)
-    } else {
-        0
-    };
-    let list = Rect {
-        x: area.x.saturating_add(gutter),
-        width: area.width.saturating_sub(gutter),
-        ..area
-    };
-    let title_width = usize::from(list.width).saturating_sub(30).max(10);
+    let list = area;
+    let title_width = (usize::from(list.width) * 55 / 100).max(16);
 
     for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
         let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
@@ -261,27 +425,20 @@ pub(super) fn draw_connect_list(
         spans.push(Span::styled(item.detail.clone(), detail_style));
         frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     }
-
-    // The selected provider's artwork sits in the gutter, starting on its row.
-    if let Some(logo) = logo.filter(|_| gutter > 0) {
-        let top = area.y.saturating_add((selected_row - start) as u16);
-        let between = area.y.saturating_add(area.height);
-        for (offset, line) in logo.iter().enumerate() {
-            let y = top.saturating_add(offset as u16);
-            if y >= between {
-                break;
-            }
-            frame.render_widget(
-                Paragraph::new(line.clone()),
-                Rect::new(area.x, y, logo_width, 1),
-            );
-        }
-    }
 }
 
 pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
     let text = match connect.stage {
-        ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
+        ConnectStage::Providers => {
+            "↑↓ move · type to filter · enter choose · f2 rename · delete / ctrl+d remove · esc close"
+                .to_owned()
+        }
+        ConnectStage::AddProvider => {
+            "tab switch box · enter submit · esc close".to_owned()
+        }
+        ConnectStage::RenameProvider => {
+            "enter rename · esc back".to_owned()
+        }
         ConnectStage::Models => {
             "↑↓ move · type to filter · enter choose · tab context · esc back".to_owned()
         }

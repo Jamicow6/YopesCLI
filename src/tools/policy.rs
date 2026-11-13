@@ -59,9 +59,14 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              web_search. \
              Start long-running or detached work with bash_background, then read it with \
              bash_output and stop it with bash_kill when it has served its purpose. \
-             For multi-step work or when the user asks for a todo list, maintain the \
-             checklist with todo_write: send the whole list each call, marking done items, \
-             and send an empty list to close the checklist. \
+             Maintain the session task checklist dynamically with todo_write: call it at the \
+             start of any multi-step task to establish the plan, update it as items are \
+             completed (marking them done), and send an empty list to close the checklist once \
+             everything is done. Do NOT maintain plans solely in conversational text; \
+             always keep the checklist synchronized via todo_write. When asked to run commands, \
+             tests, builds, git commits, or shell tasks, always execute them directly using \
+             run_command or bash_background. Never merely explain the command in text when \
+             execution is requested. \
              For an independent subtask use delegate: hand the subagent one self-contained \
              task with all the context it needs — it has no tools and returns a final answer. \
              Format user-facing replies with Markdown by default: use ## headings for sections, \
