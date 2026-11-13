@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
@@ -278,6 +278,28 @@ fn truncate(text: &str, width: usize) -> String {
     result
 }
 
+// ponytail: 4-space tab stops; add configurable tab size if user settings support it.
+/// Tabs become spaces and carriage returns are stripped: ratatui has no tab stops
+/// and raw `\r` desyncs cursor position in terminal cells.
+pub(super) fn normalize_line(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut column = 0;
+    for ch in line.chars() {
+        if ch == '\r' {
+            continue;
+        }
+        if ch == '\t' {
+            let spaces = 4 - column % 4;
+            output.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            output.push(ch);
+            column += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    output
+}
+
 /// Pad `text` with spaces to `width` display columns, so CJK and emoji
 /// align like ASCII does.
 pub(super) fn pad_to(text: &str, width: usize) -> String {
@@ -446,6 +468,7 @@ mod tests {
     use super::{frame_lines, pad_to, reasoning_lines, wrapped_line_count};
     use crate::session::{Message, Role};
     use ratatui::{style::Color, text::Line};
+    use unicode_width::UnicodeWidthStr;
 
     fn text_of(line: &Line<'_>) -> String {
         line.spans
@@ -536,6 +559,19 @@ mod tests {
         assert!(text_of(&lines[1]).starts_with("╭─ main.py "));
         assert!(text_of(&lines[3]).starts_with("│ a much longer body"));
         assert!(text_of(&lines[5]).starts_with('╰'));
+    }
+
+    #[test]
+    fn frame_lines_sanitizes_tabs_and_carriage_returns() {
+        let body = vec![Line::raw("col\tnext\r"), Line::raw("\t\tindented")];
+        let lines = frame_lines("tool".to_owned(), body, 20, Color::Reset);
+        for line in &lines[1..] {
+            let text = text_of(line);
+            assert_eq!(UnicodeWidthStr::width(text.as_str()), 24, "{text:?}");
+            assert!(!text.contains('\t'));
+            assert!(!text.contains('\r'));
+            assert!(text.ends_with('│') || text.ends_with('╮') || text.ends_with('╯'));
+        }
     }
 
     #[test]

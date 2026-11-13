@@ -56,10 +56,7 @@ impl App {
                     let Some(connect) = self.connect.as_ref() else {
                         return Action::None;
                     };
-                    (
-                        connect.password.clone(),
-                        connect.unlock_endpoint.clone(),
-                    )
+                    (connect.password.clone(), connect.unlock_endpoint.clone())
                 };
                 let Some(secret) = self.stored_secret_for(&endpoint) else {
                     self.connect_error("That key is no longer stored.");
