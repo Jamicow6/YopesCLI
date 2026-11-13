@@ -23,7 +23,7 @@ pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
     // No product branding in the working view: the mode dot and the session
     // title are the only things that need the space.
-    let title = Line::from(vec![
+    let mut title_spans = vec![
         Span::styled(
             "●",
             Style::default()
@@ -34,9 +34,24 @@ pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!(" {}", app.mode.label()),
             Style::default().fg(app.mode.color()),
         ),
-        Span::styled("  ", Style::default()),
-        Span::styled(app.session.title.trim(), Style::default().fg(MUTED)),
-    ]);
+    ];
+    if app.tools_mode == ToolsMode::Auto {
+        title_spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+        title_spans.push(Span::styled(
+            "yolo",
+            Style::default()
+                .fg(ratatui::style::Color::Rgb(255, 120, 50))
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if app.tools_mode == ToolsMode::Ask {
+        title_spans.push(Span::styled(" · ask", Style::default().fg(MUTED)));
+    }
+    title_spans.push(Span::styled("  ", Style::default()));
+    title_spans.push(Span::styled(
+        app.session.title.trim(),
+        Style::default().fg(MUTED),
+    ));
+    let title = Line::from(title_spans);
     frame.render_widget(Paragraph::new(title), columns[0]);
 
     if right_width > 0 {
@@ -168,7 +183,8 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     let (text, color) = if app.approval.is_some() {
         (
-            "approval needed · enter run · a always allow · esc deny · v diff".to_owned(),
+            "approval needed · enter run · a always allow · shift+tab yolo · esc deny · v diff"
+                .to_owned(),
             ACCENT,
         )
     } else if let Some(retry) = &app.retry {
@@ -240,11 +256,21 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         // The mode is the idle status's first word: Tab cycles build · plan · chat.
-        let text = format!(
-            "mode {} · enter send · / commands · F1 help",
-            app.mode.label()
-        );
+        let text = if app.tools_mode == ToolsMode::Auto {
+            format!(
+                "mode {} (yolo) · enter send · / commands · F1 help",
+                app.mode.label()
+            )
+        } else {
+            format!(
+                "mode {} · enter send · / commands · F1 help",
+                app.mode.label()
+            )
+        };
         let color = match app.mode {
+            Mode::Build if app.tools_mode == ToolsMode::Auto => {
+                ratatui::style::Color::Rgb(255, 120, 50)
+            }
             Mode::Build => MUTED,
             _ => ACCENT,
         };

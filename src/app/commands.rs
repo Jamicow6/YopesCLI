@@ -27,7 +27,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 15] = [
+pub const COMMANDS: [CommandSpec; 16] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -70,8 +70,13 @@ pub const COMMANDS: [CommandSpec; 15] = [
     },
     CommandSpec {
         name: "/tools",
-        description: "Set tool mode: on, off, auto, ask (deprecated)",
+        description: "Set tool permission mode: on, yolo, ask, off",
         argument: Some("mode"),
+    },
+    CommandSpec {
+        name: "/yolo",
+        description: "Toggle YOLO mode: bypass approvals for all commands",
+        argument: None,
     },
     CommandSpec {
         name: "/system",
@@ -141,6 +146,7 @@ mod tests {
                 "/models",
                 "/sessions",
                 "/tools",
+                "/yolo",
                 "/system",
                 "/compact",
                 "/effort",
@@ -154,6 +160,7 @@ mod tests {
         assert_eq!(command_names("/r"), vec!["/run"]);
         assert_eq!(command_names("/m"), vec!["/models"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
+        assert_eq!(command_names("/y"), vec!["/yolo"]);
         assert_eq!(command_names("/e"), vec!["/effort"]);
         assert_eq!(command_names("/v"), vec!["/version"]);
         assert_eq!(command_names("/MO"), vec!["/models"]);
