@@ -88,6 +88,10 @@ impl App {
                 connect.stage = ConnectStage::ModelId;
                 connect.selected = 0;
             }
+            ConnectStage::ModelContextWindow => {
+                connect.stage = ConnectStage::ModelName;
+                connect.selected = 0;
+            }
             _ => {}
         }
     }
@@ -245,13 +249,33 @@ impl App {
                 }
             }
             ConnectStage::ModelName => {
-                let (id, name) = {
+                let id = self
+                    .connect
+                    .as_ref()
+                    .map(|c| c.custom_model_id.trim().to_owned())
+                    .unwrap_or_default();
+                if id.is_empty() {
+                    if let Some(connect) = self.connect.as_mut() {
+                        connect.stage = ConnectStage::ModelId;
+                        connect.error = Some("Enter a model ID first.".to_owned());
+                    }
+                    return Action::None;
+                }
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.stage = ConnectStage::ModelContextWindow;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            ConnectStage::ModelContextWindow => {
+                let (id, name, raw_window) = {
                     let Some(connect) = self.connect.as_ref() else {
                         return Action::None;
                     };
                     (
                         connect.custom_model_id.trim().to_owned(),
                         connect.custom_model_name.trim().to_owned(),
+                        connect.custom_model_context_window.trim().to_owned(),
                     )
                 };
                 if id.is_empty() {
@@ -261,6 +285,19 @@ impl App {
                     }
                     return Action::None;
                 }
+                let context_window: Option<u64> = if raw_window.is_empty() {
+                    None
+                } else {
+                    match raw_window.parse::<u64>() {
+                        Ok(n) => Some(n),
+                        Err(_) => {
+                            self.connect_error(
+                                "Context window must be a number (e.g. 128000), or leave blank.",
+                            );
+                            return Action::None;
+                        }
+                    }
+                };
                 if let Some(connect) = self.connect.as_mut() {
                     let existing = connect
                         .custom_models
@@ -268,16 +305,22 @@ impl App {
                         .position(|model| model.id == id);
                     if let Some(index) = existing {
                         connect.custom_models[index].name = name;
+                        // Blank keeps the limit already saved for this model.
+                        if !raw_window.is_empty() {
+                            connect.custom_models[index].context_window = context_window;
+                        }
                     } else {
                         connect.custom_models.push(SavedModel {
                             id: id.clone(),
                             name,
+                            context_window,
                             ..SavedModel::default()
                         });
                     }
                     connect.selected = existing.unwrap_or(connect.custom_models.len() - 1);
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
+                    connect.custom_model_context_window.clear();
                     connect.stage = ConnectStage::CustomModels;
                     connect.error = None;
                 }

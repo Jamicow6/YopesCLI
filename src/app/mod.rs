@@ -57,10 +57,14 @@ const TOOL_ROUND_HEADS_UP: usize = 10;
 /// cannot bill forever without a human once per hundred rounds.
 const MAX_TOOL_ROUNDS: usize = 100;
 
-/// Estimated prompt tokens that trigger compaction of older turns.
-const COMPACTION_THRESHOLD_TOKENS: u64 = 32_000;
-/// Tokens of recent history kept intact when compaction runs.
-const COMPACTION_KEEP_TOKENS: u64 = 12_000;
+/// Fraction of the model context window at which compaction triggers.
+const COMPACTION_THRESHOLD_FRAC: u64 = 3; // fire at ~1/3 of window
+/// Fraction of the model context window kept intact after compaction.
+const COMPACTION_KEEP_FRAC: u64 = 8; // keep ~1/8 of window
+/// Fallback compaction threshold when no catalog context size is known.
+const COMPACTION_THRESHOLD_DEFAULT: u64 = 32_000;
+/// Fallback keep-tokens when no catalog context size is known.
+const COMPACTION_KEEP_DEFAULT: u64 = 12_000;
 
 struct ActiveRequest {
     id: u64,
@@ -189,9 +193,6 @@ pub struct App {
     pub show_help: bool,
     /// How far the help popup is scrolled down.
     pub help_scroll: usize,
-    /// Whether the app captures the mouse; off, the terminal's own text
-    /// selection and copy work.
-    pub mouse_capture: bool,
     pub should_quit: bool,
     pub notice: Option<Notice>,
     /// A request being retried, shown in the footer while it waits.
@@ -283,7 +284,6 @@ impl App {
             follow_tail: true,
             show_help: false,
             help_scroll: 0,
-            mouse_capture: true,
             should_quit: false,
             notice: None,
             retry: None,
@@ -425,6 +425,22 @@ impl App {
     /// Estimated tokens the next request would send, the context window load.
     pub fn context_tokens(&self) -> u64 {
         Session::estimate_tokens(&self.session.messages)
+    }
+
+    /// Context-window size of the active model from its saved metadata, if known.
+    pub fn model_context_window(&self) -> Option<u64> {
+        let model_id = self.backend.model();
+        // The backend's active model list carries the limit saved at connect
+        // time, so this survives self.connect being cleared, and it is scoped
+        // to the active provider: model ids are not globally unique.
+        self.backend
+            .saved_models()
+            .iter()
+            .find(|saved| {
+                saved.id.eq_ignore_ascii_case(model_id)
+                    || (!saved.name.is_empty() && saved.name.eq_ignore_ascii_case(model_id))
+            })
+            .and_then(|saved| saved.context_window)
     }
 
     pub fn tick(&mut self) {

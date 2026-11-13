@@ -6,6 +6,12 @@ All notable changes to YopesCLI are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Release builds are self-contained on Ubuntu runners: the Windows binary is
+  cross-compiled with MinGW instead of running on the Windows hosted pool, so
+  release creation no longer depends on Windows runner availability.
+
 ### Added
 
 - Rich Markdown rendering in the transcript: headings, emphasis, links, fenced
@@ -27,8 +33,6 @@ All notable changes to YopesCLI are recorded here. The format follows
 - The system prompt tells the model where scratch files belong
   (`%USERPROFILE%\Temp` on Windows).
 - Help popup scrolls with ↑↓/PgUp/PgDn and the mouse wheel.
-- `Ctrl+G` toggles mouse capture: with capture off the terminal's own text
-  selection and copy work over the transcript.
 
 ### Changed
 
@@ -55,9 +59,9 @@ First public release.
 - Provider and model discovery from [models.dev](https://models.dev), plus the
   Fasfas model list, through `/connect`.
 - Tool calling with per-tool approval and a diff viewer: `list_dir`,
-  `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `multi_edit`,
-  `run_command`, `bash_background`, `bash_output`, `bash_kill`, `web_search`,
-  `web_fetch`, `todo_write`, and `delegate`.
+  `read_file`, `multi_read`, `glob`, `grep`, `write_file`, `edit_file`,
+  `multi_edit`, `run_command`, `bash_background`, `bash_output`, `bash_kill`,
+  `web_search`, `web_fetch`, `todo_write`, and `delegate`.
 - Tool modes `on`, `off`, `auto`, and `ask`, plus build, plan, and chat turn
   modes.
 - A native task list in a Progress panel, saved with the session.

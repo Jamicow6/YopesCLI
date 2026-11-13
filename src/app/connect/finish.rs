@@ -236,6 +236,7 @@ impl App {
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
+            | ConnectStage::ModelContextWindow
             | ConnectStage::Password
             | ConnectStage::Unlock
             | ConnectStage::FasfasKey => {}
@@ -293,6 +294,7 @@ impl App {
                     name: model.name.clone(),
                     input_cost: model.cost.as_ref().map(|cost| cost.input),
                     output_cost: model.cost.as_ref().map(|cost| cost.output),
+                    context_window: model.limit.as_ref().and_then(|l| l.context),
                 })
                 .collect::<Vec<_>>();
             (

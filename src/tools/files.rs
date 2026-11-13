@@ -110,32 +110,38 @@ pub(super) fn read_file(arguments: &str) -> Result<String> {
         let requested = args.path.trim();
         return directory_listing(if requested.is_empty() { "." } else { requested });
     }
+    read_regular_file(&args.path, args.start_line, args.limit)
+}
+
+/// One regular file, optionally ranged; shared by `read_file` and `multi_read`.
+fn read_regular_file(
+    path: &str,
+    start_line: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String> {
+    let resolved = resolve(path);
+    let metadata = fs::metadata(&resolved).with_context(|| format!("reading {path}"))?;
     if !metadata.is_file() {
-        bail!("{} is not a file", args.path);
+        bail!("{path} is not a file");
     }
     if metadata.len() > MAX_READ_BYTES {
         bail!(
-            "{} is too large ({} bytes; the limit is {MAX_READ_BYTES})",
-            args.path,
+            "{path} is too large ({} bytes; the limit is {MAX_READ_BYTES})",
             metadata.len()
         );
     }
-    let source = fs::read_to_string(&path).with_context(|| format!("reading {}", args.path))?;
+    let source = fs::read_to_string(&resolved).with_context(|| format!("reading {path}"))?;
     let lines = source.lines().collect::<Vec<_>>();
     let total = lines.len();
-    let start = args.start_line.unwrap_or(1).max(1);
-    let limit = args
-        .limit
+    let start = start_line.unwrap_or(1).max(1);
+    let limit = limit
         .unwrap_or(MAX_READ_LINES)
         .clamp(1, MAX_READ_LINE_LIMIT);
     if start > total && total > 0 {
-        bail!(
-            "start_line {start} is past the end of {} ({total} lines)",
-            args.path
-        );
+        bail!("start_line {start} is past the end of {path} ({total} lines)");
     }
     let end = start.saturating_sub(1).saturating_add(limit).min(total);
-    let mut output = format!("{} ({total} lines)\n", args.path);
+    let mut output = format!("{path} ({total} lines)\n");
     if start > 1 || end < total {
         output.push_str(&format!("lines {start}-{end} of {total}\n"));
     }
@@ -144,6 +150,89 @@ pub(super) fn read_file(arguments: &str) -> Result<String> {
         output.push('\n');
     }
     Ok(truncate_output(output))
+}
+
+#[derive(Deserialize)]
+struct MultiReadArgs {
+    paths: Vec<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+pub(super) fn multi_read(arguments: &str) -> Result<String> {
+    let args: MultiReadArgs = parse(arguments)?;
+    if args.paths.is_empty() {
+        bail!("paths cannot be empty");
+    }
+    let mut output = String::new();
+    // Enforce the output cap while accumulating so a large directory does
+    // not allocate a result proportional to its file count.
+    let mut budget = MAX_OUTPUT_CHARS;
+    let mut stopped = false;
+    for requested in &args.paths {
+        if !args.all {
+            match read_regular_file(requested, None, None) {
+                Ok(content) => {
+                    push_bounded(&mut output, &mut budget, &content);
+                    if budget == 0 {
+                        stopped = true;
+                        break;
+                    }
+                }
+                Err(error) => output.push_str(&format!("{requested}: {error}\n")),
+            }
+            continue;
+        }
+        let names = match fs::read_dir(resolve(requested)) {
+            Ok(entries) => {
+                let mut names = entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                names.sort_by_key(|name| name.to_ascii_lowercase());
+                names
+            }
+            Err(error) => {
+                output.push_str(&format!("{requested}: {error}\n"));
+                continue;
+            }
+        };
+        if names.is_empty() {
+            output.push_str(&format!("{requested}: (no files)\n"));
+            continue;
+        }
+        for name in names {
+            let display = format!("{requested}/{name}");
+            match read_regular_file(&display, None, None) {
+                Ok(content) => {
+                    push_bounded(&mut output, &mut budget, &content);
+                    if budget == 0 {
+                        stopped = true;
+                        break;
+                    }
+                }
+                Err(error) => output.push_str(&format!("{display}: {error}\n")),
+            }
+        }
+        if stopped {
+            break;
+        }
+    }
+    if stopped {
+        output.push_str("\n… output truncated");
+    }
+    Ok(truncate_output(output))
+}
+
+/// Append up to the remaining output budget; a full budget drops the text.
+fn push_bounded(output: &mut String, budget: &mut usize, text: &str) {
+    if *budget == 0 {
+        return;
+    }
+    let taken: String = text.chars().take(*budget).collect();
+    *budget -= taken.chars().count();
+    output.push_str(&taken);
 }
 
 #[derive(Deserialize)]

@@ -14,14 +14,11 @@ mod tools;
 mod ui;
 mod update;
 
-use std::{future::Future, io, pin::Pin, time::Instant};
+use std::{future::Future, pin::Pin, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind},
-    execute,
-};
+use crossterm::event::{Event, EventStream, MouseEventKind};
 use futures_util::StreamExt;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -353,14 +350,6 @@ fn dispatch(
                 };
                 let _ = sender.send(read);
             });
-        }
-        Action::ToggleMouseCapture => {
-            app.mouse_capture = !app.mouse_capture;
-            if app.mouse_capture {
-                let _ = execute!(io::stdout(), EnableMouseCapture);
-            } else {
-                let _ = execute!(io::stdout(), DisableMouseCapture);
-            }
         }
         Action::RunTool { call } => {
             let sender = tool_events.clone();

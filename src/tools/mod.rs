@@ -49,9 +49,10 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[cfg(test)]
-pub const TOOL_NAMES: [&str; 16] = [
+pub const TOOL_NAMES: [&str; 17] = [
     "list_dir",
     "read_file",
+    "multi_read",
     "read_image",
     "glob",
     "grep",
@@ -79,6 +80,7 @@ pub fn execute(call: &ToolCall, web_key: Option<&str>) -> Result<String> {
     match call.function.name.as_str() {
         "list_dir" => files::list_dir(&call.function.arguments),
         "read_file" => files::read_file(&call.function.arguments),
+        "multi_read" => files::multi_read(&call.function.arguments),
         "read_image" => files::read_image(&call.function.arguments),
         "glob" => search::glob(&call.function.arguments),
         "grep" => search::grep(&call.function.arguments),
@@ -625,6 +627,76 @@ mod tests {
         let ranged = ToolCall::new("call_9", "read_file", r#"{"path":".","start_line":2}"#);
         let error = execute(&ranged, None).unwrap_err().to_string();
         assert!(error.contains("directory"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_read_reads_files_and_expands_folders() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-multiread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "alpha").unwrap();
+        fs::write(dir.join("b.txt"), "beta").unwrap();
+        // A file that is not valid UTF-8 is reported per file, not fatal.
+        fs::write(dir.join("skip.bin"), [0u8, 159, 146, 150]).unwrap();
+
+        let both = ToolCall::new(
+            "call_21",
+            "multi_read",
+            format!(
+                r#"{{"paths":[{:?},{:?}]}}"#,
+                dir.join("a.txt").display().to_string(),
+                dir.join("b.txt").display().to_string()
+            ),
+        );
+        let output = execute(&both, None).unwrap();
+        assert!(output.contains("alpha"), "{output}");
+        assert!(output.contains("beta"), "{output}");
+
+        let folder = ToolCall::new(
+            "call_22",
+            "multi_read",
+            format!(
+                r#"{{"paths":[{:?}],"all":true}}"#,
+                dir.display().to_string()
+            ),
+        );
+        let all = execute(&folder, None).unwrap();
+        assert!(all.contains("alpha"), "{all}");
+        assert!(all.contains("beta"), "{all}");
+        assert!(all.contains("skip.bin"), "{all}");
+
+        let empty = ToolCall::new("call_23", "multi_read", r#"{"paths":[]}"#);
+        assert!(execute(&empty, None).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_read_caps_output_while_accumulating() {
+        use super::execute;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("yopes-multiread-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // The first file alone exhausts the budget; the second must never be
+        // read into memory.
+        fs::write(dir.join("big.txt"), "x".repeat(20_000)).unwrap();
+        fs::write(dir.join("small.txt"), "small-marker").unwrap();
+
+        let folder = ToolCall::new(
+            "call_24",
+            "multi_read",
+            format!(
+                r#"{{"paths":[{:?}],"all":true}}"#,
+                dir.display().to_string()
+            ),
+        );
+        let all = execute(&folder, None).unwrap();
+        assert!(all.contains("output truncated"), "{all}");
+        assert!(!all.contains("small-marker"), "{all}");
+        assert!(all.chars().count() <= 16_000 + 20, "{all}");
         let _ = fs::remove_dir_all(&dir);
     }
 

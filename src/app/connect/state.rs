@@ -33,6 +33,7 @@ pub enum ConnectStage {
     CustomToken,
     ModelId,
     ModelName,
+    ModelContextWindow,
     CustomModels,
     Password,
     /// Unlock a key that is already stored for the endpoint.
@@ -53,6 +54,7 @@ impl ConnectStage {
             Self::CustomToken => "token",
             Self::ModelId => "model id",
             Self::ModelName => "model name",
+            Self::ModelContextWindow => "context window",
             Self::CustomModels => "models",
             Self::Password => "password",
             Self::Unlock => "password",
@@ -137,6 +139,7 @@ pub struct ConnectState {
     pub(crate) custom_models: Vec<SavedModel>,
     pub(crate) custom_model_id: String,
     pub(crate) custom_model_name: String,
+    pub(crate) custom_model_context_window: String,
     /// The key already stored for the endpoint being connected, if any.
     pub(crate) stored_secret: Option<config::StoredSecret>,
     /// What to do once a stored key is unlocked.
@@ -171,6 +174,7 @@ impl ConnectState {
             custom_models: Vec::new(),
             custom_model_id: String::new(),
             custom_model_name: String::new(),
+            custom_model_context_window: String::new(),
             stored_secret: None,
             unlock_target: UnlockTarget::Finish,
             unlock_endpoint: String::new(),
@@ -446,6 +450,7 @@ impl ConnectState {
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
+            | ConnectStage::ModelContextWindow
             | ConnectStage::Password
             | ConnectStage::Unlock => Vec::new(),
         }
@@ -491,6 +496,7 @@ impl ConnectState {
             ConnectStage::CustomToken => &self.custom_token,
             ConnectStage::ModelId => &self.custom_model_id,
             ConnectStage::ModelName => &self.custom_model_name,
+            ConnectStage::ModelContextWindow => &self.custom_model_context_window,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
             ConnectStage::FasfasNotice => unreachable!("handled above"),
             ConnectStage::Auth | ConnectStage::CustomModels => unreachable!(),
@@ -522,6 +528,7 @@ impl ConnectState {
             ConnectStage::CustomToken => "token",
             ConnectStage::ModelId => "model id",
             ConnectStage::ModelName => "model name",
+            ConnectStage::ModelContextWindow => "context window (blank to skip)",
             ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
             ConnectStage::Unlock => "key password",
@@ -650,6 +657,7 @@ pub(super) fn custom_field_mut(
         ConnectStage::CustomToken => Some(&mut connect.custom_token),
         ConnectStage::ModelId => Some(&mut connect.custom_model_id),
         ConnectStage::ModelName => Some(&mut connect.custom_model_name),
+        ConnectStage::ModelContextWindow => Some(&mut connect.custom_model_context_window),
         _ => None,
     }
 }

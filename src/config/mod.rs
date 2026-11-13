@@ -123,6 +123,9 @@ pub struct SavedModel {
     /// Dollars per million output tokens, when models.dev lists a price.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_cost: Option<f64>,
+    /// Manually set context-window size in tokens (e.g. 128000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

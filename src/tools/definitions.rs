@@ -51,6 +51,30 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "multi_read",
+                "description": "Read several UTF-8 text files in one call, in order. With all=true every entry in paths is a folder and every file directly inside it is read. Read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "description": "File paths (or folder paths when all is true), relative to the working directory.",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "all": {
+                            "type": "boolean",
+                            "description": "Read every file directly inside each folder in paths instead of the paths themselves."
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "read_image",
                 "description": "Attach a PNG or JPEG image from disk to the conversation so a vision-capable model can see it. Read-only.",
                 "parameters": {

@@ -38,7 +38,6 @@ pub(super) fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
         help_row("a", "always allow that tool this session"),
         help_row("v", "toggle unified / side-by-side diffs"),
         help_row("ctrl+v", "paste an image"),
-        help_row("ctrl+g", "toggle mouse capture (select + copy text)"),
         help_row("ctrl+p", "fold / unfold the Progress panel"),
         help_row("ctrl+n", "new session"),
         help_row("ctrl+u", "clear input"),
