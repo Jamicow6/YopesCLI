@@ -79,6 +79,7 @@ async fn run() -> Result<()> {
     let (title_sender, mut title_receiver) = mpsc::unbounded_channel::<(u64, String)>();
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Ctrl+C is a key in raw mode, but a real interrupt must also work when the
     // key event is swallowed, or while a blocking tool is running.
     let interrupt = ctrl_c_interrupt();
@@ -167,6 +168,7 @@ async fn run() -> Result<()> {
                         }
                     }
                     Some(Ok(Event::FocusGained)) => {
+                        ticker.reset();
                         app.set_focused(true);
                         redraw_now = true;
                     }
@@ -317,6 +319,11 @@ fn dispatch(
     title_sender: &mpsc::UnboundedSender<(u64, String)>,
     active_task: &mut Option<(u64, JoinHandle<()>)>,
 ) {
+    if !app.is_streaming() {
+        if let Some((_, previous)) = active_task.take() {
+            previous.abort();
+        }
+    }
     match action {
         Action::None | Action::Quit => {}
         Action::Start {

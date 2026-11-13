@@ -15,7 +15,7 @@ Include the version (`yopes --version`), your platform, and the smallest
 reproduction you can manage. You can expect an acknowledgement within a few
 days and a fix or a written explanation in the next release.
 
-[advisory]: https://github.com/Jamicow6/YopesCLI/security/advisories/new
+[advisory]: https://github.com/Jamicaw56/YopesCLI/security/advisories/new
 
 ## What is in scope
 

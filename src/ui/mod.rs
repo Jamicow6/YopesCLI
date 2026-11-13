@@ -79,6 +79,13 @@ const ADDED: Color = Color::Green;
 const REMOVED: Color = Color::Red;
 const TEXT: Color = Color::Reset;
 
+pub(super) fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
 /// Rows of command text shown in the approval prompt before it stops.
 const MAX_APPROVAL_LINES: usize = 4;
 /// The startup mascot: a small cat, drawn only on the welcome screen, with a
@@ -577,6 +584,23 @@ mod tests {
             assert!(!text.contains('\r'));
             assert!(text.ends_with('│') || text.ends_with('╮') || text.ends_with('╯'));
         }
+    }
+
+    #[test]
+    fn frame_lines_preserves_span_styles_for_diff_colors() {
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+        let line = Line::from(vec![
+            Span::styled("1 ", Style::default().fg(Color::DarkGray)),
+            Span::styled("+ ", Style::default().fg(Color::Green)),
+            Span::styled("new line", Style::default().fg(Color::Green)),
+        ]);
+        let lines = frame_lines("diff".to_owned(), vec![line], 30, Color::Reset);
+        assert_eq!(lines.len(), 4);
+        let body_row = &lines[2];
+        assert_eq!(body_row.spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(body_row.spans[2].style.fg, Some(Color::Green));
+        assert_eq!(body_row.spans[3].style.fg, Some(Color::Green));
     }
 
     #[test]

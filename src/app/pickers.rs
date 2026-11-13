@@ -348,6 +348,7 @@ impl App {
         self.pending_tools.clear();
         self.approval = None;
         self.approved_tools.clear();
+        self.markdown_cache.clear();
     }
 
     /// After the first completed reply, ask the model for a short title;
