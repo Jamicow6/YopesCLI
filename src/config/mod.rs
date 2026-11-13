@@ -25,8 +25,8 @@ pub use cli::{Cli, Command};
 use saved::{custom_providers, load_saved, resolve_api_key};
 pub(crate) use saved::{
     delete_custom_provider, delete_saved_model, disconnect_provider, load_connected_providers,
-    load_custom_providers, load_endpoint_models, load_endpoint_secret, save_auto_compact,
-    save_connection, save_model, save_reasoning_effort, save_system_prompt,
+    load_custom_providers, load_endpoint_models, load_endpoint_secret, rename_custom_provider,
+    save_auto_compact, save_connection, save_model, save_reasoning_effort, save_system_prompt,
     update_model_context_window,
 };
 

@@ -1,11 +1,14 @@
 //! The `/connect` wizard's state: the stage machine, its list items, and the
 //! helpers every handler reaches for.
+use ratatui::layout::Rect;
+
 use crate::catalog::{self, Catalog};
 use crate::config::{self, AuthKind, SavedModel};
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
 pub(super) const ADD_MODEL_ID: &str = "add-model";
 /// Rows that edit an existing saved endpoint from the model list.
 pub(super) const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
+pub(super) const EDIT_NAME_ID: &str = "rename-provider";
 pub(super) const EDIT_TOKEN_ID: &str = "edit-token";
 /// Row that edits the endpoint serving a custom provider's model list.
 pub(super) const EDIT_MODELS_URL_ID: &str = "edit-models-url";
@@ -17,6 +20,18 @@ pub(super) const REMOVE_PROVIDER_ID: &str = "remove-provider";
 pub(super) const EDIT_KEY_ID: &str = "edit-key";
 /// Row that forces a models.dev refetch from the provider list.
 pub(super) const REFRESH_CATALOG_ID: &str = "refresh-catalog";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddProviderField {
+    Name = 0,
+    CompletionUrl = 1,
+    ModelsUrl = 2,
+    ModelName = 3,
+    ModelId = 4,
+    ContextWindow = 5,
+    Done = 6,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
     Providers,
@@ -35,6 +50,8 @@ pub enum ConnectStage {
     Password,
     /// Unlock a key that is already stored for the endpoint.
     Unlock,
+    AddProvider,
+    RenameProvider,
 }
 impl ConnectStage {
     pub const fn label(self) -> &'static str {
@@ -53,6 +70,8 @@ impl ConnectStage {
             Self::CustomModels => "models",
             Self::Password => "password",
             Self::Unlock => "password",
+            Self::AddProvider => "add custom provider",
+            Self::RenameProvider => "rename provider",
         }
     }
 }
@@ -126,6 +145,8 @@ pub struct ConnectState {
     pub(crate) custom_model_id: String,
     pub(crate) custom_model_name: String,
     pub(crate) custom_model_context_window: String,
+    pub(crate) add_provider_field: AddProviderField,
+    pub(crate) popup_inner: std::cell::Cell<Rect>,
     /// The key already stored for the endpoint being connected, if any.
     pub(crate) stored_secret: Option<config::StoredSecret>,
     /// The endpoint whose stored key is being unlocked.
@@ -159,6 +180,8 @@ impl ConnectState {
             custom_model_id: String::new(),
             custom_model_name: String::new(),
             custom_model_context_window: String::new(),
+            add_provider_field: AddProviderField::Name,
+            popup_inner: std::cell::Cell::new(Rect::default()),
             stored_secret: None,
             unlock_endpoint: String::new(),
             unlocked_key: None,
@@ -365,6 +388,16 @@ impl ConnectState {
                     let matches = |title: &str| {
                         filter.is_empty() || title.to_ascii_lowercase().contains(filter.as_str())
                     };
+                    if matches("Rename provider") {
+                        items.push(ConnectItem {
+                            id: EDIT_NAME_ID.to_owned(),
+                            title: "Rename provider".to_owned(),
+                            detail: self.custom_name.clone(),
+                            logo: "✎",
+                            custom_id: None,
+                            active: false,
+                        });
+                    }
                     if matches("Change endpoint") {
                         items.push(ConnectItem {
                             id: EDIT_ENDPOINT_ID.to_owned(),
@@ -439,7 +472,9 @@ impl ConnectState {
             | ConnectStage::ModelName
             | ConnectStage::ModelContextWindow
             | ConnectStage::Password
-            | ConnectStage::Unlock => Vec::new(),
+            | ConnectStage::Unlock
+            | ConnectStage::AddProvider
+            | ConnectStage::RenameProvider => Vec::new(),
         }
     }
     /// Drop the model row the user is on in the saved endpoint's model list.
@@ -482,7 +517,7 @@ impl ConnectState {
         let value = match self.stage {
             ConnectStage::ApiKey => &self.api_key,
             ConnectStage::Password | ConnectStage::Unlock => &self.password,
-            ConnectStage::ProviderName => &self.custom_name,
+            ConnectStage::ProviderName | ConnectStage::RenameProvider => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
             ConnectStage::ModelsEndpoint => &self.custom_models_url,
             ConnectStage::CustomToken => &self.custom_token,
@@ -490,7 +525,9 @@ impl ConnectState {
             ConnectStage::ModelName => &self.custom_model_name,
             ConnectStage::ModelContextWindow => &self.custom_model_context_window,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
-            ConnectStage::Auth | ConnectStage::CustomModels => unreachable!(),
+            ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::AddProvider => {
+                unreachable!()
+            }
         };
         if matches!(
             self.stage,
@@ -510,6 +547,7 @@ impl ConnectState {
             ConnectStage::Providers | ConnectStage::Models => "search",
             ConnectStage::ApiKey => "api key",
             ConnectStage::ProviderName => "provider name",
+            ConnectStage::RenameProvider => "new provider name",
             ConnectStage::Endpoint => "completion endpoint",
             ConnectStage::ModelsEndpoint => "models endpoint (blank: <endpoint>/models)",
             ConnectStage::Auth => "authorization",
@@ -520,10 +558,55 @@ impl ConnectState {
             ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
             ConnectStage::Unlock => "key password",
+            ConnectStage::AddProvider => "add provider",
         }
     }
     pub const fn uses_cursor(&self) -> bool {
-        !matches!(self.stage, ConnectStage::Auth | ConnectStage::CustomModels)
+        !matches!(
+            self.stage,
+            ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::AddProvider
+        )
+    }
+
+    pub(crate) fn field_at_mouse(&self, col: u16, row: u16) -> Option<AddProviderField> {
+        let inner = self.popup_inner.get();
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        if col < inner.x || col >= inner.x.saturating_add(inner.width) {
+            return None;
+        }
+        if row < inner.y || row >= inner.y.saturating_add(inner.height) {
+            return None;
+        }
+        let rel_y = row.saturating_sub(inner.y);
+        match rel_y {
+            0 | 1 => Some(AddProviderField::Name),
+            2 | 3 => Some(AddProviderField::CompletionUrl),
+            4 | 5 => Some(AddProviderField::ModelsUrl),
+            6 | 7 => {
+                if col < inner.x.saturating_add(inner.width / 2) {
+                    Some(AddProviderField::ModelName)
+                } else {
+                    Some(AddProviderField::ModelId)
+                }
+            }
+            8 | 9 => Some(AddProviderField::ContextWindow),
+            10..=12 => Some(AddProviderField::Done),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn active_add_provider_field_mut(&mut self) -> Option<&mut String> {
+        match self.add_provider_field {
+            AddProviderField::Name => Some(&mut self.custom_name),
+            AddProviderField::CompletionUrl => Some(&mut self.custom_endpoint),
+            AddProviderField::ModelsUrl => Some(&mut self.custom_models_url),
+            AddProviderField::ModelName => Some(&mut self.custom_model_name),
+            AddProviderField::ModelId => Some(&mut self.custom_model_id),
+            AddProviderField::ContextWindow => Some(&mut self.custom_model_context_window),
+            AddProviderField::Done => None,
+        }
     }
     pub fn has_custom_models(&self) -> bool {
         !self.custom_models.is_empty()
@@ -732,5 +815,51 @@ mod tests {
         let items = connect.items();
         assert_eq!(items[0].detail, "one · 128k context");
         assert_eq!(items[1].detail, "two · 500 context");
+    }
+
+    #[test]
+    fn add_provider_field_selection_and_mouse_detection() {
+        use super::{AddProviderField, ConnectState};
+        use ratatui::layout::Rect;
+
+        let mut connect = ConnectState::loading();
+        connect.popup_inner.set(Rect::new(10, 10, 80, 20));
+
+        assert_eq!(connect.field_at_mouse(15, 10), Some(AddProviderField::Name));
+        assert_eq!(
+            connect.field_at_mouse(15, 12),
+            Some(AddProviderField::CompletionUrl)
+        );
+        assert_eq!(
+            connect.field_at_mouse(15, 14),
+            Some(AddProviderField::ModelsUrl)
+        );
+        assert_eq!(
+            connect.field_at_mouse(20, 16),
+            Some(AddProviderField::ModelName)
+        );
+        assert_eq!(
+            connect.field_at_mouse(60, 16),
+            Some(AddProviderField::ModelId)
+        );
+        assert_eq!(
+            connect.field_at_mouse(15, 18),
+            Some(AddProviderField::ContextWindow)
+        );
+        assert_eq!(connect.field_at_mouse(15, 20), Some(AddProviderField::Done));
+
+        connect.add_provider_field = AddProviderField::Name;
+        connect
+            .active_add_provider_field_mut()
+            .unwrap()
+            .push_str("LocalLLM");
+        assert_eq!(connect.custom_name, "LocalLLM");
+
+        connect.add_provider_field = AddProviderField::ContextWindow;
+        connect
+            .active_add_provider_field_mut()
+            .unwrap()
+            .push_str("128000");
+        assert_eq!(connect.custom_model_context_window, "128000");
     }
 }

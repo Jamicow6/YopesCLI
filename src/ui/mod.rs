@@ -101,7 +101,12 @@ const YARN_TRAVEL: usize = 6;
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
 // Custom loading circle instead of the generic braille spinner.
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
-const PALETTE_WIDTH: u16 = 60;
+
+pub(super) fn responsive_palette_width(area_width: u16) -> u16 {
+    (area_width.saturating_sub(4) * 85 / 100)
+        .clamp(60, 110)
+        .min(area_width.saturating_sub(2))
+}
 
 /// One frame of the welcome mascot.
 ///

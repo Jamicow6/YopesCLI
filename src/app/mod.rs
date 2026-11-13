@@ -45,7 +45,7 @@ pub(crate) use pickers::{ListPicker, ModelChoice};
 
 use format::estimated_output_tokens;
 
-pub use connect::state::{CUSTOM_PROVIDER_ID, ConnectStage, ConnectState};
+pub use connect::state::{AddProviderField, CUSTOM_PROVIDER_ID, ConnectStage, ConnectState};
 pub use format::{format_bytes, format_cost, format_tokens};
 pub use mode::{Mode, ToolsMode};
 
@@ -61,10 +61,8 @@ const MAX_TOOL_ROUNDS: usize = 100;
 const COMPACTION_THRESHOLD_FRAC: u64 = 3; // fire at ~1/3 of window
 /// Fraction of the model context window kept intact after compaction.
 const COMPACTION_KEEP_FRAC: u64 = 8; // keep ~1/8 of window
-/// Fallback compaction threshold when no catalog context size is known.
-const COMPACTION_THRESHOLD_DEFAULT: u64 = 32_000;
-/// Fallback keep-tokens when no catalog context size is known.
-const COMPACTION_KEEP_DEFAULT: u64 = 12_000;
+/// Default context window (128K) when no specific model context size is known.
+pub(crate) const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 
 struct ActiveRequest {
     id: u64,
@@ -250,6 +248,8 @@ pub struct App {
     pub logos: Logos,
     /// The logos that still have to be fetched.
     pending_logos: Vec<String>,
+    /// Cache of rendered markdown lines for completed messages: (width, msg_len, lines).
+    pub(crate) markdown_cache: HashMap<usize, (u16, usize, Vec<ratatui::text::Line<'static>>)>,
     /// Tavily key for the web_search tool.
     tavily_api_key: Option<String>,
     palette_index: usize,
@@ -319,6 +319,7 @@ impl App {
             custom_providers,
             logos: Logos::new(crate::logos::cache_dir(&config_path)),
             pending_logos: Vec::new(),
+            markdown_cache: HashMap::new(),
             tavily_api_key,
             palette_index: 0,
             palette_hidden: false,

@@ -32,6 +32,7 @@ pub struct Logos {
     cache_dir: Option<PathBuf>,
 }
 
+#[allow(dead_code)]
 impl Logos {
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         Self {
