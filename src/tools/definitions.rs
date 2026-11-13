@@ -232,7 +232,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command in the workspace and return its output. Set risk to true for anything destructive or hard to undo: deleting or overwriting files, git resets or force pushes, installing or uninstalling software, stopping services, or anything reaching outside the working directory. Risky commands ask the user before they run.",
+                "description": "Run a shell command in the workspace and return its output. Set risk to true for anything destructive or hard to undo: deleting or overwriting files, git resets or force pushes, installing or uninstalling software, stopping services, or anything reaching outside the working directory. Risky commands ask the user before they run. When the user requests running commands or actions, execute them directly with this tool rather than just describing the command.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -354,7 +354,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "todo_write",
-                "description": "Maintain the session task checklist. Rewrite the whole list each call: every item is an object with the task text and a done flag. Send an empty items list to close the checklist once everything is done. The list is stored with the session, not as a file. Use it whenever the user asks for a todo list or a multi-step plan.",
+                "description": "Maintain the session task checklist dynamically. Rewrite the whole list each call: every item is an object with the task text and a done flag. Send an empty items list to close the checklist once everything is done. The list is stored with the session, not as a file. You MUST use this tool dynamically to track any multi-step plan, updating task done states as you work.",
                 "parameters": {
                     "type": "object",
                     "properties": {

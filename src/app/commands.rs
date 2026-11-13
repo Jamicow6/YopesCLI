@@ -27,7 +27,7 @@ impl CommandSpec {
     }
 }
 
-pub const COMMANDS: [CommandSpec; 13] = [
+pub const COMMANDS: [CommandSpec; 15] = [
     CommandSpec {
         name: "/help",
         description: "Show keys and commands",
@@ -42,6 +42,16 @@ pub const COMMANDS: [CommandSpec; 13] = [
         name: "/connect",
         description: "Connect a provider and model",
         argument: None,
+    },
+    CommandSpec {
+        name: "/disconnect",
+        description: "Disconnect active or named provider",
+        argument: Some("name"),
+    },
+    CommandSpec {
+        name: "/run",
+        description: "Run a shell command in workspace",
+        argument: Some("command"),
     },
     CommandSpec {
         name: "/cd",
@@ -125,6 +135,8 @@ mod tests {
                 "/help",
                 "/new",
                 "/connect",
+                "/disconnect",
+                "/run",
                 "/cd",
                 "/models",
                 "/sessions",
@@ -138,7 +150,8 @@ mod tests {
             ]
         );
         assert_eq!(command_names("/c"), vec!["/connect", "/cd", "/compact"]);
-        assert_eq!(command_names("/d"), Vec::<&str>::new());
+        assert_eq!(command_names("/d"), vec!["/disconnect"]);
+        assert_eq!(command_names("/r"), vec!["/run"]);
         assert_eq!(command_names("/m"), vec!["/models"]);
         assert_eq!(command_names("/t"), vec!["/tools"]);
         assert_eq!(command_names("/e"), vec!["/effort"]);

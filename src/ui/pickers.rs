@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: Rect) {
-    let width = area.width.saturating_sub(4).min(PALETTE_WIDTH);
+    let width = responsive_palette_width(area.width);
     if width < 20 {
         return;
     }
@@ -89,7 +89,7 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
 }
 
 pub(super) fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPicker, area: Rect) {
-    let width = area.width.saturating_sub(4).min(PALETTE_WIDTH);
+    let width = responsive_palette_width(area.width);
     if width < 24 || area.height < 3 {
         return;
     }
@@ -185,7 +185,7 @@ pub(super) fn draw_palette(
     palette: &[&'static CommandSpec],
     area: Rect,
 ) {
-    let width = area.width.saturating_sub(4).min(PALETTE_WIDTH);
+    let width = responsive_palette_width(area.width);
     if width < 20 {
         return;
     }
@@ -207,6 +207,7 @@ pub(super) fn draw_palette(
     frame.render_widget(block, popup);
 
     let selected = app.palette_selected();
+    let name_col_width = (usize::from(inner.width) * 35 / 100).clamp(18, 28);
     for (index, command) in palette.iter().enumerate() {
         if index as u16 >= inner.height {
             break;
@@ -227,7 +228,7 @@ pub(super) fn draw_palette(
         };
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(pad_to(&name, 14), name_style),
+            Span::styled(pad_to(&name, name_col_width), name_style),
             Span::styled(command.description, description_style),
         ]);
         frame.render_widget(Paragraph::new(line), row);

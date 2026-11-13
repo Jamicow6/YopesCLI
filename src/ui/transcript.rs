@@ -111,10 +111,24 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.extend(framed);
             continue;
         }
-        lines.push(Line::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
+        let show_label = if message.role == Role::Assistant {
+            let is_first_response = index == 0
+                || app.session.messages[..index]
+                    .iter()
+                    .rev()
+                    .find(|m| m.role != Role::Tool)
+                    .is_some_and(|m| m.role == Role::User);
+            let is_end_stream = index + 1 == app.session.messages.len();
+            is_first_response || is_end_stream
+        } else {
+            true
+        };
+        if show_label {
+            lines.push(Line::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+        }
         // A failed request shows its provider message here, where the answer
         // would have been, instead of as a footer notice.
         if let Some(error) = &message.error {
@@ -148,7 +162,27 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         if !message.content.is_empty() {
-            lines.extend(markdown_lines(&message.content, inner.width));
+            if !streaming {
+                if let Some((cached_width, cached_len, cached_lines)) =
+                    app.markdown_cache.get(&index)
+                {
+                    if *cached_width == inner.width && *cached_len == message.content.len() {
+                        lines.extend(cached_lines.clone());
+                    } else {
+                        let parsed = markdown_lines(&message.content, inner.width);
+                        app.markdown_cache
+                            .insert(index, (inner.width, message.content.len(), parsed.clone()));
+                        lines.extend(parsed);
+                    }
+                } else {
+                    let parsed = markdown_lines(&message.content, inner.width);
+                    app.markdown_cache
+                        .insert(index, (inner.width, message.content.len(), parsed.clone()));
+                    lines.extend(parsed);
+                }
+            } else {
+                lines.extend(markdown_lines(&message.content, inner.width));
+            }
         }
         // Pasted screenshots show up as pixel art directly under the text.
         for image in &message.images {
@@ -217,14 +251,14 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     // Screen row of every transcript line, accounting for wrapped text above.
     let mut starts: Vec<usize> = Vec::with_capacity(lines.len());
     let mut next_row = 0;
+    let mut scratch = String::new();
     for line in &lines {
         starts.push(next_row);
-        let content = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        next_row += wrapped_line_count(&content, inner.width);
+        scratch.clear();
+        for span in &line.spans {
+            scratch.push_str(&span.content);
+        }
+        next_row += wrapped_line_count(&scratch, inner.width);
     }
     let total_lines = next_row;
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });

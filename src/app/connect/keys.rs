@@ -63,6 +63,31 @@ impl App {
                     connect.selected = usize::MAX;
                 }
             }
+            KeyCode::Delete => {
+                if self
+                    .connect
+                    .as_ref()
+                    .is_some_and(|c| c.stage == ConnectStage::Providers)
+                {
+                    self.disconnect_selected_provider();
+                    return Action::None;
+                }
+            }
+            KeyCode::F(2) => {
+                if let Some(connect) = self.connect.as_mut() {
+                    if connect.stage == ConnectStage::Providers {
+                        if let Some(item) = connect.selected_item() {
+                            if let Some(custom_id) = item.custom_id.clone() {
+                                connect.custom_provider_id = Some(custom_id);
+                                connect.custom_name = item.title.clone();
+                                connect.stage = ConnectStage::RenameProvider;
+                                connect.error = None;
+                                return Action::None;
+                            }
+                        }
+                    }
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(connect) = self.connect.as_mut() {
                     connect.filter.pop();
@@ -106,7 +131,7 @@ impl App {
         Action::None
     }
 
-    /// Ctrl+D on a provider row: forget the stored key of the ticked provider.
+    /// Ctrl+D or Delete on a provider row: remove custom provider or forget stored key.
     fn disconnect_selected_provider(&mut self) {
         let Some(connect) = self.connect.as_ref() else {
             return;
@@ -114,14 +139,26 @@ impl App {
         let Some(item) = connect.selected_item() else {
             return;
         };
-        if !item.active {
-            self.info("Only the connected provider is marked ✓; select it and press ctrl+d.");
+        if let Some(custom_id) = item.custom_id.clone() {
+            let name = item.title.clone();
+            self.delete_custom_provider(&custom_id);
+            if let Some(connect) = self.connect.as_mut() {
+                connect.selected = connect
+                    .selected
+                    .min(connect.items().len().saturating_sub(1));
+            }
+            self.info(format!("Removed provider {name}"));
             return;
         }
         let Some(endpoint) = connect.selected_endpoint() else {
             self.info("This row has no saved endpoint to disconnect.");
             return;
         };
+        let has_key = config::load_endpoint_secret(&self.config_path, &endpoint).is_some();
+        if !item.active && !has_key {
+            self.info("Only saved or connected providers can be disconnected.");
+            return;
+        }
         self.disconnect_endpoint(&endpoint);
         // Reset the selection so the now-unconfigured backend does not keep a
         // stale active row under the cursor.
@@ -182,6 +219,7 @@ impl App {
                             && item.id != EDIT_TOKEN_ID
                             && item.id != EDIT_MODELS_URL_ID
                             && item.id != FETCH_MODELS_ID
+                            && item.id != REMOVE_PROVIDER_ID
                         {
                             let current_context = connect
                                 .custom_models
@@ -255,5 +293,152 @@ impl App {
             }
         }
         Action::None
+    }
+
+    pub(crate) fn handle_connect_add_provider(&mut self, key: KeyEvent) -> Action {
+        let Some(connect) = self.connect.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                connect.stage = ConnectStage::Providers;
+                connect.selected = 0;
+                connect.error = None;
+                Action::None
+            }
+            KeyCode::Tab => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::CompletionUrl,
+                    AddProviderField::CompletionUrl => AddProviderField::ModelsUrl,
+                    AddProviderField::ModelsUrl => AddProviderField::ModelName,
+                    AddProviderField::ModelName => AddProviderField::ModelId,
+                    AddProviderField::ModelId => AddProviderField::ContextWindow,
+                    AddProviderField::ContextWindow => AddProviderField::Done,
+                    AddProviderField::Done => AddProviderField::Name,
+                };
+                Action::None
+            }
+            KeyCode::BackTab => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::Done,
+                    AddProviderField::CompletionUrl => AddProviderField::Name,
+                    AddProviderField::ModelsUrl => AddProviderField::CompletionUrl,
+                    AddProviderField::ModelName => AddProviderField::ModelsUrl,
+                    AddProviderField::ModelId => AddProviderField::ModelName,
+                    AddProviderField::ContextWindow => AddProviderField::ModelId,
+                    AddProviderField::Done => AddProviderField::ContextWindow,
+                };
+                Action::None
+            }
+            KeyCode::Up => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::Done,
+                    AddProviderField::CompletionUrl => AddProviderField::Name,
+                    AddProviderField::ModelsUrl => AddProviderField::CompletionUrl,
+                    AddProviderField::ModelName | AddProviderField::ModelId => {
+                        AddProviderField::ModelsUrl
+                    }
+                    AddProviderField::ContextWindow => AddProviderField::ModelName,
+                    AddProviderField::Done => AddProviderField::ContextWindow,
+                };
+                Action::None
+            }
+            KeyCode::Down => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::CompletionUrl,
+                    AddProviderField::CompletionUrl => AddProviderField::ModelsUrl,
+                    AddProviderField::ModelsUrl => AddProviderField::ModelName,
+                    AddProviderField::ModelName | AddProviderField::ModelId => {
+                        AddProviderField::ContextWindow
+                    }
+                    AddProviderField::ContextWindow => AddProviderField::Done,
+                    AddProviderField::Done => AddProviderField::Name,
+                };
+                Action::None
+            }
+            KeyCode::Left if connect.add_provider_field == AddProviderField::ModelId => {
+                connect.add_provider_field = AddProviderField::ModelName;
+                Action::None
+            }
+            KeyCode::Right if connect.add_provider_field == AddProviderField::ModelName => {
+                connect.add_provider_field = AddProviderField::ModelId;
+                Action::None
+            }
+            KeyCode::Enter => {
+                if connect.add_provider_field == AddProviderField::Done {
+                    self.submit_add_provider()
+                } else {
+                    connect.add_provider_field = match connect.add_provider_field {
+                        AddProviderField::Name => AddProviderField::CompletionUrl,
+                        AddProviderField::CompletionUrl => AddProviderField::ModelsUrl,
+                        AddProviderField::ModelsUrl => AddProviderField::ModelName,
+                        AddProviderField::ModelName => AddProviderField::ModelId,
+                        AddProviderField::ModelId => AddProviderField::ContextWindow,
+                        AddProviderField::ContextWindow => AddProviderField::Done,
+                        AddProviderField::Done => AddProviderField::Done,
+                    };
+                    Action::None
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(target) = connect.active_add_provider_field_mut() {
+                    target.pop();
+                    connect.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(target) = connect.active_add_provider_field_mut() {
+                    target.push(c);
+                    connect.error = None;
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn handle_connect_rename_provider(&mut self, key: KeyEvent) -> Action {
+        let Some(connect) = self.connect.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                connect.stage = if connect.custom_provider_id.is_some() {
+                    ConnectStage::CustomModels
+                } else {
+                    ConnectStage::Providers
+                };
+                connect.error = None;
+                Action::None
+            }
+            KeyCode::Enter => {
+                let id = connect.custom_provider_id.clone();
+                let new_name = connect.custom_name.clone();
+                if let Some(id) = id {
+                    self.rename_custom_provider(&id, &new_name);
+                }
+                Action::None
+            }
+            KeyCode::Backspace => {
+                connect.custom_name.pop();
+                connect.error = None;
+                Action::None
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                connect.custom_name.push(c);
+                connect.error = None;
+                Action::None
+            }
+            _ => Action::None,
+        }
     }
 }

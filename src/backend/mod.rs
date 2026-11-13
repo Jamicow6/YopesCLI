@@ -114,6 +114,10 @@ impl Backend {
         &self.provider_label
     }
 
+    pub fn set_provider_label(&mut self, label: String) {
+        self.provider_label = label;
+    }
+
     pub fn model(&self) -> &str {
         &self.model
     }

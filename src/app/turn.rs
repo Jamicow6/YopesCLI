@@ -17,6 +17,37 @@ fn command_is_safe_while_streaming(prompt: &str) -> bool {
     )
 }
 
+fn normalize_endpoint_url(url: &str) -> (String, &str) {
+    let url = url.trim().trim_end_matches('/');
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if let Some((host, path)) = rest.split_once('/') {
+            (
+                format!(
+                    "{}://{}",
+                    scheme.to_ascii_lowercase(),
+                    host.to_ascii_lowercase()
+                ),
+                path,
+            )
+        } else {
+            (
+                format!(
+                    "{}://{}",
+                    scheme.to_ascii_lowercase(),
+                    rest.to_ascii_lowercase()
+                ),
+                "",
+            )
+        }
+    } else {
+        (url.to_ascii_lowercase(), "")
+    }
+}
+
+fn endpoints_match(a: &str, b: &str) -> bool {
+    normalize_endpoint_url(a) == normalize_endpoint_url(b)
+}
+
 impl App {
     pub(crate) fn scroll_up(&mut self, amount: usize) {
         self.follow_tail = false;
@@ -49,6 +80,19 @@ impl App {
         let prompt = value.trim().to_owned();
         if prompt.is_empty() && self.attachments.is_empty() {
             return Action::None;
+        }
+        if prompt.starts_with('!') {
+            let cmd = prompt.trim_start_matches('!').trim();
+            if cmd.is_empty() {
+                self.info("Usage: !<command>");
+                return Action::None;
+            }
+            if steering || tool_busy {
+                self.input.set(prompt);
+                self.info("Finish or stop the response before running that command.");
+                return Action::None;
+            }
+            return self.run_user_command(cmd);
         }
         if prompt.starts_with('/') {
             // Builtins never lose their name to a skill of the same spelling.
@@ -125,13 +169,11 @@ impl App {
     /// summarize the older turns first, then send the real request.
     pub(crate) fn begin_turn(&mut self) -> Action {
         let total = Session::estimate_tokens(&self.session.messages);
-        let (threshold, keep) = match self.model_context_window() {
-            Some(window) => (
-                window / COMPACTION_THRESHOLD_FRAC,
-                window / COMPACTION_KEEP_FRAC,
-            ),
-            None => (COMPACTION_THRESHOLD_DEFAULT, COMPACTION_KEEP_DEFAULT),
-        };
+        let window = self.model_context_window().unwrap_or(128_000);
+        let (threshold, keep) = (
+            window / COMPACTION_THRESHOLD_FRAC,
+            window / COMPACTION_KEEP_FRAC,
+        );
         if self.auto_compact && total > threshold {
             if let Some(split) = self.session.compaction_split(keep) {
                 if split > 0 {
@@ -217,6 +259,29 @@ impl App {
             "/help" => self.show_help = true,
             "/new" => self.new_session(),
             "/connect" => return self.begin_connect(),
+            "/disconnect" => {
+                let target = parts.collect::<Vec<_>>().join(" ");
+                if target.is_empty() {
+                    let active_endpoint = self.backend.base_url().to_owned();
+                    if active_endpoint.is_empty()
+                        || self.backend.provider_kind() == ProviderKind::Unconfigured
+                    {
+                        self.info("No provider currently connected.");
+                    } else {
+                        self.disconnect_endpoint(&active_endpoint);
+                    }
+                } else {
+                    self.disconnect_named_provider(&target);
+                }
+            }
+            "/run" => {
+                let cmd = parts.collect::<Vec<_>>().join(" ");
+                if cmd.is_empty() {
+                    self.info("Usage: /run <command>");
+                } else {
+                    return self.run_user_command(&cmd);
+                }
+            }
             "/cd" => {
                 let path = parts.collect::<Vec<_>>().join(" ");
                 self.change_directory(&path);
@@ -294,7 +359,7 @@ impl App {
                         .compaction_split(
                             self.model_context_window()
                                 .map(|w| w / COMPACTION_KEEP_FRAC)
-                                .unwrap_or(COMPACTION_KEEP_DEFAULT),
+                                .unwrap_or(DEFAULT_CONTEXT_WINDOW / COMPACTION_KEEP_FRAC),
                         )
                         .filter(|split| *split > 0)
                     {
@@ -423,6 +488,28 @@ impl App {
         }
     }
 
+    /// Run a shell command in the workspace directly for the user.
+    pub(crate) fn run_user_command(&mut self, command: &str) -> Action {
+        let command = command.trim();
+        if command.is_empty() {
+            self.info("Usage: /run <command> or !<command>");
+            return Action::None;
+        }
+        self.notice = None;
+        let user_msg = Message::new(Role::User, format!("$ {command}"));
+        self.session.messages.push(user_msg);
+        let output = match tools::run_user_command(command) {
+            Ok(output) => output,
+            Err(error) => format!("Command failed: {error:#}"),
+        };
+        let mut tool_msg = Message::new(Role::Tool, output);
+        tool_msg.tool_call_id = Some(format!("user-cmd-{}", self.session.messages.len()));
+        self.session.messages.push(tool_msg);
+        self.follow_tail = true;
+        self.save_session();
+        Action::None
+    }
+
     /// Forget the key stored for one endpoint, resetting the session when it is
     /// the provider in use.
     pub(crate) fn disconnect_endpoint(&mut self, target: &str) {
@@ -454,6 +541,111 @@ impl App {
             }
             Err(error) => self.error(format!("Could not disconnect: {error:#}")),
         }
+    }
+
+    /// Remove a saved custom provider, resetting the session when it is the
+    /// provider in use.
+    pub(crate) fn delete_custom_provider(&mut self, id: &str) {
+        if self.is_busy() {
+            self.info("Finish the current turn before removing a provider.");
+            return;
+        }
+        let target_endpoint = self
+            .custom_providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .map(|provider| provider.base_url.trim_end_matches('/').to_owned());
+        match config::delete_custom_provider(&self.config_path, id) {
+            Ok(()) => {
+                if let Some(target) = target_endpoint {
+                    if self.backend.base_url().trim_end_matches('/') == target {
+                        self.backend.configure(
+                            ProviderKind::Unconfigured,
+                            "not connected".to_owned(),
+                            String::new(),
+                            String::new(),
+                            None,
+                            AuthKind::Bearer,
+                            Vec::new(),
+                        );
+                    }
+                }
+                self.custom_providers = config::load_custom_providers(&self.config_path);
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.saved_custom = self.custom_providers.clone();
+                    connect.error = None;
+                }
+                self.info("Provider removed.");
+            }
+            Err(error) => self.error(format!("Could not remove provider: {error:#}")),
+        }
+    }
+
+    /// Rename a saved custom provider, updating active backend if it matches.
+    pub(crate) fn rename_custom_provider(&mut self, id: &str, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            self.connect_error("Provider name cannot be empty.");
+            return;
+        }
+        let target_endpoint = self
+            .custom_providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .map(|provider| provider.base_url.trim_end_matches('/').to_owned());
+        match config::rename_custom_provider(&self.config_path, id, new_name) {
+            Ok(()) => {
+                if let Some(target) = target_endpoint {
+                    if self.backend.base_url().trim_end_matches('/') == target {
+                        self.backend.set_provider_label(new_name.to_owned());
+                    }
+                }
+                self.custom_providers = config::load_custom_providers(&self.config_path);
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.saved_custom = self.custom_providers.clone();
+                    connect.custom_name = new_name.to_owned();
+                    connect.error = None;
+                    connect.stage = ConnectStage::CustomModels;
+                }
+                self.info(format!("Provider renamed to {new_name}."));
+            }
+            Err(error) => self.connect_error(format!("Could not rename provider: {error:#}")),
+        }
+    }
+
+    /// Disconnect a provider by name, provider id, or endpoint.
+    // ponytail: linear scan over providers; fast enough for typical <20 saved endpoints.
+    pub(crate) fn disconnect_named_provider(&mut self, target: &str) {
+        let needle = target.trim().to_ascii_lowercase();
+        if let Some(custom) = self
+            .custom_providers
+            .iter()
+            .find(|p| p.id.to_ascii_lowercase() == needle || p.name.to_ascii_lowercase() == needle)
+        {
+            let id = custom.id.clone();
+            self.delete_custom_provider(&id);
+            return;
+        }
+        let connected = config::load_connected_providers(&self.config_path);
+        if let Some(provider) = connected.iter().find(|p| {
+            p.provider_id
+                .as_ref()
+                .is_some_and(|id| id.to_ascii_lowercase() == needle)
+                || p.name.to_ascii_lowercase() == needle
+                || endpoints_match(&p.base_url, target)
+        }) {
+            let endpoint = provider.base_url.clone();
+            self.disconnect_endpoint(&endpoint);
+            return;
+        }
+        if self.backend.provider_label().to_ascii_lowercase() == needle
+            || endpoints_match(self.backend.base_url(), target)
+        {
+            let endpoint = self.backend.base_url().to_owned();
+            self.disconnect_endpoint(&endpoint);
+            return;
+        }
+        self.info(format!("No saved provider matches '{target}'."));
     }
 
     /// Store the model of the active connection, so the choice survives a
@@ -495,6 +687,7 @@ impl App {
             self.info("Finish the current turn before starting a new session.");
             return;
         }
+        self.markdown_cache.clear();
         self.session = Session::new();
         // Future saves land in a fresh file, so this one keeps its history.
         if let Some(dir) = &self.sessions_dir {
@@ -604,5 +797,39 @@ mod tests {
         let action = app_approval.submit();
         assert!(matches!(action, Action::None));
         assert!(app_approval.session.messages.is_empty());
+    }
+
+    #[test]
+    fn user_can_run_commands_via_slash_run_and_exclamation() {
+        let mut app = test_app();
+        app.input.set("!echo hello_bang");
+        let action = app.submit();
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.session.messages.len(), 2);
+        assert_eq!(app.session.messages[0].role, Role::User);
+        assert_eq!(app.session.messages[0].content, "$ echo hello_bang");
+        assert_eq!(app.session.messages[1].role, Role::Tool);
+        assert!(app.session.messages[1].content.contains("hello_bang"));
+
+        app.input.set("/run echo hello_slash");
+        let action = app.submit();
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.session.messages.len(), 4);
+        assert_eq!(app.session.messages[2].role, Role::User);
+        assert_eq!(app.session.messages[2].content, "$ echo hello_slash");
+        assert_eq!(app.session.messages[3].role, Role::Tool);
+        assert!(app.session.messages[3].content.contains("hello_slash"));
+    }
+
+    #[test]
+    fn endpoint_url_matching_preserves_path_case() {
+        assert!(endpoints_match(
+            "https://Example.COM/v1/chat",
+            "https://example.com/v1/chat/"
+        ));
+        assert!(!endpoints_match(
+            "https://example.com/v1/Chat",
+            "https://example.com/v1/chat"
+        ));
     }
 }
