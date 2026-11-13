@@ -513,9 +513,11 @@ impl App {
     // ponytail: linear scan over providers; fast enough for typical <20 saved endpoints.
     pub(crate) fn disconnect_named_provider(&mut self, target: &str) {
         let needle = target.trim().to_ascii_lowercase();
-        if let Some(custom) = self.custom_providers.iter().find(|p| {
-            p.id.to_ascii_lowercase() == needle || p.name.to_ascii_lowercase() == needle
-        }) {
+        if let Some(custom) = self
+            .custom_providers
+            .iter()
+            .find(|p| p.id.to_ascii_lowercase() == needle || p.name.to_ascii_lowercase() == needle)
+        {
             let id = custom.id.clone();
             self.delete_custom_provider(&id);
             return;

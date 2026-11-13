@@ -918,8 +918,8 @@ mod tests {
     fn deleting_custom_provider_removes_from_saved_and_unconfigures() {
         use std::{fs, process};
 
-        let path = std::env::temp_dir()
-            .join(format!("yopes-delete-provider-test-{}.json", process::id()));
+        let path =
+            std::env::temp_dir().join(format!("yopes-delete-provider-test-{}.json", process::id()));
         let _ = fs::remove_file(&path);
         let connection = Connection {
             provider: ProviderKind::Custom,
