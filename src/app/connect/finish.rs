@@ -95,7 +95,10 @@ impl App {
                     connect.custom_models_url.clear();
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
-                    connect.stage = ConnectStage::ProviderName;
+                    connect.custom_model_context_window = "128000".to_owned();
+                    connect.add_provider_field = AddProviderField::Name;
+                    connect.stage = ConnectStage::AddProvider;
+                    connect.error = None;
                 } else {
                     connect.provider_id = Some(item.id.clone());
                     connect.custom_flow = false;
@@ -188,6 +191,12 @@ impl App {
                     connect.error = None;
                     return Action::None;
                 }
+                if item.id == EDIT_NAME_ID {
+                    connect.stage = ConnectStage::RenameProvider;
+                    connect.selected = 0;
+                    connect.error = None;
+                    return Action::None;
+                }
                 if item.id == EDIT_TOKEN_ID {
                     connect.stage = ConnectStage::CustomToken;
                     connect.selected = 0;
@@ -238,12 +247,85 @@ impl App {
             | ConnectStage::ModelName
             | ConnectStage::ModelContextWindow
             | ConnectStage::Password
-            | ConnectStage::Unlock => {}
+            | ConnectStage::Unlock
+            | ConnectStage::AddProvider
+            | ConnectStage::RenameProvider => {}
         }
         if finish_now {
             return self.finish_custom_connect(None);
         }
         Action::None
+    }
+
+    pub(crate) fn submit_add_provider(&mut self) -> Action {
+        let (name, endpoint, models_url, model_name, model_id, context_window_str) = {
+            let Some(connect) = self.connect.as_ref() else {
+                return Action::None;
+            };
+            (
+                connect.custom_name.trim().to_owned(),
+                connect.custom_endpoint.trim().to_owned(),
+                connect.custom_models_url.trim().to_owned(),
+                connect.custom_model_name.trim().to_owned(),
+                connect.custom_model_id.trim().to_owned(),
+                connect.custom_model_context_window.trim().to_owned(),
+            )
+        };
+        if name.is_empty() {
+            self.connect_error("Provider name cannot be empty.");
+            return Action::None;
+        }
+        if endpoint.is_empty() {
+            self.connect_error("Completion URL cannot be empty.");
+            return Action::None;
+        }
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            self.connect_error("Completion URL must start with http:// or https://.");
+            return Action::None;
+        }
+        if !models_url.is_empty()
+            && !models_url.starts_with("http://")
+            && !models_url.starts_with("https://")
+        {
+            self.connect_error("Model fetching URL must start with http:// or https://.");
+            return Action::None;
+        }
+        if model_id.is_empty() && model_name.is_empty() {
+            self.connect_error("Enter a model name or model ID.");
+            return Action::None;
+        }
+        let final_id = if model_id.is_empty() {
+            model_name.clone()
+        } else {
+            model_id.clone()
+        };
+        let final_name = if model_name.is_empty() {
+            final_id.clone()
+        } else {
+            model_name
+        };
+        let context_window = if context_window_str.is_empty() {
+            Some(128_000)
+        } else {
+            context_window_str.parse::<u64>().ok().or(Some(128_000))
+        };
+
+        if let Some(connect) = self.connect.as_mut() {
+            connect.custom_name = name;
+            connect.custom_endpoint = endpoint;
+            connect.custom_models_url = models_url;
+            connect.model_id = Some(final_id.clone());
+            connect.custom_models = vec![config::SavedModel {
+                id: final_id,
+                name: final_name,
+                context_window,
+                input_cost: None,
+                output_cost: None,
+            }];
+            connect.custom_auth = config::AuthKind::Bearer;
+            connect.error = None;
+        }
+        self.finish_custom_connect(None)
     }
 
     pub(crate) fn finish_connect(

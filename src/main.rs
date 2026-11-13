@@ -150,7 +150,19 @@ async fn run() -> Result<()> {
                         // A mouse move changes nothing on screen, so it must
                         // not cost a full transcript rebuild.
                         if mouse.kind != MouseEventKind::Moved {
-                            app.handle_mouse(mouse);
+                            let action = app.handle_mouse(mouse);
+                            dispatch(
+                                action,
+                                &mut app,
+                                &sender,
+                                &tool_sender,
+                                &catalog_sender,
+                                &models_sender,
+                                &logo_sender,
+                                &paste_sender,
+                                &title_sender,
+                                &mut active_task,
+                            );
                             redraw_now = true;
                         }
                     }

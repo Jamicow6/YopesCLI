@@ -3,7 +3,7 @@ mod finish;
 mod keys;
 pub(crate) mod state;
 mod text;
-use self::state::*;
+pub(crate) use self::state::*;
 
 impl App {
     pub(crate) fn handle_connect_key(&mut self, key: KeyEvent) -> Action {
@@ -19,6 +19,8 @@ impl App {
         match stage {
             ConnectStage::Providers | ConnectStage::Models => self.handle_connect_list_key(key),
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
+            ConnectStage::AddProvider => self.handle_connect_add_provider(key),
+            ConnectStage::RenameProvider => self.handle_connect_rename_provider(key),
             ConnectStage::ProviderName
             | ConnectStage::Endpoint
             | ConnectStage::ModelsEndpoint
@@ -138,36 +140,9 @@ impl App {
         std::mem::take(&mut self.pending_logos)
     }
 
-    /// Ask for the logos of the providers currently on screen.
-    ///
-    /// Only the ones that are not drawn yet are fetched, and the ones already
-    /// on disk are read instead of downloaded again.
+    /// Ask for the logos of the providers currently on screen (deprecated).
     pub(crate) fn request_visible_logos(&mut self) {
-        let Some(connect) = self.connect.as_ref() else {
-            return;
-        };
-        // Only the provider rows carry model artwork; the model list would
-        // otherwise request /logos/<model-id>.svg for every model on screen.
-        if connect.stage != ConnectStage::Providers {
-            return;
-        }
-        let ids: Vec<String> = connect
-            .items()
-            .into_iter()
-            .filter(|item| item.custom_id.is_none())
-            .map(|item| item.id)
-            .filter(|id| id != CUSTOM_PROVIDER_ID && id != REFRESH_CATALOG_ID)
-            .collect();
-        for id in ids {
-            if self.logos.has(&id) || self.pending_logos.contains(&id) {
-                continue;
-            }
-            if self.logos.load_cached(&id) {
-                continue;
-            }
-            // The catalog id names the logo file, so a provider without one
-            // simply never appears.
-            self.pending_logos.push(id);
-        }
+        // ponytail: provider logo fetching is deprecated to remove network overhead and TUI lag.
+        self.pending_logos.clear();
     }
 }

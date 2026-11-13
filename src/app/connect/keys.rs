@@ -73,6 +73,21 @@ impl App {
                     return Action::None;
                 }
             }
+            KeyCode::F(2) => {
+                if let Some(connect) = self.connect.as_mut() {
+                    if connect.stage == ConnectStage::Providers {
+                        if let Some(item) = connect.selected_item() {
+                            if let Some(custom_id) = item.custom_id.clone() {
+                                connect.custom_provider_id = Some(custom_id);
+                                connect.custom_name = item.title.clone();
+                                connect.stage = ConnectStage::RenameProvider;
+                                connect.error = None;
+                                return Action::None;
+                            }
+                        }
+                    }
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(connect) = self.connect.as_mut() {
                     connect.filter.pop();
@@ -278,5 +293,152 @@ impl App {
             }
         }
         Action::None
+    }
+
+    pub(crate) fn handle_connect_add_provider(&mut self, key: KeyEvent) -> Action {
+        let Some(connect) = self.connect.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                connect.stage = ConnectStage::Providers;
+                connect.selected = 0;
+                connect.error = None;
+                Action::None
+            }
+            KeyCode::Tab => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::CompletionUrl,
+                    AddProviderField::CompletionUrl => AddProviderField::ModelsUrl,
+                    AddProviderField::ModelsUrl => AddProviderField::ModelName,
+                    AddProviderField::ModelName => AddProviderField::ModelId,
+                    AddProviderField::ModelId => AddProviderField::ContextWindow,
+                    AddProviderField::ContextWindow => AddProviderField::Done,
+                    AddProviderField::Done => AddProviderField::Name,
+                };
+                Action::None
+            }
+            KeyCode::BackTab => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::Done,
+                    AddProviderField::CompletionUrl => AddProviderField::Name,
+                    AddProviderField::ModelsUrl => AddProviderField::CompletionUrl,
+                    AddProviderField::ModelName => AddProviderField::ModelsUrl,
+                    AddProviderField::ModelId => AddProviderField::ModelName,
+                    AddProviderField::ContextWindow => AddProviderField::ModelId,
+                    AddProviderField::Done => AddProviderField::ContextWindow,
+                };
+                Action::None
+            }
+            KeyCode::Up => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::Done,
+                    AddProviderField::CompletionUrl => AddProviderField::Name,
+                    AddProviderField::ModelsUrl => AddProviderField::CompletionUrl,
+                    AddProviderField::ModelName | AddProviderField::ModelId => {
+                        AddProviderField::ModelsUrl
+                    }
+                    AddProviderField::ContextWindow => AddProviderField::ModelName,
+                    AddProviderField::Done => AddProviderField::ContextWindow,
+                };
+                Action::None
+            }
+            KeyCode::Down => {
+                connect.add_provider_field = match connect.add_provider_field {
+                    AddProviderField::Name => AddProviderField::CompletionUrl,
+                    AddProviderField::CompletionUrl => AddProviderField::ModelsUrl,
+                    AddProviderField::ModelsUrl => AddProviderField::ModelName,
+                    AddProviderField::ModelName | AddProviderField::ModelId => {
+                        AddProviderField::ContextWindow
+                    }
+                    AddProviderField::ContextWindow => AddProviderField::Done,
+                    AddProviderField::Done => AddProviderField::Name,
+                };
+                Action::None
+            }
+            KeyCode::Left if connect.add_provider_field == AddProviderField::ModelId => {
+                connect.add_provider_field = AddProviderField::ModelName;
+                Action::None
+            }
+            KeyCode::Right if connect.add_provider_field == AddProviderField::ModelName => {
+                connect.add_provider_field = AddProviderField::ModelId;
+                Action::None
+            }
+            KeyCode::Enter => {
+                if connect.add_provider_field == AddProviderField::Done {
+                    self.submit_add_provider()
+                } else {
+                    connect.add_provider_field = match connect.add_provider_field {
+                        AddProviderField::Name => AddProviderField::CompletionUrl,
+                        AddProviderField::CompletionUrl => AddProviderField::ModelsUrl,
+                        AddProviderField::ModelsUrl => AddProviderField::ModelName,
+                        AddProviderField::ModelName => AddProviderField::ModelId,
+                        AddProviderField::ModelId => AddProviderField::ContextWindow,
+                        AddProviderField::ContextWindow => AddProviderField::Done,
+                        AddProviderField::Done => AddProviderField::Done,
+                    };
+                    Action::None
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(target) = connect.active_add_provider_field_mut() {
+                    target.pop();
+                    connect.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(target) = connect.active_add_provider_field_mut() {
+                    target.push(c);
+                    connect.error = None;
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn handle_connect_rename_provider(&mut self, key: KeyEvent) -> Action {
+        let Some(connect) = self.connect.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                connect.stage = if connect.custom_provider_id.is_some() {
+                    ConnectStage::CustomModels
+                } else {
+                    ConnectStage::Providers
+                };
+                connect.error = None;
+                Action::None
+            }
+            KeyCode::Enter => {
+                let id = connect.custom_provider_id.clone();
+                let new_name = connect.custom_name.clone();
+                if let Some(id) = id {
+                    self.rename_custom_provider(&id, &new_name);
+                }
+                Action::None
+            }
+            KeyCode::Backspace => {
+                connect.custom_name.pop();
+                connect.error = None;
+                Action::None
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                connect.custom_name.push(c);
+                connect.error = None;
+                Action::None
+            }
+            _ => Action::None,
+        }
     }
 }
