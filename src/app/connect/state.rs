@@ -5,21 +5,21 @@ use ratatui::layout::Rect;
 use crate::catalog::{self, Catalog};
 use crate::config::{self, AuthKind, SavedModel};
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
-pub(super) const ADD_MODEL_ID: &str = "add-model";
+pub(super) const ADD_MODEL_ID: &str = "__action:add-model__";
 /// Rows that edit an existing saved endpoint from the model list.
-pub(super) const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
-pub(super) const EDIT_NAME_ID: &str = "rename-provider";
-pub(super) const EDIT_TOKEN_ID: &str = "edit-token";
+pub(super) const EDIT_ENDPOINT_ID: &str = "__action:edit-endpoint__";
+pub(super) const EDIT_NAME_ID: &str = "__action:rename-provider__";
+pub(super) const EDIT_TOKEN_ID: &str = "__action:edit-token__";
 /// Row that edits the endpoint serving a custom provider's model list.
-pub(super) const EDIT_MODELS_URL_ID: &str = "edit-models-url";
+pub(super) const EDIT_MODELS_URL_ID: &str = "__action:edit-models-url__";
 /// Row that refetches the model list from that endpoint.
-pub(super) const FETCH_MODELS_ID: &str = "fetch-models";
+pub(super) const FETCH_MODELS_ID: &str = "__action:fetch-models__";
 /// Row that deletes an existing saved custom provider.
-pub(super) const REMOVE_PROVIDER_ID: &str = "remove-provider";
+pub(super) const REMOVE_PROVIDER_ID: &str = "__action:remove-provider__";
 /// Row that replaces the key of a catalog provider from its model list.
-pub(super) const EDIT_KEY_ID: &str = "edit-key";
+pub(super) const EDIT_KEY_ID: &str = "__action:edit-key__";
 /// Row that forces a models.dev refetch from the provider list.
-pub(super) const REFRESH_CATALOG_ID: &str = "refresh-catalog";
+pub(super) const REFRESH_CATALOG_ID: &str = "__action:refresh-catalog__";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AddProviderField {
@@ -861,5 +861,23 @@ mod tests {
             .unwrap()
             .push_str("128000");
         assert_eq!(connect.custom_model_context_window, "128000");
+    }
+
+    #[test]
+    fn custom_model_id_does_not_collide_with_action_ids() {
+        use super::{ConnectStage, ConnectState, REMOVE_PROVIDER_ID};
+        use crate::config::SavedModel;
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::CustomModels;
+        connect.custom_models = vec![SavedModel {
+            id: "remove-provider".to_owned(),
+            name: "ModelNamedRemoveProvider".to_owned(),
+            ..SavedModel::default()
+        }];
+        let items = connect.items();
+        let model_item = items.iter().find(|i| i.id == "remove-provider").unwrap();
+        assert_ne!(model_item.id, REMOVE_PROVIDER_ID);
+        assert_eq!(model_item.title, "ModelNamedRemoveProvider");
     }
 }
