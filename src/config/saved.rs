@@ -394,8 +394,7 @@ pub(crate) fn delete_custom_provider(path: &Path, id: &str) -> Result<()> {
     update_saved(path, |saved| {
         let legacy_id =
             if saved.provider == ProviderKind::Custom && saved.custom_providers.is_empty() {
-                slug_provider_name(&saved.provider_name, &[])
-                    .unwrap_or_else(|| "custom".to_owned())
+                slug_provider_name(&saved.provider_name, &[]).unwrap_or_else(|| "custom".to_owned())
             } else {
                 String::new()
             };
