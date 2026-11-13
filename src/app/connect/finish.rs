@@ -384,10 +384,12 @@ impl App {
                 model_id,
                 provider.env.first().cloned(),
                 models,
-                provider_id,
+                provider_id.clone(),
+                provider.kind(&provider_id),
             )
         };
-        let (provider_name, base_url, model_id, api_key_env, models, provider_id) = plan;
+        let (provider_name, base_url, model_id, api_key_env, models, provider_id, provider_kind) =
+            plan;
         if base_url.trim().is_empty() {
             if let Some(connect) = self.connect.as_mut() {
                 connect.error = Some(format!("{provider_name} has no API endpoint."));
@@ -405,6 +407,11 @@ impl App {
                 api_key_env
                     .as_deref()
                     .and_then(|name| std::env::var(name).ok())
+                    .or_else(|| {
+                        (provider_kind == ProviderKind::Gemini)
+                            .then(|| std::env::var("GEMINI_API_KEY").ok())
+                            .flatten()
+                    })
                     .filter(|api_key| !api_key.trim().is_empty())
             })
             .or_else(|| {
@@ -415,14 +422,18 @@ impl App {
             });
         // A stored key is already on disk, so it is not written a second time.
         let reuse_secret = matches!(source, KeySource::Stored(_));
+        let auth = match provider_kind {
+            ProviderKind::Anthropic => AuthKind::XApiKey,
+            _ => AuthKind::Bearer,
+        };
         let connection = Connection {
-            provider: ProviderKind::OpenAi,
+            provider: provider_kind,
             provider_name: provider_name.clone(),
             model: model_id.clone(),
             base_url: base_url.clone(),
             api_key: entered_key,
             api_key_env,
-            auth: AuthKind::Bearer,
+            auth,
             models: models.clone(),
             models_url: None,
             custom_provider_id: None,
@@ -431,12 +442,12 @@ impl App {
         };
         let saved = config::save_connection(&self.config_path, &connection, password.as_deref());
         self.backend.configure(
-            ProviderKind::OpenAi,
+            provider_kind,
             provider_name.clone(),
             model_id.clone(),
             base_url,
             effective_key,
-            AuthKind::Bearer,
+            auth,
             models,
         );
         self.connect = None;

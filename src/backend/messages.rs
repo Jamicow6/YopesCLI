@@ -180,6 +180,362 @@ pub(super) enum ImageStyle {
     Ollama,
 }
 
+/// Shapes the conversation history into Anthropic's Messages payload:
+/// a top-level system string and alternating user/assistant turns.
+///
+/// ponytail: complex tool result caching controls are omitted;
+/// add when prompt caching is explicitly configured.
+pub(super) fn anthropic_request_payload(
+    messages: &[Message],
+    tooling: bool,
+    custom_prompt: Option<&str>,
+    mode_note: Option<&'static str>,
+) -> Result<(Option<String>, Vec<serde_json::Value>)> {
+    let mut system = tools::system_prompt(tooling);
+    if let Some(custom) = custom_prompt.filter(|custom| !custom.trim().is_empty()) {
+        system.push_str("\n\n");
+        system.push_str(custom.trim());
+    }
+    if let Some(note) = mode_note {
+        system.push_str("\n\n");
+        system.push_str(note);
+    }
+    if tooling {
+        if let Some(listing) = skills::section(&std::env::current_dir().unwrap_or_default()) {
+            system.push_str("\n\n");
+            system.push_str(&listing);
+        }
+    }
+
+    let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
+    for message in messages {
+        if message.error.is_some() {
+            continue;
+        }
+        match message.role {
+            Role::User => {
+                let mut content = Vec::new();
+                for image in &message.images {
+                    content.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image.data,
+                        }
+                    }));
+                }
+                if !message.content.is_empty() {
+                    content.push(serde_json::json!({
+                        "type": "text",
+                        "text": message.content,
+                    }));
+                }
+                if content.is_empty() {
+                    continue;
+                }
+                if let Some(last) = anthropic_messages
+                    .last_mut()
+                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                {
+                    if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        arr.extend(content);
+                        continue;
+                    }
+                }
+                anthropic_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": content,
+                }));
+            }
+            Role::Assistant => {
+                let mut content = Vec::new();
+                if !message.content.is_empty() {
+                    content.push(serde_json::json!({
+                        "type": "text",
+                        "text": message.content,
+                    }));
+                }
+                if tooling {
+                    if let Some(calls) = &message.tool_calls {
+                        for call in calls {
+                            let input: serde_json::Value =
+                                serde_json::from_str(&call.function.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                            content.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": call.id,
+                                "name": call.function.name,
+                                "input": input,
+                            }));
+                        }
+                    }
+                }
+                if content.is_empty() {
+                    continue;
+                }
+                anthropic_messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": content,
+                }));
+            }
+            Role::Tool => {
+                let call_id = message.tool_call_id.as_deref().unwrap_or_default();
+                let tool_result_block = serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": message.content,
+                });
+                if let Some(last) = anthropic_messages
+                    .last_mut()
+                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                {
+                    if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        arr.push(tool_result_block);
+                        continue;
+                    }
+                }
+                anthropic_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [tool_result_block],
+                }));
+            }
+        }
+    }
+
+    if anthropic_messages
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("assistant")
+    {
+        anthropic_messages.insert(
+            0,
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "Begin."}],
+            }),
+        );
+    }
+
+    let system_opt = if system.trim().is_empty() {
+        None
+    } else {
+        Some(system)
+    };
+    Ok((system_opt, anthropic_messages))
+}
+
+pub(super) fn anthropic_tools() -> serde_json::Value {
+    let defs = tools::definitions();
+    let tools = defs
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let f = t.get("function")?;
+                    let name = f.get("name")?.as_str()?;
+                    let desc = f
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default();
+                    let schema = f
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                    Some(serde_json::json!({
+                        "name": name,
+                        "description": desc,
+                        "input_schema": schema,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::Value::Array(tools)
+}
+
+/// Shapes the conversation history into Gemini's generateContent payload:
+/// systemInstruction and contents with alternating user/model roles.
+///
+/// ponytail: safety settings and generationConfig overrides are skipped;
+/// add when temperature or safety threshold customization is needed.
+pub(super) fn gemini_request_payload(
+    messages: &[Message],
+    tooling: bool,
+    custom_prompt: Option<&str>,
+    mode_note: Option<&'static str>,
+) -> Result<(Option<serde_json::Value>, Vec<serde_json::Value>)> {
+    let mut system = tools::system_prompt(tooling);
+    if let Some(custom) = custom_prompt.filter(|custom| !custom.trim().is_empty()) {
+        system.push_str("\n\n");
+        system.push_str(custom.trim());
+    }
+    if let Some(note) = mode_note {
+        system.push_str("\n\n");
+        system.push_str(note);
+    }
+    if tooling {
+        if let Some(listing) = skills::section(&std::env::current_dir().unwrap_or_default()) {
+            system.push_str("\n\n");
+            system.push_str(&listing);
+        }
+    }
+
+    let mut call_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for msg in messages {
+        if let Some(calls) = &msg.tool_calls {
+            for call in calls {
+                call_names.insert(call.id.clone(), call.function.name.clone());
+            }
+        }
+    }
+
+    let mut contents: Vec<serde_json::Value> = Vec::new();
+    for message in messages {
+        if message.error.is_some() {
+            continue;
+        }
+        match message.role {
+            Role::User => {
+                let mut parts = Vec::new();
+                for image in &message.images {
+                    parts.push(serde_json::json!({
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": image.data,
+                        }
+                    }));
+                }
+                if !message.content.is_empty() {
+                    parts.push(serde_json::json!({ "text": message.content }));
+                }
+                if parts.is_empty() {
+                    continue;
+                }
+                if let Some(last) = contents
+                    .last_mut()
+                    .filter(|c| c.get("role").and_then(|r| r.as_str()) == Some("user"))
+                {
+                    if let Some(arr) = last.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                        arr.extend(parts);
+                        continue;
+                    }
+                }
+                contents.push(serde_json::json!({
+                    "role": "user",
+                    "parts": parts,
+                }));
+            }
+            Role::Assistant => {
+                let mut parts = Vec::new();
+                if !message.content.is_empty() {
+                    parts.push(serde_json::json!({ "text": message.content }));
+                }
+                if tooling {
+                    if let Some(calls) = &message.tool_calls {
+                        for call in calls {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&call.function.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                            parts.push(serde_json::json!({
+                                "functionCall": {
+                                    "name": call.function.name,
+                                    "args": args,
+                                }
+                            }));
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    continue;
+                }
+                if let Some(last) = contents
+                    .last_mut()
+                    .filter(|c| c.get("role").and_then(|r| r.as_str()) == Some("model"))
+                {
+                    if let Some(arr) = last.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                        arr.extend(parts);
+                        continue;
+                    }
+                }
+                contents.push(serde_json::json!({
+                    "role": "model",
+                    "parts": parts,
+                }));
+            }
+            Role::Tool => {
+                let call_id = message.tool_call_id.as_deref().unwrap_or_default();
+                let func_name = call_names
+                    .get(call_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("tool");
+                let part = serde_json::json!({
+                    "functionResponse": {
+                        "name": func_name,
+                        "response": {
+                            "name": func_name,
+                            "content": message.content,
+                        }
+                    }
+                });
+                if let Some(last) = contents
+                    .last_mut()
+                    .filter(|c| c.get("role").and_then(|r| r.as_str()) == Some("user"))
+                {
+                    if let Some(arr) = last.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                        arr.push(part);
+                        continue;
+                    }
+                }
+                contents.push(serde_json::json!({
+                    "role": "user",
+                    "parts": [part],
+                }));
+            }
+        }
+    }
+
+    let system_instruction = if system.trim().is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "parts": [{ "text": system }]
+        }))
+    };
+    Ok((system_instruction, contents))
+}
+
+pub(super) fn gemini_tools() -> serde_json::Value {
+    let defs = tools::definitions();
+    let decls = defs
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let f = t.get("function")?;
+                    let name = f.get("name")?.as_str()?;
+                    let desc = f
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default();
+                    let schema = f
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                    Some(serde_json::json!({
+                        "name": name,
+                        "description": desc,
+                        "parameters": schema,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!([{ "functionDeclarations": decls }])
+}
+
 #[cfg(test)]
 mod tests {
     use super::request_messages;
@@ -300,5 +656,62 @@ mod tests {
         let plain = request_messages(&messages, false, ImageStyle::None, None, None).unwrap();
         assert!(plain.last().unwrap().get("images").is_none());
         assert_eq!(plain.last().unwrap()["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_payload_shapes_tools_and_roles() {
+        use super::anthropic_request_payload;
+
+        let mut assistant = Message::new(Role::Assistant, "Checking...");
+        assistant.tool_calls = Some(vec![ToolCall::new(
+            "call_42",
+            "read_file",
+            r#"{"path":"foo.rs"}"#,
+        )]);
+        let messages = vec![
+            Message::new(Role::User, "read foo"),
+            assistant,
+            Message::tool_result("call_42", "fn main() {}"),
+        ];
+
+        let (system, payload) = anthropic_request_payload(&messages, true, None, None).unwrap();
+        assert!(system.is_some());
+        assert_eq!(payload.len(), 3);
+        assert_eq!(payload[0]["role"], "user");
+        assert_eq!(payload[1]["role"], "assistant");
+        assert_eq!(payload[1]["content"][1]["type"], "tool_use");
+        assert_eq!(payload[1]["content"][1]["name"], "read_file");
+        assert_eq!(payload[2]["role"], "user");
+        assert_eq!(payload[2]["content"][0]["type"], "tool_result");
+        assert_eq!(payload[2]["content"][0]["tool_use_id"], "call_42");
+    }
+
+    #[test]
+    fn gemini_payload_shapes_system_instruction_and_contents() {
+        use super::gemini_request_payload;
+
+        let mut assistant = Message::new(Role::Assistant, "Running tool...");
+        assistant.tool_calls = Some(vec![ToolCall::new(
+            "call_99",
+            "list_dir",
+            r#"{"path":"."}"#,
+        )]);
+        let messages = vec![
+            Message::new(Role::User, "list files"),
+            assistant,
+            Message::tool_result("call_99", "file.txt"),
+        ];
+
+        let (instruction, contents) = gemini_request_payload(&messages, true, None, None).unwrap();
+        assert!(instruction.is_some());
+        assert_eq!(contents.len(), 3);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[1]["parts"][1]["functionCall"]["name"], "list_dir");
+        assert_eq!(contents[2]["role"], "user");
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["name"],
+            "list_dir"
+        );
     }
 }

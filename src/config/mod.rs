@@ -41,6 +41,10 @@ pub enum ProviderKind {
     #[value(name = "openai")]
     OpenAi,
     Ollama,
+    #[value(name = "anthropic")]
+    Anthropic,
+    #[value(name = "gemini")]
+    Gemini,
     #[value(skip)]
     Custom,
 }
@@ -51,6 +55,8 @@ impl ProviderKind {
             Self::Unconfigured => "unconfigured",
             Self::OpenAi => "openai",
             Self::Ollama => "ollama",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
             Self::Custom => "custom",
         }
     }
@@ -60,7 +66,11 @@ impl ProviderKind {
             "none" | "unconfigured" => Ok(Self::Unconfigured),
             "openai" | "openai-compatible" => Ok(Self::OpenAi),
             "ollama" => Ok(Self::Ollama),
-            _ => bail!("invalid YOPES_PROVIDER `{value}`; expected openai or ollama"),
+            "anthropic" | "claude" => Ok(Self::Anthropic),
+            "gemini" | "google" => Ok(Self::Gemini),
+            _ => bail!(
+                "invalid YOPES_PROVIDER `{value}`; expected openai, ollama, anthropic, or gemini"
+            ),
         }
     }
 }
@@ -153,6 +163,8 @@ pub struct SavedProvider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(default)]
+    pub provider_kind: ProviderKind,
+    #[serde(default)]
     pub provider_name: String,
     #[serde(default)]
     pub secret: StoredSecret,
@@ -167,6 +179,7 @@ pub struct SavedProvider {
 pub struct ConnectedProvider {
     pub base_url: String,
     pub provider_id: Option<String>,
+    pub provider_kind: ProviderKind,
     pub name: String,
     #[allow(dead_code)]
     pub has_key: bool,
@@ -293,13 +306,27 @@ impl Config {
             .map(|value| ProviderKind::parse_env(&value))
             .transpose()?;
         let env_key = env::var("OPENAI_API_KEY")
+            .or_else(|_| env::var("ANTHROPIC_API_KEY"))
+            .or_else(|_| env::var("GEMINI_API_KEY"))
+            .or_else(|_| env::var("GOOGLE_API_KEY"))
             .ok()
             .filter(|api_key| !api_key.trim().is_empty());
         let provider = cli
             .provider
             .or(env_provider)
             .or_else(|| saved.as_ref().map(|saved| saved.provider))
-            .or_else(|| env_key.as_ref().map(|_| ProviderKind::OpenAi))
+            .or_else(|| {
+                if env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty()) {
+                    Some(ProviderKind::Anthropic)
+                } else if env::var("GEMINI_API_KEY")
+                    .or_else(|_| env::var("GOOGLE_API_KEY"))
+                    .is_ok_and(|k| !k.trim().is_empty())
+                {
+                    Some(ProviderKind::Gemini)
+                } else {
+                    env_key.as_ref().map(|_| ProviderKind::OpenAi)
+                }
+            })
             .unwrap_or(ProviderKind::Unconfigured);
         let saved_for_provider = saved.as_ref().filter(|saved| saved.provider == provider);
 
@@ -361,6 +388,8 @@ impl Config {
         let provider_base_var = match provider {
             ProviderKind::OpenAi => Some("OPENAI_BASE_URL"),
             ProviderKind::Ollama => Some("OLLAMA_BASE_URL"),
+            ProviderKind::Anthropic => Some("ANTHROPIC_BASE_URL"),
+            ProviderKind::Gemini => Some("GEMINI_BASE_URL"),
             ProviderKind::Unconfigured | ProviderKind::Custom => None,
         };
         let base_url = cli
@@ -402,10 +431,18 @@ impl Config {
                     .and_then(|saved| saved.tavily_api_key.clone())
                     .filter(|key| !key.trim().is_empty())
             });
-        if provider == ProviderKind::OpenAi && api_key.is_none() && saved_for_provider.is_none() {
-            bail!(
-                "no API key for the OpenAI-compatible provider; set OPENAI_API_KEY or run /connect"
-            );
+        if matches!(
+            provider,
+            ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::Gemini
+        ) && api_key.is_none()
+            && saved_for_provider.is_none()
+        {
+            let env_var = match provider {
+                ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+                ProviderKind::Gemini => "GEMINI_API_KEY or GOOGLE_API_KEY",
+                _ => "OPENAI_API_KEY",
+            };
+            bail!("no API key for {provider:?}; set {env_var} or run /connect");
         }
 
         Ok(Self {
@@ -435,6 +472,8 @@ fn default_model(provider: ProviderKind) -> String {
         ProviderKind::Unconfigured | ProviderKind::Custom => "",
         ProviderKind::OpenAi => "gpt-4o-mini",
         ProviderKind::Ollama => "llama3.2",
+        ProviderKind::Anthropic => "claude-3-5-sonnet-latest",
+        ProviderKind::Gemini => "gemini-2.0-flash",
     }
     .to_owned()
 }
@@ -444,6 +483,8 @@ fn default_base_url(provider: ProviderKind) -> &'static str {
         ProviderKind::Unconfigured | ProviderKind::Custom => "",
         ProviderKind::OpenAi => "https://api.openai.com/v1",
         ProviderKind::Ollama => "http://localhost:11434",
+        ProviderKind::Anthropic => "https://api.anthropic.com/v1",
+        ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta",
     }
 }
 
