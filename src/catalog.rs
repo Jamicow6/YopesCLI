@@ -9,12 +9,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
-/// Preferred provider: Fasfas AI, listed in /connect above models.dev.
-pub const FASFAST_ID: &str = "fasfas";
-pub const FASFAST_LABEL: &str = "Fasfas AI";
-pub const FASFAST_BASE_URL: &str = "https://ai.coffeevps.com/v1";
-const FASFAST_MODELS_URL: &str = "https://ai.coffeevps.com/v1/models";
-pub const FASFAST_DISCORD: &str = "https://discord.gg/vvndVbBZRe";
 const OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -134,28 +128,6 @@ pub async fn fetch() -> Result<Catalog> {
         .context("reading the models.dev catalog")
 }
 
-/// OpenAI-compatible fetch of the Fasfas model list: GET /v1/models with the
-/// Discord-issued key, rebuilt as a one-provider synthetic catalog so the
-/// stock model picker can render it.
-pub async fn fetch_fasfas(key: &str) -> Result<Catalog> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .user_agent(concat!("yopes/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("creating the Fasfas client")?;
-    let response = client
-        .get(FASFAST_MODELS_URL)
-        .bearer_auth(key.trim())
-        .send()
-        .await
-        .context("contacting Fasfas AI")?
-        .error_for_status()
-        .context("fetching models from Fasfas AI")?;
-    let parsed: FasfasModels = response.json().await.context("reading Fasfas AI models")?;
-    Ok(fasfas_catalog(parsed))
-}
-
 /// Fetch an OpenAI-compatible model list from a custom provider's endpoint.
 ///
 /// The endpoint is whatever the user stored, so providers whose model list
@@ -179,7 +151,7 @@ pub async fn fetch_models(
             crate::config::AuthKind::None => request,
         };
     }
-    let parsed: FasfasModels = request
+    let parsed: OpenAiModels = request
         .send()
         .await
         .context("contacting the models endpoint")?
@@ -195,41 +167,14 @@ pub async fn fetch_models(
         .collect())
 }
 
-/// Shape a parsed `/v1/models` response as a one-provider synthetic catalog.
-fn fasfas_catalog(parsed: FasfasModels) -> Catalog {
-    let mut models = BTreeMap::new();
-    for model in parsed.data {
-        models.insert(
-            model.id.clone(),
-            Model {
-                name: model.name.trim().to_owned(),
-                limit: None,
-                cost: None,
-            },
-        );
-    }
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        FASFAST_ID.to_owned(),
-        Provider {
-            name: FASFAST_LABEL.to_owned(),
-            api: Some(FASFAST_BASE_URL.to_owned()),
-            npm: Some(OPENAI_COMPATIBLE.to_owned()),
-            env: Vec::new(),
-            models,
-        },
-    );
-    Catalog { providers }
-}
-
 #[derive(Deserialize)]
-struct FasfasModels {
+struct OpenAiModels {
     #[serde(default)]
-    data: Vec<FasfasModel>,
+    data: Vec<OpenAiModel>,
 }
 
 #[derive(Deserialize)]
-struct FasfasModel {
+struct OpenAiModel {
     id: String,
     #[serde(default)]
     name: String,
@@ -259,8 +204,7 @@ pub fn provider_models(provider: &Provider) -> Vec<(&str, &Model)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Catalog, FASFAST_BASE_URL, FasfasModels, connectable_providers, fasfas_catalog,
-        provider_models,
+        Catalog, OpenAiModels, connectable_providers, provider_models,
     };
 
     const SAMPLE: &str = r#"{
@@ -289,18 +233,15 @@ mod tests {
     }"#;
 
     #[test]
-    fn fasfas_models_become_a_synthetic_catalog() {
-        let parsed: FasfasModels = serde_json::from_str(
+    fn openai_models_response_parses() {
+        let parsed: OpenAiModels = serde_json::from_str(
             r#"{"object":"list","data":[{"id":"glm-5.3"},{"id":"o4","name":"O4 Mini"}]}"#,
         )
         .unwrap();
-        let catalog = fasfas_catalog(parsed);
-        assert!(catalog.providers.contains_key("fasfas"));
-        let provider = &catalog.providers["fasfas"];
-        assert_eq!(provider.base_url("fasfas"), FASFAST_BASE_URL);
-        assert_eq!(provider.models["o4"].name, "O4 Mini");
-        assert!(provider.models["glm-5.3"].name.is_empty());
-        assert!(provider.is_connectable("fasfas"));
+        assert_eq!(parsed.data.len(), 2);
+        assert_eq!(parsed.data[0].id, "glm-5.3");
+        assert_eq!(parsed.data[1].id, "o4");
+        assert_eq!(parsed.data[1].name, "O4 Mini");
     }
 
     #[test]

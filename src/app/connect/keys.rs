@@ -118,11 +118,8 @@ impl App {
             KeyCode::Esc => {
                 if let Some(connect) = self.connect.as_mut() {
                     // A saved endpoint's manager backs out to the provider list;
-                    // the create flow backs out to the endpoint field; Fasfas
-                    // step one backs out to the provider list.
-                    connect.stage = if connect.custom_provider_id.is_some()
-                        || stage == ConnectStage::FasfasNotice
-                    {
+                    // the create flow backs out to the endpoint field.
+                    connect.stage = if connect.custom_provider_id.is_some() {
                         ConnectStage::Providers
                     } else {
                         ConnectStage::Endpoint

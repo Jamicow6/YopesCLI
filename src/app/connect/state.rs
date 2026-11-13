@@ -3,8 +3,6 @@
 use crate::catalog::{self, Catalog};
 use crate::config::{self, AuthKind, SavedModel};
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
-/// Preferred provider row in /connect: Fasfas AI above models.dev.
-pub const FASFAST_ID: &str = catalog::FASFAST_ID;
 pub(super) const ADD_MODEL_ID: &str = "add-model";
 /// Rows that edit an existing saved endpoint from the model list.
 pub(super) const EDIT_ENDPOINT_ID: &str = "edit-endpoint";
@@ -20,9 +18,6 @@ pub(super) const REFRESH_CATALOG_ID: &str = "refresh-catalog";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectStage {
     Providers,
-    /// Preferred Fasfas flow: the Discord key notice, then the key input.
-    FasfasNotice,
-    FasfasKey,
     Models,
     ApiKey,
     ProviderName,
@@ -43,8 +38,6 @@ impl ConnectStage {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Providers => "provider",
-            Self::FasfasNotice => "fasfas",
-            Self::FasfasKey => "fasfas key",
             Self::Models => "model",
             Self::ApiKey => "api key",
             Self::ProviderName => "name",
@@ -60,14 +53,6 @@ impl ConnectStage {
             Self::Unlock => "password",
         }
     }
-}
-/// What happens once a stored key is unlocked.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UnlockTarget {
-    /// Fetch the provider's model list with the unlocked key.
-    FetchModels,
-    /// Connect with the model that is already selected.
-    Finish,
 }
 /// How a connection gets its key.
 #[derive(Clone, Debug)]
@@ -95,7 +80,6 @@ pub fn provider_logo(id: &str) -> &'static str {
     match id {
         "openai" => "●",
         "openrouter" => "⇄",
-        "fasfas" => "✦",
         "anthropic" => "◇",
         "google" => "▴",
         "cohere" => "∞",
@@ -142,8 +126,6 @@ pub struct ConnectState {
     pub(crate) custom_model_context_window: String,
     /// The key already stored for the endpoint being connected, if any.
     pub(crate) stored_secret: Option<config::StoredSecret>,
-    /// What to do once a stored key is unlocked.
-    pub(crate) unlock_target: UnlockTarget,
     /// The endpoint whose stored key is being unlocked.
     pub(crate) unlock_endpoint: String,
     /// A key that was unlocked during this visit.
@@ -176,7 +158,6 @@ impl ConnectState {
             custom_model_name: String::new(),
             custom_model_context_window: String::new(),
             stored_secret: None,
-            unlock_target: UnlockTarget::Finish,
             unlock_endpoint: String::new(),
             unlocked_key: None,
         }
@@ -197,22 +178,6 @@ impl ConnectState {
         match self.stage {
             ConnectStage::Providers => {
                 let mut items = Vec::new();
-                // The preferred provider always sits above everything else.
-                if filter.is_empty()
-                    || catalog::FASFAST_LABEL
-                        .to_ascii_lowercase()
-                        .contains(filter.as_str())
-                    || catalog::FASFAST_ID.contains(filter.as_str())
-                {
-                    items.push(ConnectItem {
-                        id: FASFAST_ID.to_owned(),
-                        title: catalog::FASFAST_LABEL.to_owned(),
-                        detail: "preferred · key from Discord".to_owned(),
-                        logo: provider_logo(FASFAST_ID),
-                        custom_id: None,
-                        active: is_active(catalog::FASFAST_BASE_URL),
-                    });
-                }
                 if filter.is_empty() || "custom".contains(filter.as_str()) {
                     items.push(ConnectItem {
                         id: CUSTOM_PROVIDER_ID.to_owned(),
@@ -267,18 +232,6 @@ impl ConnectState {
                 }
                 items
             }
-            ConnectStage::FasfasNotice => vec![ConnectItem {
-                id: catalog::FASFAST_DISCORD.to_owned(),
-                title: "Get a key in Discord".to_owned(),
-                // Scheme dropped so the invite fits the list column.
-                detail: catalog::FASFAST_DISCORD
-                    .trim_start_matches("https://")
-                    .to_owned(),
-                logo: provider_logo(FASFAST_ID),
-                custom_id: None,
-                active: false,
-            }],
-            ConnectStage::FasfasKey => Vec::new(),
             ConnectStage::Models => {
                 let Some(provider) = self.provider() else {
                     return Vec::new();
@@ -481,14 +434,14 @@ impl ConnectState {
         if self.stage == ConnectStage::Auth {
             return self.auth_at_selection().label().to_owned();
         }
-        if self.stage == ConnectStage::CustomModels || self.stage == ConnectStage::FasfasNotice {
+        if self.stage == ConnectStage::CustomModels {
             let items = self.items();
             return items
                 .get(self.selected.min(items.len().saturating_sub(1)))
                 .map_or_else(|| "none".to_owned(), |item| item.title.clone());
         }
         let value = match self.stage {
-            ConnectStage::ApiKey | ConnectStage::FasfasKey => &self.api_key,
+            ConnectStage::ApiKey => &self.api_key,
             ConnectStage::Password | ConnectStage::Unlock => &self.password,
             ConnectStage::ProviderName => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
@@ -498,7 +451,6 @@ impl ConnectState {
             ConnectStage::ModelName => &self.custom_model_name,
             ConnectStage::ModelContextWindow => &self.custom_model_context_window,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
-            ConnectStage::FasfasNotice => unreachable!("handled above"),
             ConnectStage::Auth | ConnectStage::CustomModels => unreachable!(),
         };
         if matches!(
@@ -506,7 +458,6 @@ impl ConnectState {
             ConnectStage::ApiKey
                 | ConnectStage::Password
                 | ConnectStage::CustomToken
-                | ConnectStage::FasfasKey
                 | ConnectStage::Unlock
         ) && !value.is_empty()
         {
@@ -518,8 +469,6 @@ impl ConnectState {
     pub const fn input_label(&self) -> &'static str {
         match self.stage {
             ConnectStage::Providers | ConnectStage::Models => "search",
-            ConnectStage::FasfasNotice => "fasfas",
-            ConnectStage::FasfasKey => "fasfas key",
             ConnectStage::ApiKey => "api key",
             ConnectStage::ProviderName => "provider name",
             ConnectStage::Endpoint => "completion endpoint",
@@ -537,7 +486,7 @@ impl ConnectState {
     pub const fn uses_cursor(&self) -> bool {
         !matches!(
             self.stage,
-            ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::FasfasNotice
+            ConnectStage::Auth | ConnectStage::CustomModels
         )
     }
     pub fn has_custom_models(&self) -> bool {
@@ -558,13 +507,9 @@ impl ConnectState {
             .and_then(|provider| provider.env.first())
             .map(String::as_str)
     }
-    /// What the loading row of /connect names as its source: the initial
-    /// fetch fills the provider list, the Fasfas key fetch lists models.
+    /// What the loading row of /connect names as its source.
     pub const fn loading_detail(&self) -> &'static str {
-        match self.stage {
-            ConnectStage::FasfasKey => "  loading models from Fasfas AI",
-            _ => "  loading providers from models.dev",
-        }
+        "  loading providers from models.dev"
     }
     pub(super) fn provider(&self) -> Option<&catalog::Provider> {
         let id = self.provider_id.as_deref()?;
@@ -614,9 +559,6 @@ impl ConnectState {
                 .iter()
                 .find(|provider| provider.id == item.id)
                 .map(|provider| provider.base_url.clone());
-        }
-        if item.id == FASFAST_ID {
-            return Some(catalog::FASFAST_BASE_URL.to_owned());
         }
         self.catalog
             .as_ref()?
@@ -683,23 +625,19 @@ mod tests {
             secret: crate::config::StoredSecret::default(),
         });
         let items = connect.items_using("https://example.test/v1", "model");
-        assert_eq!(items[0].id, "fasfas", "preferred provider comes first");
-        assert_eq!(items[1].custom_id, None, "next row adds a provider");
-        assert_eq!(items[2].custom_id.as_deref(), Some(CUSTOM_PROVIDER_ID));
-        assert!(items[2].active);
+        assert_eq!(items[0].custom_id, None, "first row adds a provider");
+        assert_eq!(items[1].custom_id.as_deref(), Some(CUSTOM_PROVIDER_ID));
+        assert!(items[1].active);
     }
     #[test]
-    fn fasfas_filter_hides_other_sections() {
+    fn custom_filter_hides_other_sections() {
         use super::{ConnectStage, ConnectState};
         let mut connect = ConnectState::loading();
         connect.stage = ConnectStage::Providers;
-        connect.filter = "fasfas".to_owned();
-        let items = connect.items();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].id, "fasfas");
         connect.filter = "custom".to_owned();
         let items = connect.items();
-        assert!(items.iter().all(|item| item.id != "fasfas"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "custom");
     }
     #[test]
     fn delete_removes_only_a_model_row() {

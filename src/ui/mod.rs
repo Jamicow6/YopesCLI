@@ -15,7 +15,6 @@ use crate::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
         ListPicker, Mode, NoticeKind, ToolApproval, format_bytes, format_tokens,
     },
-    catalog::FASFAST_ID,
     diff::{ChangeKind, DiffLine, FileDiff},
     session::{Message, Role, Usage},
     tools,

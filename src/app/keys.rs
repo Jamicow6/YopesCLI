@@ -11,7 +11,7 @@ impl App {
                 .filter(|character| !character.is_control())
                 .collect::<String>();
             match connect.stage {
-                ConnectStage::ApiKey | ConnectStage::FasfasKey => connect.api_key.push_str(&clean),
+                ConnectStage::ApiKey => connect.api_key.push_str(&clean),
                 ConnectStage::Password | ConnectStage::Unlock => connect.password.push_str(&clean),
                 ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
@@ -26,7 +26,7 @@ impl App {
                     connect.filter.push_str(&clean);
                     connect.selected = 0;
                 }
-                ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::FasfasNotice => {}
+                ConnectStage::Auth | ConnectStage::CustomModels => {}
             }
             return;
         }

@@ -419,15 +419,6 @@ fn dispatch(
                 let _ = sender.send(result);
             });
         }
-        Action::FetchFasfas(key) => {
-            let sender = catalog_events.clone();
-            tokio::spawn(async move {
-                let result = catalog::fetch_fasfas(&key)
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                let _ = sender.send(result);
-            });
-        }
         Action::FetchCustomModels { url, token, auth } => {
             let sender = models_events.clone();
             tokio::spawn(async move {
