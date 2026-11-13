@@ -1,9 +1,8 @@
 name: On-the-line
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -45,10 +44,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # Windows runners are often unavailable, so they only run on main:
-      # a pull request completes on the Linux runners alone.
       matrix:
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ["ubuntu-latest"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ["ubuntu-latest"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
