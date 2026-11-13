@@ -141,7 +141,6 @@ pub(super) fn draw_connect_list(
     if !matches!(
         connect.stage,
         ConnectStage::Providers
-            | ConnectStage::FasfasNotice
             | ConnectStage::Models
             | ConnectStage::Auth
             | ConnectStage::CustomModels
@@ -164,38 +163,27 @@ pub(super) fn draw_connect_list(
         return;
     }
     let selected = connect.selected.min(items.len() - 1);
-    // Preferred provider first, then the custom block, then models.dev.
+    // Custom block first, then models.dev.
     // Sections need a divider row each, skipped by the selection.
-    let has_preferred = connect.stage == ConnectStage::Providers
-        && items.first().is_some_and(|item| item.id == FASFAST_ID);
-    let base = usize::from(has_preferred);
-    let tail = &items[base..];
-    let custom_count = tail
-        .iter()
-        .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
-        .count();
-    let preferred_divider = has_preferred && !tail.is_empty();
-    let models_divider = custom_count > 0 && custom_count < tail.len();
+    let is_providers = connect.stage == ConnectStage::Providers;
+    let custom_count = if is_providers {
+        items
+            .iter()
+            .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
+            .count()
+    } else {
+        0
+    };
+    let models_divider = is_providers && custom_count > 0 && custom_count < items.len();
     // Rows: Ok(index) renders item index, Err(label) renders a divider.
-    let mut rows = Vec::with_capacity(
-        items.len() + usize::from(preferred_divider) + usize::from(models_divider),
-    );
+    let mut rows = Vec::with_capacity(items.len() + usize::from(models_divider));
     for index in 0..items.len() {
-        if preferred_divider && index == base {
-            rows.push(Err(" preferred "));
-        }
-        if models_divider && index == base + custom_count {
+        if models_divider && index == custom_count {
             rows.push(Err(" models.dev "));
         }
         rows.push(Ok(index));
     }
-    let mut extra = 0;
-    if preferred_divider && selected >= base && selected > 0 {
-        extra += 1;
-    }
-    if models_divider && selected >= base + custom_count {
-        extra += 1;
-    }
+    let extra = usize::from(models_divider && selected >= custom_count);
     let selected_row = selected + extra;
     let start_row = selected_row.saturating_sub(height.saturating_sub(1));
     let start = start_row.min(rows.len().saturating_sub(height));
@@ -294,9 +282,9 @@ pub(super) fn draw_connect_list(
 pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
     let text = match connect.stage {
         ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
-        ConnectStage::FasfasNotice => "enter then paste your key · esc close".to_owned(),
-        ConnectStage::FasfasKey => "enter load models · esc back".to_owned(),
-        ConnectStage::Models => "↑↓ move · type to filter · enter choose · esc back".to_owned(),
+        ConnectStage::Models => {
+            "↑↓ move · type to filter · enter choose · tab context · esc back".to_owned()
+        }
         ConnectStage::ApiKey => connect.required_env().map_or_else(
             || "enter continue · esc back · empty skips the key".to_owned(),
             |name| format!("enter continue · esc back · empty uses ${name}"),
@@ -314,8 +302,16 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
             }
         }
         ConnectStage::ModelName => "enter continue · empty uses the model id · esc back".to_owned(),
-        ConnectStage::ModelContextWindow => "enter add model · blank skips · esc back".to_owned(),
-        ConnectStage::CustomModels => "↑↓ choose · enter use · d delete · esc back".to_owned(),
+        ConnectStage::ModelContextWindow => {
+            if connect.custom_flow {
+                "enter add model · blank skips · esc back".to_owned()
+            } else {
+                "enter save · blank resets · esc back".to_owned()
+            }
+        }
+        ConnectStage::CustomModels => {
+            "↑↓ choose · enter use · tab context · d delete · esc back".to_owned()
+        }
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }

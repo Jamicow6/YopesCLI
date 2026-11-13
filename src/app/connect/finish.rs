@@ -63,21 +63,6 @@ impl App {
                     // Land on the manager so the endpoint, key and models can be
                     // edited; the token is one of its rows.
                     connect.stage = ConnectStage::CustomModels;
-                } else if item.id == FASFAST_ID {
-                    connect.custom_flow = false;
-                    connect.provider_id = Some(FASFAST_ID.to_owned());
-                    connect.model_id = None;
-                    connect.api_key.clear();
-                    connect.filter.clear();
-                    connect.selected = 0;
-                    connect.error = None;
-                    // The Discord key stays with this endpoint, so a second
-                    // visit reuses it instead of asking again.
-                    connect.stored_secret =
-                        config::load_endpoint_secret(&config_path, catalog::FASFAST_BASE_URL);
-                    // Show where the key comes from; Enter on the notice row
-                    // or on this list both move to the key input.
-                    connect.stage = ConnectStage::FasfasNotice;
                 } else if item.id == CUSTOM_PROVIDER_ID {
                     connect.provider_id = None;
                     connect.custom_flow = true;
@@ -92,20 +77,27 @@ impl App {
                     connect.custom_model_name.clear();
                     connect.stage = ConnectStage::ProviderName;
                 } else {
-                    connect.provider_id = Some(item.id);
+                    connect.provider_id = Some(item.id.clone());
                     connect.custom_flow = false;
                     // A catalog provider keeps its key under its own endpoint,
                     // so coming back to it does not ask for the key again.
                     let endpoint = connect.endpoint();
                     connect.stored_secret = config::load_endpoint_secret(&config_path, &endpoint);
+                    if let Some(catalog) = connect.catalog.as_mut() {
+                        if let Some(provider) = catalog.providers.get_mut(&item.id) {
+                            for model in config::load_endpoint_models(&config_path, &endpoint) {
+                                if let Some(context) = model.context_window {
+                                    if let Some(m) = provider.models.get_mut(&model.id) {
+                                        m.limit = Some(catalog::Limit {
+                                            context: Some(context),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                     connect.stage = ConnectStage::Models;
                 }
-            }
-            ConnectStage::FasfasNotice => {
-                connect.filter.clear();
-                connect.selected = 0;
-                connect.error = None;
-                connect.stage = ConnectStage::FasfasKey;
             }
             ConnectStage::Models => {
                 if item.id == EDIT_KEY_ID {
@@ -121,16 +113,6 @@ impl App {
                 connect.password.clear();
                 connect.selected = 0;
                 connect.error = None;
-                if connect.provider_id.as_deref() == Some(FASFAST_ID) {
-                    // The Fasfas key was entered earlier: connect directly.
-                    let key = connect.api_key.trim().to_owned();
-                    if key.is_empty() {
-                        connect.stage = ConnectStage::FasfasKey;
-                        connect.error = Some("Enter a Fasfas key from Discord.".to_owned());
-                        return Action::None;
-                    }
-                    return self.finish_connect(Some(key), None);
-                }
                 // A key already stored for this endpoint is used as it is. The
                 // user is only asked when there is nothing to reuse.
                 let stored = connect.stored_key();
@@ -145,7 +127,6 @@ impl App {
                 // so ask for that instead of the key.
                 if locked {
                     connect.unlock_endpoint = connect.endpoint();
-                    connect.unlock_target = UnlockTarget::Finish;
                     connect.password.clear();
                     connect.stage = ConnectStage::Unlock;
                     return Action::None;
@@ -224,7 +205,6 @@ impl App {
                     // The stored token is encrypted: only its password is
                     // asked for, never the token itself.
                     connect.unlock_endpoint = connect.custom_endpoint.clone();
-                    connect.unlock_target = UnlockTarget::Finish;
                     connect.password.clear();
                     connect.stage = ConnectStage::Unlock;
                 }
@@ -238,8 +218,7 @@ impl App {
             | ConnectStage::ModelName
             | ConnectStage::ModelContextWindow
             | ConnectStage::Password
-            | ConnectStage::Unlock
-            | ConnectStage::FasfasKey => {}
+            | ConnectStage::Unlock => {}
         }
         if finish_now {
             return self.finish_custom_connect(None);
@@ -370,15 +349,6 @@ impl App {
     /// The secret already stored for an endpoint, if the user connected it.
     pub(crate) fn stored_secret_for(&self, base_url: &str) -> Option<config::StoredSecret> {
         config::load_endpoint_secret(&self.config_path, base_url)
-    }
-
-    /// Fetch the Fasfas model list with a key.
-    pub(crate) fn fetch_fasfas_models(&mut self, key: String) -> Action {
-        if let Some(connect) = self.connect.as_mut() {
-            connect.loading = true;
-            connect.error = None;
-        }
-        Action::FetchFasfas(key)
     }
 
     /// Fetch the model list from the custom provider's models endpoint.

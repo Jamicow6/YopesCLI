@@ -18,8 +18,6 @@ impl App {
         }
         match stage {
             ConnectStage::Providers | ConnectStage::Models => self.handle_connect_list_key(key),
-            ConnectStage::FasfasNotice => self.handle_connect_choice_key(key),
-            ConnectStage::FasfasKey => self.handle_connect_fasfas_key(key),
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
             ConnectStage::ProviderName
             | ConnectStage::Endpoint
@@ -54,15 +52,11 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let (password, endpoint, target) = {
+                let (password, endpoint) = {
                     let Some(connect) = self.connect.as_ref() else {
                         return Action::None;
                     };
-                    (
-                        connect.password.clone(),
-                        connect.unlock_endpoint.clone(),
-                        connect.unlock_target,
-                    )
+                    (connect.password.clone(), connect.unlock_endpoint.clone())
                 };
                 let Some(secret) = self.stored_secret_for(&endpoint) else {
                     self.connect_error("That key is no longer stored.");
@@ -75,32 +69,20 @@ impl App {
                         return Action::None;
                     }
                 };
-                match target {
-                    UnlockTarget::FetchModels => {
-                        if let Some(connect) = self.connect.as_mut() {
-                            connect.api_key = api_key.clone();
-                            connect.unlocked_key = Some(api_key.clone());
-                            connect.password.clear();
-                        }
-                        return self.fetch_fasfas_models(api_key);
+                // A custom endpoint keeps the unlocked key aside, so it
+                // can be used without being written again.
+                let custom_flow = self
+                    .connect
+                    .as_ref()
+                    .is_some_and(|connect| connect.custom_flow);
+                if custom_flow {
+                    if let Some(connect) = self.connect.as_mut() {
+                        connect.unlocked_key = Some(api_key);
+                        connect.password.clear();
                     }
-                    UnlockTarget::Finish => {
-                        // A custom endpoint keeps the unlocked key aside, so it
-                        // can be used without being written again.
-                        let custom_flow = self
-                            .connect
-                            .as_ref()
-                            .is_some_and(|connect| connect.custom_flow);
-                        if custom_flow {
-                            if let Some(connect) = self.connect.as_mut() {
-                                connect.unlocked_key = Some(api_key);
-                                connect.password.clear();
-                            }
-                            return self.finish_custom_connect(None);
-                        }
-                        return self.finish_connect_with(KeySource::Stored(api_key), None);
-                    }
+                    return self.finish_custom_connect(None);
                 }
+                return self.finish_connect_with(KeySource::Stored(api_key), None);
             }
             KeyCode::Backspace => {
                 if let Some(connect) = self.connect.as_mut() {
@@ -129,15 +111,6 @@ impl App {
             Ok(catalog) => {
                 connect.catalog = Some(catalog);
                 connect.error = None;
-                // The Fasfas fetch hands back a one-provider synthetic catalog:
-                // jump from the key field straight to its model list. The
-                // initial models.dev fetch leaves the provider list alone.
-                if connect.stage == ConnectStage::FasfasKey
-                    && connect.provider_id.as_deref() == Some(FASFAST_ID)
-                {
-                    connect.stage = ConnectStage::Models;
-                    connect.filter.clear();
-                }
                 connect.selected = 0;
             }
             Err(error) => {

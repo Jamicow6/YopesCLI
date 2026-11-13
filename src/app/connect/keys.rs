@@ -69,6 +69,28 @@ impl App {
                     connect.selected = 0;
                 }
             }
+            KeyCode::Tab => {
+                if let Some(connect) = self.connect.as_mut() {
+                    if connect.stage == ConnectStage::Models {
+                        if let Some(item) = connect.selected_item() {
+                            if item.id != EDIT_KEY_ID {
+                                let current_context = connect
+                                    .provider()
+                                    .and_then(|p| p.models.get(&item.id))
+                                    .and_then(|m| m.limit.as_ref())
+                                    .and_then(|l| l.context);
+                                connect.model_id = Some(item.id.clone());
+                                connect.custom_model_id = item.id;
+                                connect.custom_model_name = item.title;
+                                connect.custom_model_context_window =
+                                    current_context.map(|c| c.to_string()).unwrap_or_default();
+                                connect.stage = ConnectStage::ModelContextWindow;
+                                connect.error = None;
+                            }
+                        }
+                    }
+                }
+            }
             KeyCode::Char(character)
                 if !key
                     .modifiers
@@ -118,11 +140,8 @@ impl App {
             KeyCode::Esc => {
                 if let Some(connect) = self.connect.as_mut() {
                     // A saved endpoint's manager backs out to the provider list;
-                    // the create flow backs out to the endpoint field; Fasfas
-                    // step one backs out to the provider list.
-                    connect.stage = if connect.custom_provider_id.is_some()
-                        || stage == ConnectStage::FasfasNotice
-                    {
+                    // the create flow backs out to the endpoint field.
+                    connect.stage = if connect.custom_provider_id.is_some() {
                         ConnectStage::Providers
                     } else {
                         ConnectStage::Endpoint
@@ -153,6 +172,30 @@ impl App {
             KeyCode::End => {
                 if let Some(connect) = self.connect.as_mut() {
                     connect.selected = usize::MAX;
+                }
+            }
+            KeyCode::Tab if stage == ConnectStage::CustomModels => {
+                if let Some(connect) = self.connect.as_mut() {
+                    if let Some(item) = connect.selected_item() {
+                        if item.id != ADD_MODEL_ID
+                            && item.id != EDIT_ENDPOINT_ID
+                            && item.id != EDIT_TOKEN_ID
+                            && item.id != EDIT_MODELS_URL_ID
+                            && item.id != FETCH_MODELS_ID
+                        {
+                            let current_context = connect
+                                .custom_models
+                                .iter()
+                                .find(|m| m.id == item.id)
+                                .and_then(|m| m.context_window);
+                            connect.custom_model_id = item.id;
+                            connect.custom_model_name = item.title;
+                            connect.custom_model_context_window =
+                                current_context.map(|c| c.to_string()).unwrap_or_default();
+                            connect.stage = ConnectStage::ModelContextWindow;
+                            connect.error = None;
+                        }
+                    }
                 }
             }
             KeyCode::Delete | KeyCode::Char('d' | 'D')

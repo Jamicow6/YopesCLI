@@ -89,8 +89,15 @@ impl App {
                 connect.selected = 0;
             }
             ConnectStage::ModelContextWindow => {
-                connect.stage = ConnectStage::ModelName;
-                connect.selected = 0;
+                connect.stage = if !connect.custom_flow {
+                    ConnectStage::Models
+                } else if connect.custom_provider_id.is_some() {
+                    ConnectStage::CustomModels
+                } else {
+                    ConnectStage::ModelName
+                };
+                connect.custom_model_context_window.clear();
+                connect.error = None;
             }
             _ => {}
         }
@@ -268,19 +275,25 @@ impl App {
                 }
             }
             ConnectStage::ModelContextWindow => {
-                let (id, name, raw_window) = {
+                let (provider_id, id, name, raw_window, custom_flow) = {
                     let Some(connect) = self.connect.as_ref() else {
                         return Action::None;
                     };
                     (
+                        connect.provider_id.clone(),
                         connect.custom_model_id.trim().to_owned(),
                         connect.custom_model_name.trim().to_owned(),
                         connect.custom_model_context_window.trim().to_owned(),
+                        connect.custom_flow,
                     )
                 };
                 if id.is_empty() {
                     if let Some(connect) = self.connect.as_mut() {
-                        connect.stage = ConnectStage::ModelId;
+                        connect.stage = if !custom_flow {
+                            ConnectStage::Models
+                        } else {
+                            ConnectStage::ModelId
+                        };
                         connect.error = Some("Enter a model ID first.".to_owned());
                     }
                     return Action::None;
@@ -298,6 +311,43 @@ impl App {
                         }
                     }
                 };
+                if !custom_flow {
+                    // ponytail: in-memory catalog limit update with cached json sync; add full provider-level config override layer if catalog schema expands.
+                    if let Some(connect) = self.connect.as_mut() {
+                        let endpoint = connect.endpoint();
+                        if let Some(catalog) = connect.catalog.as_mut() {
+                            if let Some(pid) = &provider_id {
+                                if let Some(provider) = catalog.providers.get_mut(pid) {
+                                    if let Some(model) = provider.models.get_mut(&id) {
+                                        model.limit =
+                                            context_window.map(|context| catalog::Limit {
+                                                context: Some(context),
+                                            });
+                                    }
+                                }
+                            }
+                            let _ = catalog::save_cached(&self.config_path, catalog);
+                        }
+                        let _ = config::update_model_context_window(
+                            &self.config_path,
+                            &endpoint,
+                            &id,
+                            context_window,
+                        );
+                        self.backend
+                            .update_model_context_window(&id, context_window);
+                        connect.custom_model_id.clear();
+                        connect.custom_model_name.clear();
+                        connect.custom_model_context_window.clear();
+                        connect.stage = ConnectStage::Models;
+                        connect.error = None;
+                    }
+                    let desc = context_window
+                        .map(|c| format!("{c} tokens"))
+                        .unwrap_or_else(|| "default".to_owned());
+                    self.info(format!("Set context window for {id} to {desc}"));
+                    return Action::None;
+                }
                 if let Some(connect) = self.connect.as_mut() {
                     let existing = connect
                         .custom_models
@@ -317,87 +367,23 @@ impl App {
                             ..SavedModel::default()
                         });
                     }
+                    if connect.custom_provider_id.is_some() {
+                        let endpoint = connect.custom_endpoint.clone();
+                        let _ = config::update_model_context_window(
+                            &self.config_path,
+                            &endpoint,
+                            &id,
+                            context_window,
+                        );
+                        self.backend
+                            .update_model_context_window(&id, context_window);
+                    }
                     connect.selected = existing.unwrap_or(connect.custom_models.len() - 1);
                     connect.custom_model_id.clear();
                     connect.custom_model_name.clear();
                     connect.custom_model_context_window.clear();
                     connect.stage = ConnectStage::CustomModels;
                     connect.error = None;
-                }
-            }
-            _ => {}
-        }
-        Action::None
-    }
-
-    /// Fasfas key entry: first step after the Discord notice. Enter fetches
-    /// the model list from ai.coffeevps.com with the key as a bearer token.
-    pub(crate) fn handle_connect_fasfas_key(&mut self, key: KeyEvent) -> Action {
-        match key.code {
-            KeyCode::Esc => {
-                if let Some(connect) = self.connect.as_mut() {
-                    connect.stage = ConnectStage::Providers;
-                    connect.filter.clear();
-                    connect.selected = 0;
-                    connect.error = None;
-                }
-            }
-            KeyCode::Enter => {
-                let api_key = self
-                    .connect
-                    .as_ref()
-                    .map(|connect| connect.api_key.trim().to_owned())
-                    .unwrap_or_default();
-                if api_key.is_empty() {
-                    // A key already stored for this endpoint is reused, so the
-                    // preferred provider does not ask for its key twice.
-                    if let Some(secret) = self
-                        .connect
-                        .as_ref()
-                        .and_then(|connect| connect.stored_secret.clone())
-                    {
-                        if secret.has_key() {
-                            if secret.encrypted {
-                                // Only the password is needed to unlock it.
-                                if let Some(connect) = self.connect.as_mut() {
-                                    connect.unlock_endpoint = catalog::FASFAST_BASE_URL.to_owned();
-                                    connect.unlock_target = UnlockTarget::FetchModels;
-                                    connect.password.clear();
-                                    connect.stage = ConnectStage::Unlock;
-                                    connect.error = None;
-                                }
-                                return Action::None;
-                            }
-                            if let Some(key) = secret.plaintext() {
-                                let key = key.to_owned();
-                                if let Some(connect) = self.connect.as_mut() {
-                                    connect.api_key = key.clone();
-                                }
-                                return self.fetch_fasfas_models(key);
-                            }
-                        }
-                    }
-                    self.connect_error("Enter a Fasfas key from Discord.");
-                    return Action::None;
-                }
-                if let Some(connect) = self.connect.as_mut() {
-                    connect.loading = true;
-                    connect.error = None;
-                }
-                return Action::FetchFasfas(api_key);
-            }
-            KeyCode::Backspace => {
-                if let Some(connect) = self.connect.as_mut() {
-                    connect.api_key.pop();
-                }
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                if let Some(connect) = self.connect.as_mut() {
-                    connect.api_key.push(character);
                 }
             }
             _ => {}
