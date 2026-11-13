@@ -160,21 +160,6 @@ impl App {
                 connect.selected = 0;
                 connect.error = None;
             }
-            ConnectStage::Auth => {
-                let Some(auth) = AuthKind::parse(&item.id) else {
-                    return Action::None;
-                };
-                connect.custom_auth = auth;
-                connect.model_id = None;
-                connect.selected = 0;
-                connect.error = None;
-                if auth.requires_token() {
-                    connect.stage = ConnectStage::CustomToken;
-                } else {
-                    connect.custom_token.clear();
-                    connect.stage = ConnectStage::ModelId;
-                }
-            }
             ConnectStage::CustomModels => {
                 if item.id == ADD_MODEL_ID {
                     connect.custom_model_id.clear();
@@ -239,7 +224,6 @@ impl App {
                 }
             }
             ConnectStage::ApiKey
-            | ConnectStage::ProviderName
             | ConnectStage::Endpoint
             | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
@@ -291,38 +275,51 @@ impl App {
             return Action::None;
         }
         if model_id.is_empty() && model_name.is_empty() {
-            self.connect_error("Enter a model name or model ID.");
-            return Action::None;
+            // Connecting provider without models is allowed.
         }
-        let final_id = if model_id.is_empty() {
-            model_name.clone()
+        let has_model = !model_id.is_empty() || !model_name.is_empty();
+        let (final_id, final_models) = if has_model {
+            let final_id = if model_id.is_empty() {
+                model_name.clone()
+            } else {
+                model_id.clone()
+            };
+            let final_name = if model_name.is_empty() {
+                final_id.clone()
+            } else {
+                model_name
+            };
+            let context_window = if context_window_str.is_empty() {
+                Some(128_000)
+            } else {
+                context_window_str.parse::<u64>().ok().or(Some(128_000))
+            };
+            (
+                Some(final_id.clone()),
+                vec![config::SavedModel {
+                    id: final_id,
+                    name: final_name,
+                    context_window,
+                    input_cost: None,
+                    output_cost: None,
+                }],
+            )
         } else {
-            model_id.clone()
-        };
-        let final_name = if model_name.is_empty() {
-            final_id.clone()
-        } else {
-            model_name
-        };
-        let context_window = if context_window_str.is_empty() {
-            Some(128_000)
-        } else {
-            context_window_str.parse::<u64>().ok().or(Some(128_000))
+            (None, Vec::new())
         };
 
         if let Some(connect) = self.connect.as_mut() {
+            connect.custom_flow = true;
             connect.custom_name = name;
             connect.custom_endpoint = endpoint;
             connect.custom_models_url = models_url;
-            connect.model_id = Some(final_id.clone());
-            connect.custom_models = vec![config::SavedModel {
-                id: final_id,
-                name: final_name,
-                context_window,
-                input_cost: None,
-                output_cost: None,
-            }];
-            connect.custom_auth = config::AuthKind::Bearer;
+            connect.model_id = final_id;
+            connect.custom_models = final_models;
+            connect.custom_auth = if connect.custom_token.trim().is_empty() {
+                config::AuthKind::None
+            } else {
+                config::AuthKind::Bearer
+            };
             connect.error = None;
         }
         self.finish_custom_connect(None)
@@ -590,16 +587,17 @@ impl App {
             unlocked,
             models_url,
         ) = plan;
-        let Some(model_id) = model_id else {
-            self.connect_error("Choose a model.");
-            return Action::None;
+        let effective_model_id = if let Some(ref mid) = model_id {
+            if !models.iter().any(|model| &model.id == mid) && !models.is_empty() {
+                self.connect_error("Choose a model.");
+                return Action::None;
+            }
+            mid.clone()
+        } else {
+            String::new()
         };
         if endpoint.is_empty() {
             self.connect_error("Enter the completion endpoint.");
-            return Action::None;
-        }
-        if !models.iter().any(|model| model.id == model_id) {
-            self.connect_error("Choose a model.");
             return Action::None;
         }
         let stored_key = if auth.requires_token() && !token.is_empty() {
@@ -632,7 +630,7 @@ impl App {
         let connection = Connection {
             provider: ProviderKind::Custom,
             provider_name: name.clone(),
-            model: model_id.clone(),
+            model: effective_model_id.clone(),
             base_url: endpoint.clone(),
             api_key: stored_key.clone(),
             api_key_env: None,
@@ -647,7 +645,7 @@ impl App {
         self.backend.configure(
             ProviderKind::Custom,
             name.clone(),
-            model_id.clone(),
+            effective_model_id.clone(),
             endpoint,
             runtime_key,
             auth,
@@ -658,7 +656,11 @@ impl App {
             self.error(format!("Connected, but could not save: {error:#}"));
         } else {
             self.custom_providers = config::load_custom_providers(&self.config_path);
-            self.info(format!("Connected to {name} · {model_id}"));
+            if effective_model_id.is_empty() {
+                self.info(format!("Connected to {name}"));
+            } else {
+                self.info(format!("Connected to {name} · {effective_model_id}"));
+            }
         }
         Action::None
     }
@@ -667,10 +669,7 @@ impl App {
         if let Some(connect) = self.connect.as_mut() {
             if matches!(
                 connect.stage,
-                ConnectStage::Providers
-                    | ConnectStage::Models
-                    | ConnectStage::Auth
-                    | ConnectStage::CustomModels
+                ConnectStage::Providers | ConnectStage::Models | ConnectStage::CustomModels
             ) {
                 connect.move_selection(forward);
             }

@@ -77,5 +77,5 @@ First public release.
 - `/effort` reasoning-effort control, saved with the connection.
 - `yopes update` self-update.
 
-[Unreleased]: https://github.com/Jamicow6/YopesCLI/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Jamicow6/YopesCLI/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Jamicaw56/YopesCLI/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Jamicaw56/YopesCLI/releases/tag/v0.1.0
