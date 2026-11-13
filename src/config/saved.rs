@@ -316,6 +316,7 @@ pub(crate) fn save_connection(
     // finds it instead of asking again.
     let entry = saved.provider_keys.entry(endpoint.clone()).or_default();
     entry.provider_id = connection.provider_id.clone();
+    entry.provider_kind = connection.provider;
     entry.provider_name = connection.provider_name.clone();
     entry.secret = secret.clone();
     entry.models = models.clone();
@@ -544,6 +545,21 @@ pub(crate) fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
         .map(|(base_url, stored)| ConnectedProvider {
             base_url: base_url.clone(),
             provider_id: stored.provider_id.clone(),
+            provider_kind: if stored.provider_kind == ProviderKind::Unconfigured {
+                if stored.provider_id.as_deref() == Some("anthropic")
+                    || base_url.contains("anthropic.com")
+                {
+                    ProviderKind::Anthropic
+                } else if stored.provider_id.as_deref() == Some("google")
+                    || base_url.contains("googleapis.com")
+                {
+                    ProviderKind::Gemini
+                } else {
+                    ProviderKind::OpenAi
+                }
+            } else {
+                stored.provider_kind
+            },
             name: stored.provider_name.clone(),
             has_key: stored.secret.has_key(),
             encrypted: stored.secret.encrypted,
