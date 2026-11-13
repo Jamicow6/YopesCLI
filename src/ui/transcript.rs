@@ -220,10 +220,18 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         if streaming {
             if let Some(line) = lines.last_mut() {
-                line.spans.push(Span::styled(
-                    format!(" {}", caret(app.spinner)),
-                    Style::default().fg(ACCENT),
-                ));
+                let line_len = spans_width(&line.spans);
+                if line_len + 2 < usize::from(inner.width) {
+                    line.spans.push(Span::styled(
+                        format!(" {}", caret(app.spinner)),
+                        Style::default().fg(ACCENT),
+                    ));
+                } else {
+                    lines.push(Line::styled(
+                        caret(app.spinner),
+                        Style::default().fg(ACCENT),
+                    ));
+                }
             }
         }
     }

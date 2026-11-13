@@ -37,11 +37,9 @@ pub enum ConnectStage {
     Providers,
     Models,
     ApiKey,
-    ProviderName,
     Endpoint,
     /// Optional URL serving the provider's model list; defaults to `<base>/models`.
     ModelsEndpoint,
-    Auth,
     CustomToken,
     ModelId,
     ModelName,
@@ -59,10 +57,8 @@ impl ConnectStage {
             Self::Providers => "provider",
             Self::Models => "model",
             Self::ApiKey => "api key",
-            Self::ProviderName => "name",
             Self::Endpoint => "endpoint",
             Self::ModelsEndpoint => "models endpoint",
-            Self::Auth => "authorization",
             Self::CustomToken => "token",
             Self::ModelId => "model id",
             Self::ModelName => "model name",
@@ -326,17 +322,6 @@ impl ConnectState {
                 }
                 items
             }
-            ConnectStage::Auth => AuthKind::choices()
-                .into_iter()
-                .map(|auth| ConnectItem {
-                    id: auth.id().to_owned(),
-                    title: auth.label().to_owned(),
-                    detail: auth.detail().to_owned(),
-                    logo: "•",
-                    custom_id: None,
-                    active: false,
-                })
-                .collect(),
             ConnectStage::CustomModels => {
                 let mut items: Vec<ConnectItem> = self
                     .custom_models
@@ -464,7 +449,6 @@ impl ConnectState {
                 items
             }
             ConnectStage::ApiKey
-            | ConnectStage::ProviderName
             | ConnectStage::Endpoint
             | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
@@ -505,9 +489,6 @@ impl ConnectState {
         Some(id)
     }
     pub fn input(&self) -> String {
-        if self.stage == ConnectStage::Auth {
-            return self.auth_at_selection().label().to_owned();
-        }
         if self.stage == ConnectStage::CustomModels {
             let items = self.items();
             return items
@@ -517,7 +498,7 @@ impl ConnectState {
         let value = match self.stage {
             ConnectStage::ApiKey => &self.api_key,
             ConnectStage::Password | ConnectStage::Unlock => &self.password,
-            ConnectStage::ProviderName | ConnectStage::RenameProvider => &self.custom_name,
+            ConnectStage::RenameProvider => &self.custom_name,
             ConnectStage::Endpoint => &self.custom_endpoint,
             ConnectStage::ModelsEndpoint => &self.custom_models_url,
             ConnectStage::CustomToken => &self.custom_token,
@@ -525,7 +506,7 @@ impl ConnectState {
             ConnectStage::ModelName => &self.custom_model_name,
             ConnectStage::ModelContextWindow => &self.custom_model_context_window,
             ConnectStage::Providers | ConnectStage::Models => &self.filter,
-            ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::AddProvider => {
+            ConnectStage::CustomModels | ConnectStage::AddProvider => {
                 unreachable!()
             }
         };
@@ -546,11 +527,9 @@ impl ConnectState {
         match self.stage {
             ConnectStage::Providers | ConnectStage::Models => "search",
             ConnectStage::ApiKey => "api key",
-            ConnectStage::ProviderName => "provider name",
             ConnectStage::RenameProvider => "new provider name",
             ConnectStage::Endpoint => "completion endpoint",
             ConnectStage::ModelsEndpoint => "models endpoint (blank: <endpoint>/models)",
-            ConnectStage::Auth => "authorization",
             ConnectStage::CustomToken => "token",
             ConnectStage::ModelId => "model id",
             ConnectStage::ModelName => "model name",
@@ -564,7 +543,7 @@ impl ConnectState {
     pub const fn uses_cursor(&self) -> bool {
         !matches!(
             self.stage,
-            ConnectStage::Auth | ConnectStage::CustomModels | ConnectStage::AddProvider
+            ConnectStage::CustomModels | ConnectStage::AddProvider
         )
     }
 
@@ -610,16 +589,6 @@ impl ConnectState {
     }
     pub fn has_custom_models(&self) -> bool {
         !self.custom_models.is_empty()
-    }
-    fn auth_at_selection(&self) -> AuthKind {
-        let choices = AuthKind::choices();
-        choices[self.selected.min(choices.len() - 1)]
-    }
-    pub(super) fn auth_index(&self) -> usize {
-        AuthKind::choices()
-            .iter()
-            .position(|auth| *auth == self.custom_auth)
-            .unwrap_or(0)
     }
     pub fn required_env(&self) -> Option<&str> {
         self.provider()
@@ -712,7 +681,6 @@ pub(super) fn custom_field_mut(
     stage: ConnectStage,
 ) -> Option<&mut String> {
     match stage {
-        ConnectStage::ProviderName => Some(&mut connect.custom_name),
         ConnectStage::Endpoint => Some(&mut connect.custom_endpoint),
         ConnectStage::ModelsEndpoint => Some(&mut connect.custom_models_url),
         ConnectStage::CustomToken => Some(&mut connect.custom_token),

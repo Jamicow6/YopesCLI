@@ -21,14 +21,13 @@ impl App {
             ConnectStage::ApiKey => self.handle_connect_api_key(key),
             ConnectStage::AddProvider => self.handle_connect_add_provider(key),
             ConnectStage::RenameProvider => self.handle_connect_rename_provider(key),
-            ConnectStage::ProviderName
-            | ConnectStage::Endpoint
+            ConnectStage::Endpoint
             | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
             | ConnectStage::ModelContextWindow => self.handle_connect_custom_text(key),
-            ConnectStage::Auth | ConnectStage::CustomModels => self.handle_connect_choice_key(key),
+            ConnectStage::CustomModels => self.handle_connect_choice_key(key),
             ConnectStage::Password => self.handle_connect_password(key),
             ConnectStage::Unlock => self.handle_connect_unlock(key),
         }

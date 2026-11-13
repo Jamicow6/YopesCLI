@@ -318,10 +318,7 @@ pub(super) fn draw_connect_list(
     }
     if !matches!(
         connect.stage,
-        ConnectStage::Providers
-            | ConnectStage::Models
-            | ConnectStage::Auth
-            | ConnectStage::CustomModels
+        ConnectStage::Providers | ConnectStage::Models | ConnectStage::CustomModels
     ) {
         return;
     }
@@ -448,8 +445,6 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
         ),
         ConnectStage::Endpoint => "enter continue · esc back".to_owned(),
         ConnectStage::ModelsEndpoint => "enter continue · blank uses <endpoint>/models".to_owned(),
-        ConnectStage::ProviderName => "enter continue · esc close".to_owned(),
-        ConnectStage::Auth => "↑↓ choose · enter continue · esc back".to_owned(),
         ConnectStage::CustomToken => "enter continue · esc back".to_owned(),
         ConnectStage::ModelId => {
             if connect.has_custom_models() {

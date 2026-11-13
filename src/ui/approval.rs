@@ -75,7 +75,7 @@ pub(super) fn tool_result_lines(
     start_row: usize,
     call_name: Option<&str>,
 ) -> Vec<Line<'static>> {
-    let outer = usize::from(width).max(1);
+    let outer = usize::from(width).saturating_sub(1).max(1);
     let inner_width = outer.saturating_sub(4);
     let failed = message.content.starts_with("Error: ");
     let border = if failed { ERROR } else { MUTED };
@@ -231,24 +231,28 @@ pub(super) fn frame_lines(
         Span::styled("─╮", Style::default().fg(border)),
     ]));
     for line in body {
-        let content = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        let content = normalize_line(&content);
-        let clipped = truncate(&content, inner_width);
-        let used = UnicodeWidthStr::width(clipped.as_str());
-        let style = line
-            .spans
-            .first()
-            .map_or_else(Style::default, |span| span.style);
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(border)),
-            Span::styled(clipped, style),
-            Span::raw(" ".repeat(inner_width.saturating_sub(used) + 1)),
-            Span::styled("│", Style::default().fg(border)),
-        ]));
+        let mut used = 0usize;
+        let mut row_spans = vec![Span::styled("│ ", Style::default().fg(border))];
+        for span in &line.spans {
+            let normalized = normalize_line(&span.content);
+            let span_width = UnicodeWidthStr::width(normalized.as_str());
+            if used + span_width <= inner_width {
+                used += span_width;
+                row_spans.push(Span::styled(normalized, span.style));
+            } else {
+                let room = inner_width.saturating_sub(used);
+                if room > 0 {
+                    let clipped = truncate(&normalized, room);
+                    used += UnicodeWidthStr::width(clipped.as_str());
+                    row_spans.push(Span::styled(clipped, span.style));
+                }
+                break;
+            }
+        }
+        let padding = inner_width.saturating_sub(used) + 1;
+        row_spans.push(Span::raw(" ".repeat(padding)));
+        row_spans.push(Span::styled("│", Style::default().fg(border)));
+        lines.push(Line::from(row_spans));
     }
     lines.push(Line::styled(
         format!("╰{}╯", "─".repeat(total.saturating_sub(2))),

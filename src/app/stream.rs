@@ -111,6 +111,7 @@ impl App {
                     .map(|compaction| (compaction.split, compaction.text.clone()));
                 if let Some((split, summary)) = compacted {
                     self.active = None;
+                    self.markdown_cache.clear();
                     if summary.trim().is_empty() {
                         self.info("Compaction returned nothing; sending the full history.");
                     } else {

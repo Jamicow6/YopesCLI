@@ -13,7 +13,6 @@ impl App {
             match connect.stage {
                 ConnectStage::ApiKey => connect.api_key.push_str(&clean),
                 ConnectStage::Password | ConnectStage::Unlock => connect.password.push_str(&clean),
-                ConnectStage::ProviderName => connect.custom_name.push_str(&clean),
                 ConnectStage::Endpoint => connect.custom_endpoint.push_str(&clean),
                 ConnectStage::ModelsEndpoint => connect.custom_models_url.push_str(&clean),
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
@@ -32,7 +31,7 @@ impl App {
                         target.push_str(&clean);
                     }
                 }
-                ConnectStage::Auth | ConnectStage::CustomModels => {}
+                ConnectStage::CustomModels => {}
             }
             return;
         }

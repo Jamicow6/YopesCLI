@@ -155,7 +155,7 @@ fn code_close(width: u16) -> Line<'static> {
 }
 
 fn border_line(prefix: &str, width: u16) -> Line<'static> {
-    let total = usize::from(width).max(1);
+    let total = usize::from(width).saturating_sub(1).max(1);
     let mut text = super::truncate(prefix, total);
     let used = UnicodeWidthStr::width(text.as_str());
     text.push_str(&"─".repeat(total.saturating_sub(used)));
@@ -164,7 +164,7 @@ fn border_line(prefix: &str, width: u16) -> Line<'static> {
 
 fn rule_line(width: u16) -> Line<'static> {
     Line::styled(
-        "─".repeat(usize::from(width).max(1)),
+        "─".repeat(usize::from(width).saturating_sub(1).max(1)),
         Style::default().fg(MUTED),
     )
 }
