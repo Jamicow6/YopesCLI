@@ -8,9 +8,13 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::config::ProviderKind;
+
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
 const OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
+pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 pub type FetchResult = std::result::Result<Catalog, String>;
 
@@ -60,19 +64,37 @@ pub struct Provider {
 }
 
 impl Provider {
+    pub fn kind(&self, id: &str) -> ProviderKind {
+        if id == "anthropic" || self.npm.as_deref() == Some("@ai-sdk/anthropic") {
+            ProviderKind::Anthropic
+        } else if id == "google" || self.npm.as_deref() == Some("@ai-sdk/google") {
+            ProviderKind::Gemini
+        } else {
+            ProviderKind::OpenAi
+        }
+    }
+
     pub fn base_url(&self, id: &str) -> String {
         self.api
             .as_deref()
             .map(str::trim)
             .filter(|api| !api.is_empty())
             .map(ToOwned::to_owned)
-            .or_else(|| (id == "openai").then(|| OPENAI_BASE_URL.to_owned()))
+            .or_else(|| match self.kind(id) {
+                ProviderKind::Anthropic => Some(ANTHROPIC_BASE_URL.to_owned()),
+                ProviderKind::Gemini => Some(GEMINI_BASE_URL.to_owned()),
+                _ => (id == "openai").then(|| OPENAI_BASE_URL.to_owned()),
+            })
             .unwrap_or_default()
     }
 
     fn is_connectable(&self, id: &str) -> bool {
         if id == "openai" {
             return true;
+        }
+        let kind = self.kind(id);
+        if matches!(kind, ProviderKind::Anthropic | ProviderKind::Gemini) {
+            return !self.base_url(id).is_empty();
         }
         self.npm.as_deref() == Some(OPENAI_COMPATIBLE)
             && self
@@ -227,6 +249,11 @@ mod tests {
             "npm": "@ai-sdk/anthropic",
             "api": "https://api.anthropic.com/v1",
             "models": {"claude": {"name": "Claude"}}
+        },
+        "google": {
+            "name": "Google",
+            "npm": "@ai-sdk/google",
+            "models": {"gemini-2.0-flash": {"name": "Gemini 2.0 Flash"}}
         }
     }"#;
 
@@ -243,13 +270,13 @@ mod tests {
     }
 
     #[test]
-    fn only_openai_compatible_providers_are_listed() {
+    fn supported_providers_are_listed() {
         let catalog: Catalog = serde_json::from_str(SAMPLE).unwrap();
         let ids = connectable_providers(&catalog)
             .into_iter()
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["openai", "openrouter"]);
+        assert_eq!(ids, vec!["anthropic", "google", "openai", "openrouter"]);
     }
 
     #[test]
