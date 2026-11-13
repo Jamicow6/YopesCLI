@@ -221,6 +221,22 @@ impl App {
             }
             KeyCode::Esc if self.is_streaming() => self.stop_streaming(),
             KeyCode::Esc => Action::None,
+            KeyCode::BackTab if self.palette_open() => {
+                self.palette_move(false);
+                Action::None
+            }
+            KeyCode::Tab if self.palette_open() && key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.palette_move(false);
+                Action::None
+            }
+            KeyCode::BackTab => {
+                self.cycle_tools_mode();
+                Action::None
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.cycle_tools_mode();
+                Action::None
+            }
             KeyCode::Tab if self.palette_open() => {
                 self.palette_complete();
                 Action::None
@@ -308,6 +324,16 @@ impl App {
         match key.code {
             KeyCode::Esc => self.deny_pending_tool(),
             KeyCode::Enter => self.approve_pending_tool(false),
+            KeyCode::BackTab => {
+                self.tools_mode = ToolsMode::Auto;
+                self.info("Permission: yolo — all commands and edits run automatically");
+                self.approve_pending_tool(true)
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.tools_mode = ToolsMode::Auto;
+                self.info("Permission: yolo — all commands and edits run automatically");
+                self.approve_pending_tool(true)
+            }
             KeyCode::Char('a' | 'A')
                 if !key
                     .modifiers
@@ -374,6 +400,14 @@ impl App {
         for report in self.changes.values_mut() {
             report.side_by_side = self.diff_sides;
         }
+    }
+
+    pub(crate) fn cycle_tools_mode(&mut self) {
+        self.tools_mode = self.tools_mode.next_permission();
+        self.info(format!(
+            "Permission: {} — Shift+Tab again to cycle on · yolo · ask",
+            self.tools_mode.label()
+        ));
     }
 
     pub(crate) fn approve_pending_tool(&mut self, always: bool) -> Action {
