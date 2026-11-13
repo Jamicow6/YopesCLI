@@ -100,7 +100,8 @@ const MASCOT_WIDTH: usize = 15;
 const YARN_TRAVEL: usize = 6;
 /// Tool output rows shown before the rest is collapsed.
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 7;
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// Custom loading circle instead of the generic braille spinner.
+const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const PALETTE_WIDTH: u16 = 60;
 
 /// One frame of the welcome mascot.

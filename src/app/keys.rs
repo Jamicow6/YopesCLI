@@ -19,6 +19,9 @@ impl App {
                 ConnectStage::CustomToken => connect.custom_token.push_str(&clean),
                 ConnectStage::ModelId => connect.custom_model_id.push_str(&clean),
                 ConnectStage::ModelName => connect.custom_model_name.push_str(&clean),
+                ConnectStage::ModelContextWindow => {
+                    connect.custom_model_context_window.push_str(&clean)
+                }
                 ConnectStage::Providers | ConnectStage::Models => {
                     connect.filter.push_str(&clean);
                     connect.selected = 0;
@@ -157,7 +160,6 @@ impl App {
                 }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
                 KeyCode::Char('v') => return Action::PasteImage,
-                KeyCode::Char('g') => return Action::ToggleMouseCapture,
                 KeyCode::Char('p') if !self.session.tasks.is_empty() => {
                     self.progress_collapsed = !self.progress_collapsed;
                 }

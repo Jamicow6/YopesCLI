@@ -26,7 +26,8 @@ impl App {
             | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
-            | ConnectStage::ModelName => self.handle_connect_custom_text(key),
+            | ConnectStage::ModelName
+            | ConnectStage::ModelContextWindow => self.handle_connect_custom_text(key),
             ConnectStage::Auth | ConnectStage::CustomModels => self.handle_connect_choice_key(key),
             ConnectStage::Password => self.handle_connect_password(key),
             ConnectStage::Unlock => self.handle_connect_unlock(key),

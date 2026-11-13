@@ -29,6 +29,23 @@ pub fn preview(call: &ToolCall) -> String {
             }
         }
         "read_file" => string("path"),
+        "multi_read" => {
+            let all = arguments
+                .as_ref()
+                .and_then(|value| value.get("all"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let count = arguments
+                .as_ref()
+                .and_then(|value| value.get("paths"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if all {
+                format!("all files in {count} folders")
+            } else {
+                format!("{count} paths")
+            }
+        }
         "read_image" => string("path"),
         "glob" => clip(&string("pattern"), 160),
         "grep" => clip(&string("pattern"), 160),

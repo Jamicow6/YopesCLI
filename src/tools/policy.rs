@@ -51,6 +51,8 @@ pub fn system_prompt(tools_enabled: bool) -> String {
              do not read whole directories blindly. \
              For several replacements in one or more files, batch them with multi_edit: \
              it applies every edit in order, and one failure refuses the whole batch. \
+             To read several files in one call, batch them with multi_read: \
+             with `all: true` it reads every file directly inside each folder in `paths`. \
              Use web_search for anything newer than your knowledge or that needs current \
              facts, and cite the URL you used. \
              Use web_fetch to read the text of a specific page, such as one surfaced by \

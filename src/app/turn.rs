@@ -29,10 +29,12 @@ impl App {
 
     pub(crate) fn submit(&mut self) -> Action {
         let steering = self.is_streaming();
-        if self.is_busy() && !steering {
-            self.info("Wait for the current response or tool to finish.");
+        // A pending approval still owns the keyboard; a running tool does not.
+        if self.approval.is_some() {
+            self.info("Approve or deny the pending tool first.");
             return Action::None;
         }
+        let tool_busy = self.running_tool.is_some() || !self.pending_tools.is_empty();
         if steering
             && self
                 .active
@@ -55,9 +57,9 @@ impl App {
                 .any(|command| prompt.split_whitespace().next() == Some(command.name))
             {
                 // A command that only reads or changes a setting is safe to
-                // run while the model is answering; the ones that would
-                // disturb the turn are not.
-                if steering && !command_is_safe_while_streaming(&prompt) {
+                // run while the model is answering or a tool is running; the
+                // ones that would disturb the turn are not.
+                if (steering || tool_busy) && !command_is_safe_while_streaming(&prompt) {
                     // The command is put back, so it can be run after the
                     // response finishes.
                     self.input.set(prompt);
@@ -109,6 +111,13 @@ impl App {
         let mut message = Message::new(Role::User, value);
         message.images = std::mem::take(&mut self.attachments);
         self.session.messages.push(message);
+        // Chat during a tool run queues the message: the post-tool
+        // continuation sends it together with the tool result.
+        if tool_busy {
+            self.follow_tail = true;
+            self.save_session();
+            return Action::None;
+        }
         self.begin_turn()
     }
 
@@ -116,8 +125,15 @@ impl App {
     /// summarize the older turns first, then send the real request.
     pub(crate) fn begin_turn(&mut self) -> Action {
         let total = Session::estimate_tokens(&self.session.messages);
-        if self.auto_compact && total > COMPACTION_THRESHOLD_TOKENS {
-            if let Some(split) = self.session.compaction_split(COMPACTION_KEEP_TOKENS) {
+        let (threshold, keep) = match self.model_context_window() {
+            Some(window) => (
+                window / COMPACTION_THRESHOLD_FRAC,
+                window / COMPACTION_KEEP_FRAC,
+            ),
+            None => (COMPACTION_THRESHOLD_DEFAULT, COMPACTION_KEEP_DEFAULT),
+        };
+        if self.auto_compact && total > threshold {
+            if let Some(split) = self.session.compaction_split(keep) {
                 if split > 0 {
                     return self.begin_compaction(split);
                 }
@@ -275,7 +291,11 @@ impl App {
                         self.error("No provider connected. Run /connect to get started.");
                     } else if let Some(split) = self
                         .session
-                        .compaction_split(COMPACTION_KEEP_TOKENS)
+                        .compaction_split(
+                            self.model_context_window()
+                                .map(|w| w / COMPACTION_KEEP_FRAC)
+                                .unwrap_or(COMPACTION_KEEP_DEFAULT),
+                        )
                         .filter(|split| *split > 0)
                     {
                         return self.begin_compaction(split);
@@ -503,5 +523,86 @@ impl App {
         self.info("Response stopped. Partial output was kept.");
         self.save_session();
         Action::Cancel(active.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AuthKind, Config, ProviderKind};
+    use crate::session::ToolCall;
+    use std::time::Instant;
+
+    fn test_app() -> App {
+        let config = Config {
+            provider: ProviderKind::OpenAi,
+            provider_label: "OpenAI".to_owned(),
+            model: "gpt-4o".to_owned(),
+            base_url: "https://api.openai.com/v1".to_owned(),
+            api_key: Some("test-key".to_owned()),
+            auth: AuthKind::Bearer,
+            models: Vec::new(),
+            system_prompt: None,
+            custom_providers: Vec::new(),
+            session_path: None,
+            sessions_dir: None,
+            config_path: PathBuf::new(),
+            tavily_api_key: None,
+            auto_compact: false,
+            reasoning_effort: None,
+        };
+        let backend = Backend::new(&config).expect("backend");
+        App::new(
+            Session::new(),
+            backend,
+            None,
+            None,
+            PathBuf::new(),
+            Vec::new(),
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn submit_during_tool_run_queues_message_and_blocks_unsafe_commands() {
+        let mut app = test_app();
+        app.running_tool = Some(RunningTool {
+            call: ToolCall::new("call-1", "test_tool", "{}"),
+            started: Instant::now(),
+            before: None,
+            existed: false,
+            targets: Vec::new(),
+        });
+
+        // Unsafe command while tool runs is blocked and restored to input
+        app.input.set("/new");
+        let action = app.submit();
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input.value, "/new");
+        assert!(app.notice.is_some());
+
+        // Chat message while tool runs is queued into session messages
+        app.input.set("queued turn");
+        let action = app.submit();
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.session.messages.len(), 1);
+        assert_eq!(app.session.messages[0].content, "queued turn");
+        assert_eq!(app.session.messages[0].role, Role::User);
+        assert!(app.follow_tail);
+
+        // Approval gate blocks submit
+        let mut app_approval = test_app();
+        app_approval.approval = Some(ToolApproval {
+            call: ToolCall::new("call-2", "test_tool", "{}"),
+            note: None,
+            diffs: Vec::new(),
+            scroll: 0,
+            page_height: 0,
+        });
+        app_approval.input.set("blocked while waiting approval");
+        let action = app_approval.submit();
+        assert!(matches!(action, Action::None));
+        assert!(app_approval.session.messages.is_empty());
     }
 }

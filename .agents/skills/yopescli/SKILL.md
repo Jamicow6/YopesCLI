@@ -31,7 +31,7 @@ YopesCLI is a Rust/Ratatui terminal coding agent. It can chat with OpenAI-compat
 
 Available tools include:
 
-- `list_dir`, `read_file`, `glob`, `grep` (optionally filter by file pattern).
+- `list_dir`, `read_file`, `multi_read` (batch reads; `all` reads every file directly in each folder), `glob`, `grep` (optionally filter by file pattern).
 - `write_file`, `edit_file`, `multi_edit` (batch edits; validation happens before applying).
 - `run_command` (Git Bash preferred on Windows; otherwise cmd or sh).
 - `bash_background`, `bash_output`, `bash_kill` for background shell jobs.

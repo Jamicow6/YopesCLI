@@ -263,6 +263,7 @@ pub(crate) fn save_connection(
             name: model.name.trim().to_owned(),
             input_cost: model.input_cost,
             output_cost: model.output_cost,
+            context_window: model.context_window,
         });
     }
     let mut saved = load_saved(path)?.unwrap_or_else(SavedConfig::empty);

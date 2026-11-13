@@ -31,9 +31,6 @@ pub enum Action {
     },
     /// Read the clipboard on Ctrl+V and attach an image when it holds one.
     PasteImage,
-    /// Turn mouse capture off so the terminal's own text selection works,
-    /// or back on to keep the app interactive.
-    ToggleMouseCapture,
     Quit,
     LoadCatalog,
     /// Fetch models.dev again, bypassing the cached copy.
