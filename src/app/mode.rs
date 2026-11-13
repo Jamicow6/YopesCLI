@@ -14,7 +14,7 @@ impl ToolsMode {
         match self {
             Self::On => "on",
             Self::Off => "off",
-            Self::Auto => "auto",
+            Self::Auto => "yolo",
             Self::Ask => "ask",
         }
     }
@@ -23,18 +23,27 @@ impl ToolsMode {
         match self {
             Self::On => "edits run automatically; commands the model flags as risky ask",
             Self::Off => "tools are not offered to the model",
-            Self::Auto => "all tool calls run automatically",
+            Self::Auto => "YOLO: all commands and edits run automatically without asking",
             Self::Ask => "every command the model flags as risky asks",
         }
     }
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
-            "on" => Some(Self::On),
+            "on" | "normal" => Some(Self::On),
             "off" => Some(Self::Off),
-            "auto" => Some(Self::Auto),
+            "auto" | "yolo" => Some(Self::Auto),
             "ask" => Some(Self::Ask),
             _ => None,
+        }
+    }
+
+    pub const fn next_permission(self) -> Self {
+        match self {
+            Self::On => Self::Auto,
+            Self::Auto => Self::Ask,
+            Self::Ask => Self::On,
+            Self::Off => Self::On,
         }
     }
 
@@ -106,14 +115,24 @@ impl Mode {
     }
 
     /// An instruction appended to the system prompt for this turn.
-    pub(crate) fn instruction(self) -> Option<&'static str> {
+    pub(crate) fn instruction(self, tools_mode: ToolsMode) -> Option<&'static str> {
         match self {
             // Build also states its mode: without a note, nothing tells the
             // model that plan mode ended, and it keeps gating itself.
-            Self::Build => Some(
-                "BUILD MODE: changes may be applied. Use the tools to write files, edit files, \
-                 and run commands as the user asked, subject to the approval rules above.",
-            ),
+            Self::Build => match tools_mode {
+                ToolsMode::Auto => Some(
+                    "BUILD MODE (YOLO): changes may be applied directly. All commands and \
+                     tool calls are pre-approved by the user. Run risky, destructive, or \
+                     modifying commands (including file deletion, git resets, and package \
+                     installations) immediately via tools without asking for confirmation \
+                     or permission. Never end a response asking if you should run a \
+                     command — execute it directly.",
+                ),
+                _ => Some(
+                    "BUILD MODE: changes may be applied. Use the tools to write files, edit files, \
+                     and run commands as the user asked, subject to the approval rules above.",
+                ),
+            },
             Self::Plan => Some(
                 "PLAN MODE: research and propose a plan only. Do not write files, edit files, \
                  or run commands; the user will switch to build mode to apply changes. Reading \
@@ -126,7 +145,7 @@ impl Mode {
 
 #[cfg(test)]
 mod tests {
-    use super::Mode;
+    use super::{Mode, ToolsMode};
 
     #[test]
     fn the_mode_cycle_and_denials_match_the_labels() {
@@ -145,13 +164,22 @@ mod tests {
         assert!(Mode::Chat.denied("read_file"));
         assert!(
             Mode::Plan
-                .instruction()
+                .instruction(ToolsMode::On)
                 .is_some_and(|note| note.contains("PLAN"))
         );
         assert!(
             Mode::Build
-                .instruction()
+                .instruction(ToolsMode::On)
                 .is_some_and(|note| note.contains("BUILD"))
         );
+        assert!(
+            Mode::Build
+                .instruction(ToolsMode::Auto)
+                .is_some_and(|note| note.contains("YOLO"))
+        );
+        assert_eq!(ToolsMode::On.next_permission(), ToolsMode::Auto);
+        assert_eq!(ToolsMode::Auto.next_permission(), ToolsMode::Ask);
+        assert_eq!(ToolsMode::Ask.next_permission(), ToolsMode::On);
+        assert_eq!(ToolsMode::Off.next_permission(), ToolsMode::On);
     }
 }
