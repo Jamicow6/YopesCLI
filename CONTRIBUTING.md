@@ -1,5 +1,7 @@
 # Contributing
 
+*We are open to Pull Request* 
+
 Thanks for contributing to YopesCLI. These instructions cover building and running the project from a checkout.
 
 ## Install on PATH
