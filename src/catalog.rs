@@ -257,7 +257,6 @@ pub fn provider_models(provider: &Provider) -> Vec<(&str, &Model)> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
     use super::{
         Catalog, FASFAST_BASE_URL, FasfasModels, connectable_providers, fasfas_catalog,
