@@ -11,6 +11,8 @@ pub(super) const EDIT_TOKEN_ID: &str = "edit-token";
 pub(super) const EDIT_MODELS_URL_ID: &str = "edit-models-url";
 /// Row that refetches the model list from that endpoint.
 pub(super) const FETCH_MODELS_ID: &str = "fetch-models";
+/// Row that deletes an existing saved custom provider.
+pub(super) const REMOVE_PROVIDER_ID: &str = "remove-provider";
 /// Row that replaces the key of a catalog provider from its model list.
 pub(super) const EDIT_KEY_ID: &str = "edit-key";
 /// Row that forces a models.dev refetch from the provider list.
@@ -414,6 +416,18 @@ impl ConnectState {
                         active: false,
                     });
                 }
+                if self.custom_provider_id.is_some()
+                    && (filter.is_empty() || "remove provider".contains(filter.as_str()))
+                {
+                    items.push(ConnectItem {
+                        id: REMOVE_PROVIDER_ID.to_owned(),
+                        title: "Remove provider".to_owned(),
+                        detail: "delete this endpoint and its models".to_owned(),
+                        logo: "✕",
+                        custom_id: None,
+                        active: false,
+                    });
+                }
                 items
             }
             ConnectStage::ApiKey
@@ -440,7 +454,12 @@ impl ConnectState {
         let item = items.get(self.selected.min(items.len().saturating_sub(1)))?;
         if matches!(
             item.id.as_str(),
-            ADD_MODEL_ID | EDIT_ENDPOINT_ID | EDIT_TOKEN_ID | EDIT_MODELS_URL_ID | FETCH_MODELS_ID
+            ADD_MODEL_ID
+                | EDIT_ENDPOINT_ID
+                | EDIT_TOKEN_ID
+                | EDIT_MODELS_URL_ID
+                | FETCH_MODELS_ID
+                | REMOVE_PROVIDER_ID
         ) {
             return None;
         }
@@ -658,7 +677,7 @@ mod tests {
     }
     #[test]
     fn delete_removes_only_a_model_row() {
-        use super::{ConnectStage, ConnectState, FETCH_MODELS_ID};
+        use super::{ConnectStage, ConnectState, FETCH_MODELS_ID, REMOVE_PROVIDER_ID};
         use crate::config::SavedModel;
         let mut connect = ConnectState::loading();
         connect.stage = ConnectStage::CustomModels;
@@ -686,6 +705,7 @@ mod tests {
         let last = connect.items().len().saturating_sub(1);
         connect.selected = last;
         assert!(connect.remove_selected_model().is_none());
+        assert_eq!(connect.items()[last].id, REMOVE_PROVIDER_ID);
         assert_eq!(connect.custom_models.len(), 1);
         assert_eq!(connect.custom_models[0].id, "two");
     }

@@ -281,7 +281,9 @@ pub(super) fn draw_connect_list(
 
 pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
     let text = match connect.stage {
-        ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
+        ConnectStage::Providers => {
+            "↑↓ move · type to filter · enter choose · delete / ctrl+d remove · esc close".to_owned()
+        }
         ConnectStage::Models => {
             "↑↓ move · type to filter · enter choose · tab context · esc back".to_owned()
         }

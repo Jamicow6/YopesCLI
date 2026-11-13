@@ -217,6 +217,21 @@ impl App {
             "/help" => self.show_help = true,
             "/new" => self.new_session(),
             "/connect" => return self.begin_connect(),
+            "/disconnect" => {
+                let target = parts.collect::<Vec<_>>().join(" ");
+                if target.is_empty() {
+                    let active_endpoint = self.backend.base_url().to_owned();
+                    if active_endpoint.is_empty()
+                        || self.backend.provider_kind() == ProviderKind::Unconfigured
+                    {
+                        self.info("No provider currently connected.");
+                    } else {
+                        self.disconnect_endpoint(&active_endpoint);
+                    }
+                } else {
+                    self.disconnect_named_provider(&target);
+                }
+            }
             "/cd" => {
                 let path = parts.collect::<Vec<_>>().join(" ");
                 self.change_directory(&path);
@@ -454,6 +469,76 @@ impl App {
             }
             Err(error) => self.error(format!("Could not disconnect: {error:#}")),
         }
+    }
+
+    /// Remove a saved custom provider, resetting the session when it is the
+    /// provider in use.
+    pub(crate) fn delete_custom_provider(&mut self, id: &str) {
+        if self.is_busy() {
+            self.info("Finish the current turn before removing a provider.");
+            return;
+        }
+        let target_endpoint = self
+            .custom_providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .map(|provider| provider.base_url.trim_end_matches('/').to_owned());
+        match config::delete_custom_provider(&self.config_path, id) {
+            Ok(()) => {
+                if let Some(target) = target_endpoint {
+                    if self.backend.base_url().trim_end_matches('/') == target {
+                        self.backend.configure(
+                            ProviderKind::Unconfigured,
+                            "not connected".to_owned(),
+                            String::new(),
+                            String::new(),
+                            None,
+                            AuthKind::Bearer,
+                            Vec::new(),
+                        );
+                    }
+                }
+                self.custom_providers = config::load_custom_providers(&self.config_path);
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.saved_custom = self.custom_providers.clone();
+                    connect.error = None;
+                }
+                self.info("Provider removed.");
+            }
+            Err(error) => self.error(format!("Could not remove provider: {error:#}")),
+        }
+    }
+
+    /// Disconnect a provider by name, provider id, or endpoint.
+    // ponytail: linear scan over providers; fast enough for typical <20 saved endpoints.
+    pub(crate) fn disconnect_named_provider(&mut self, target: &str) {
+        let needle = target.trim().to_ascii_lowercase();
+        if let Some(custom) = self.custom_providers.iter().find(|p| {
+            p.id.to_ascii_lowercase() == needle || p.name.to_ascii_lowercase() == needle
+        }) {
+            let id = custom.id.clone();
+            self.delete_custom_provider(&id);
+            return;
+        }
+        let connected = config::load_connected_providers(&self.config_path);
+        if let Some(provider) = connected.iter().find(|p| {
+            p.provider_id
+                .as_ref()
+                .is_some_and(|id| id.to_ascii_lowercase() == needle)
+                || p.name.to_ascii_lowercase() == needle
+                || p.base_url.to_ascii_lowercase() == needle
+                || p.base_url.trim_end_matches('/').to_ascii_lowercase() == needle
+        }) {
+            let endpoint = provider.base_url.clone();
+            self.disconnect_endpoint(&endpoint);
+            return;
+        }
+        if self.backend.provider_label().to_ascii_lowercase() == needle {
+            let endpoint = self.backend.base_url().to_owned();
+            self.disconnect_endpoint(&endpoint);
+            return;
+        }
+        self.info(format!("No saved provider matches '{target}'."));
     }
 
     /// Store the model of the active connection, so the choice survives a

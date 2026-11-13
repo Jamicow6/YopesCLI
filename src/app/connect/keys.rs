@@ -63,6 +63,16 @@ impl App {
                     connect.selected = usize::MAX;
                 }
             }
+            KeyCode::Delete => {
+                if self
+                    .connect
+                    .as_ref()
+                    .is_some_and(|c| c.stage == ConnectStage::Providers)
+                {
+                    self.disconnect_selected_provider();
+                    return Action::None;
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(connect) = self.connect.as_mut() {
                     connect.filter.pop();
@@ -106,7 +116,7 @@ impl App {
         Action::None
     }
 
-    /// Ctrl+D on a provider row: forget the stored key of the ticked provider.
+    /// Ctrl+D or Delete on a provider row: remove custom provider or forget stored key.
     fn disconnect_selected_provider(&mut self) {
         let Some(connect) = self.connect.as_ref() else {
             return;
@@ -114,14 +124,26 @@ impl App {
         let Some(item) = connect.selected_item() else {
             return;
         };
-        if !item.active {
-            self.info("Only the connected provider is marked ✓; select it and press ctrl+d.");
+        if let Some(custom_id) = item.custom_id.clone() {
+            let name = item.title.clone();
+            self.delete_custom_provider(&custom_id);
+            if let Some(connect) = self.connect.as_mut() {
+                connect.selected = connect
+                    .selected
+                    .min(connect.items().len().saturating_sub(1));
+            }
+            self.info(format!("Removed provider {name}"));
             return;
         }
         let Some(endpoint) = connect.selected_endpoint() else {
             self.info("This row has no saved endpoint to disconnect.");
             return;
         };
+        let has_key = config::load_endpoint_secret(&self.config_path, &endpoint).is_some();
+        if !item.active && !has_key {
+            self.info("Only saved or connected providers can be disconnected.");
+            return;
+        }
         self.disconnect_endpoint(&endpoint);
         // Reset the selection so the now-unconfigured backend does not keep a
         // stale active row under the cursor.
@@ -182,6 +204,7 @@ impl App {
                             && item.id != EDIT_TOKEN_ID
                             && item.id != EDIT_MODELS_URL_ID
                             && item.id != FETCH_MODELS_ID
+                            && item.id != REMOVE_PROVIDER_ID
                         {
                             let current_context = connect
                                 .custom_models

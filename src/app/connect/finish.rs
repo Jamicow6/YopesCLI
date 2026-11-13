@@ -22,6 +22,26 @@ impl App {
         {
             return self.fetch_custom_models();
         }
+        if item.id == REMOVE_PROVIDER_ID
+            && self
+                .connect
+                .as_ref()
+                .is_some_and(|connect| connect.stage == ConnectStage::CustomModels)
+        {
+            let custom_id = self
+                .connect
+                .as_ref()
+                .and_then(|c| c.custom_provider_id.clone());
+            if let Some(id) = custom_id {
+                self.delete_custom_provider(&id);
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.stage = ConnectStage::Providers;
+                    connect.selected = 0;
+                    connect.error = None;
+                }
+            }
+            return Action::None;
+        }
         let Some(connect) = self.connect.as_mut() else {
             return Action::None;
         };
