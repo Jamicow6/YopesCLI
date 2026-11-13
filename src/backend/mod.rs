@@ -149,6 +149,14 @@ impl Backend {
         self.model = model;
     }
 
+    pub fn update_model_context_window(&mut self, model_id: &str, context_window: Option<u64>) {
+        for model in &mut self.models {
+            if model.id.eq_ignore_ascii_case(model_id) {
+                model.context_window = context_window;
+            }
+        }
+    }
+
     pub fn system_prompt(&self) -> Option<&str> {
         self.custom_prompt.as_deref()
     }

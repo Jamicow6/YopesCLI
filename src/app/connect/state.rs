@@ -255,7 +255,13 @@ impl ConnectState {
                             .and_then(|limit| limit.context)
                             .map_or_else(
                                 || id.to_owned(),
-                                |context| format!("{id} · {}k context", context / 1000),
+                                |context| {
+                                    if context >= 1000 {
+                                        format!("{id} · {}k context", context / 1000)
+                                    } else {
+                                        format!("{id} · {context} context")
+                                    }
+                                },
                             );
                         let provider_id = self.provider_id.as_deref().unwrap_or_default();
                         ConnectItem {
@@ -310,21 +316,35 @@ impl ConnectState {
                 let mut items: Vec<ConnectItem> = self
                     .custom_models
                     .iter()
-                    .map(|model| ConnectItem {
-                        id: model.id.clone(),
-                        title: if model.name.trim().is_empty() {
-                            model.id.clone()
-                        } else {
-                            model.name.clone()
-                        },
-                        detail: if model.name.trim().is_empty() {
-                            "model id".to_owned()
-                        } else {
-                            model.id.clone()
-                        },
-                        logo: "▸",
-                        custom_id: None,
-                        active: !active_model.is_empty() && model.id == active_model,
+                    .map(|model| {
+                        let detail = model.context_window.map_or_else(
+                            || {
+                                if model.name.trim().is_empty() {
+                                    "model id".to_owned()
+                                } else {
+                                    model.id.clone()
+                                }
+                            },
+                            |context| {
+                                if context >= 1000 {
+                                    format!("{} · {}k context", model.id, context / 1000)
+                                } else {
+                                    format!("{} · {context} context", model.id)
+                                }
+                            },
+                        );
+                        ConnectItem {
+                            id: model.id.clone(),
+                            title: if model.name.trim().is_empty() {
+                                model.id.clone()
+                            } else {
+                                model.name.clone()
+                            },
+                            detail,
+                            logo: "▸",
+                            custom_id: None,
+                            active: !active_model.is_empty() && model.id == active_model,
+                        }
                     })
                     .collect();
                 if filter.is_empty() || "add".contains(filter.as_str()) {
@@ -484,10 +504,7 @@ impl ConnectState {
         }
     }
     pub const fn uses_cursor(&self) -> bool {
-        !matches!(
-            self.stage,
-            ConnectStage::Auth | ConnectStage::CustomModels
-        )
+        !matches!(self.stage, ConnectStage::Auth | ConnectStage::CustomModels)
     }
     pub fn has_custom_models(&self) -> bool {
         !self.custom_models.is_empty()
@@ -671,5 +688,29 @@ mod tests {
         assert!(connect.remove_selected_model().is_none());
         assert_eq!(connect.custom_models.len(), 1);
         assert_eq!(connect.custom_models[0].id, "two");
+    }
+    #[test]
+    fn custom_model_items_display_context_window() {
+        use super::{ConnectStage, ConnectState};
+        use crate::config::SavedModel;
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::CustomModels;
+        connect.custom_models = vec![
+            SavedModel {
+                id: "one".to_owned(),
+                name: "One".to_owned(),
+                context_window: Some(128_000),
+                ..SavedModel::default()
+            },
+            SavedModel {
+                id: "two".to_owned(),
+                name: "Two".to_owned(),
+                context_window: Some(500),
+                ..SavedModel::default()
+            },
+        ];
+        let items = connect.items();
+        assert_eq!(items[0].detail, "one · 128k context");
+        assert_eq!(items[1].detail, "two · 500 context");
     }
 }

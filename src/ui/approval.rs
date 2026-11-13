@@ -79,7 +79,7 @@ pub(super) fn tool_result_lines(
     let inner_width = outer.saturating_sub(4);
     let failed = message.content.starts_with("Error: ");
     let border = if failed { ERROR } else { MUTED };
-    let rendered = message.content.split('\n').collect::<Vec<_>>();
+    let rendered: Vec<String> = message.content.split('\n').map(normalize_line).collect();
     // On a very narrow terminal a frame would not fit; draw the raw lines.
     if inner_width < 6 {
         return rendered
@@ -220,7 +220,7 @@ pub(super) fn frame_lines(
     // even when the label is clipped. The label gets what the corners, the left
     // cap, and one separating space leave over.
     let total = inner_width + 4;
-    let label = truncate(&label, total.saturating_sub(6));
+    let label = truncate(&normalize_line(&label), total.saturating_sub(6));
     let head = UnicodeWidthStr::width("╭─ ") + UnicodeWidthStr::width(label.as_str()) + 1;
     lines.push(Line::from(vec![
         Span::styled(format!("╭─ {label} "), Style::default().fg(border)),
@@ -236,6 +236,7 @@ pub(super) fn frame_lines(
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
+        let content = normalize_line(&content);
         let clipped = truncate(&content, inner_width);
         let used = UnicodeWidthStr::width(clipped.as_str());
         let style = line

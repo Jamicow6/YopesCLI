@@ -407,6 +407,58 @@ pub(crate) fn load_endpoint_secret(path: &Path, base_url: &str) -> Option<Stored
     stored.secret.has_key().then(|| stored.secret.clone())
 }
 
+/// Models saved for an endpoint, from provider keys or the active connection.
+pub(crate) fn load_endpoint_models(path: &Path, base_url: &str) -> Vec<SavedModel> {
+    let endpoint = base_url.trim_end_matches('/');
+    let Some(saved) = load_saved(path).ok().flatten() else {
+        return Vec::new();
+    };
+    if let Some(stored) = saved.provider_keys.get(endpoint) {
+        if !stored.models.is_empty() {
+            return stored.models.clone();
+        }
+    }
+    if saved.base_url.trim_end_matches('/') == endpoint {
+        return saved.models.clone();
+    }
+    Vec::new()
+}
+
+/// Update the context window limit for a model across active, saved, and custom lists.
+pub(crate) fn update_model_context_window(
+    path: &Path,
+    endpoint: &str,
+    model_id: &str,
+    context_window: Option<u64>,
+) -> Result<()> {
+    let endpoint = endpoint.trim_end_matches('/');
+    update_saved(path, |saved| {
+        if saved.base_url.trim_end_matches('/') == endpoint {
+            for model in &mut saved.models {
+                if model.id.eq_ignore_ascii_case(model_id) {
+                    model.context_window = context_window;
+                }
+            }
+        }
+        if let Some(provider) = saved.provider_keys.get_mut(endpoint) {
+            for model in &mut provider.models {
+                if model.id.eq_ignore_ascii_case(model_id) {
+                    model.context_window = context_window;
+                }
+            }
+        }
+        for custom in &mut saved.custom_providers {
+            if custom.base_url.trim_end_matches('/') == endpoint {
+                for model in &mut custom.models {
+                    if model.id.eq_ignore_ascii_case(model_id) {
+                        model.context_window = context_window;
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Every provider with a stored key, for the interface to show what is set up.
 pub(crate) fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
     let Some(saved) = load_saved(path).ok().flatten() else {
@@ -540,8 +592,9 @@ fn save_saved(path: &Path, saved: &SavedConfig) -> Result<()> {
 mod tests {
     use super::{
         AuthKind, CONFIG_VERSION, Connection, ProviderKind, SavedModel, delete_saved_model,
-        disconnect_provider, load_custom_providers, load_endpoint_secret, load_saved,
-        save_connection, save_reasoning_effort, save_system_prompt, slug_provider_name,
+        disconnect_provider, load_custom_providers, load_endpoint_models, load_endpoint_secret,
+        load_saved, save_connection, save_reasoning_effort, save_system_prompt, slug_provider_name,
+        update_model_context_window,
     };
 
     #[test]
@@ -795,6 +848,41 @@ mod tests {
                 .any(|model| model["id"] == "one")
         );
         assert_eq!(saved["model"], "one");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn updating_model_context_window_persists() {
+        use std::{fs, process};
+
+        let path = std::env::temp_dir().join(format!("yopes-context-test-{}.json", process::id()));
+        let _ = fs::remove_file(&path);
+        let connection = Connection {
+            provider: ProviderKind::OpenAi,
+            provider_name: "OpenAI".to_owned(),
+            model: "gpt-4o".to_owned(),
+            base_url: "https://api.openai.com/v1".to_owned(),
+            api_key: Some("sk-test".to_owned()),
+            api_key_env: None,
+            auth: AuthKind::Bearer,
+            models: vec![SavedModel {
+                id: "gpt-4o".to_owned(),
+                name: "GPT-4o".to_owned(),
+                context_window: None,
+                ..SavedModel::default()
+            }],
+            models_url: None,
+            custom_provider_id: None,
+            provider_id: Some("openai".to_owned()),
+            reuse_secret: false,
+        };
+        save_connection(&path, &connection, None).unwrap();
+        update_model_context_window(&path, "https://api.openai.com/v1", "gpt-4o", Some(64_000))
+            .unwrap();
+
+        let models = load_endpoint_models(&path, "https://api.openai.com/v1");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_window, Some(64_000));
         let _ = fs::remove_file(&path);
     }
 }

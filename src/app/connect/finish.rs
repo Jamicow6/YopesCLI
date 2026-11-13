@@ -77,12 +77,25 @@ impl App {
                     connect.custom_model_name.clear();
                     connect.stage = ConnectStage::ProviderName;
                 } else {
-                    connect.provider_id = Some(item.id);
+                    connect.provider_id = Some(item.id.clone());
                     connect.custom_flow = false;
                     // A catalog provider keeps its key under its own endpoint,
                     // so coming back to it does not ask for the key again.
                     let endpoint = connect.endpoint();
                     connect.stored_secret = config::load_endpoint_secret(&config_path, &endpoint);
+                    if let Some(catalog) = connect.catalog.as_mut() {
+                        if let Some(provider) = catalog.providers.get_mut(&item.id) {
+                            for model in config::load_endpoint_models(&config_path, &endpoint) {
+                                if let Some(context) = model.context_window {
+                                    if let Some(m) = provider.models.get_mut(&model.id) {
+                                        m.limit = Some(catalog::Limit {
+                                            context: Some(context),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                     connect.stage = ConnectStage::Models;
                 }
             }

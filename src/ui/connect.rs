@@ -282,7 +282,9 @@ pub(super) fn draw_connect_list(
 pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area: Rect) {
     let text = match connect.stage {
         ConnectStage::Providers => "↑↓ move · type to filter · enter choose · esc close".to_owned(),
-        ConnectStage::Models => "↑↓ move · type to filter · enter choose · esc back".to_owned(),
+        ConnectStage::Models => {
+            "↑↓ move · type to filter · enter choose · tab context · esc back".to_owned()
+        }
         ConnectStage::ApiKey => connect.required_env().map_or_else(
             || "enter continue · esc back · empty skips the key".to_owned(),
             |name| format!("enter continue · esc back · empty uses ${name}"),
@@ -300,8 +302,16 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
             }
         }
         ConnectStage::ModelName => "enter continue · empty uses the model id · esc back".to_owned(),
-        ConnectStage::ModelContextWindow => "enter add model · blank skips · esc back".to_owned(),
-        ConnectStage::CustomModels => "↑↓ choose · enter use · d delete · esc back".to_owned(),
+        ConnectStage::ModelContextWindow => {
+            if connect.custom_flow {
+                "enter add model · blank skips · esc back".to_owned()
+            } else {
+                "enter save · blank resets · esc back".to_owned()
+            }
+        }
+        ConnectStage::CustomModels => {
+            "↑↓ choose · enter use · tab context · d delete · esc back".to_owned()
+        }
         ConnectStage::Password => {
             "enter save · esc back · empty stores without encryption".to_owned()
         }
