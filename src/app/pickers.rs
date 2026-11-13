@@ -415,3 +415,116 @@ impl App {
         self.save_session();
     }
 }
+
+/// Filter state of the `/model` popup.
+#[derive(Debug, Clone, Default)]
+pub struct ListPicker {
+    pub filter: String,
+    pub selected: usize,
+}
+
+/// One row of the `/models` popup: a model on any connected provider.
+#[derive(Clone, Debug)]
+pub struct ModelChoice {
+    pub provider: String,
+    pub base_url: String,
+    pub id: String,
+    pub name: String,
+    /// True when the row belongs to the provider the session is using now.
+    pub active_provider: bool,
+}
+
+/// Saved models matching the picker filter, in stored order.
+pub(crate) fn model_matching<'a>(models: &'a [ModelChoice], filter: &str) -> Vec<&'a ModelChoice> {
+    let filter = filter.to_ascii_lowercase();
+    models
+        .iter()
+        .filter(|model| {
+            filter.is_empty()
+                || model.name.to_ascii_lowercase().contains(&filter)
+                || model.id.to_ascii_lowercase().contains(&filter)
+                || model.provider.to_ascii_lowercase().contains(&filter)
+        })
+        .collect()
+}
+
+/// One row of the `/sessions` popup: a saved session file with its title.
+#[derive(Clone)]
+pub struct SessionEntry {
+    pub path: PathBuf,
+    pub title: String,
+    pub modified: Option<SystemTime>,
+}
+
+/// Title probe: parse only the `title` field out of a session file.
+#[derive(Default, serde::Deserialize)]
+struct SessionProbe {
+    #[serde(default)]
+    title: String,
+}
+
+pub(crate) fn session_entry(path: PathBuf) -> SessionEntry {
+    let title = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SessionProbe>(&text).ok())
+        .map(|probe| probe.title.trim().to_owned())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "Untitled".to_owned());
+    let modified = fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    SessionEntry {
+        path,
+        title,
+        modified,
+    }
+}
+
+/// Saved sessions matching the picker filter, newest first.
+pub(crate) fn session_matching<'a>(
+    sessions: &'a [SessionEntry],
+    filter: &str,
+) -> Vec<&'a SessionEntry> {
+    let filter = filter.to_ascii_lowercase();
+    sessions
+        .iter()
+        .filter(|entry| filter.is_empty() || entry.title.to_ascii_lowercase().contains(&filter))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModelChoice, model_matching};
+
+    #[test]
+    fn model_matching_filters_on_name_id_and_provider() {
+        let choice = |provider: &str, id: &str, name: &str| ModelChoice {
+            provider: provider.to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            id: id.to_owned(),
+            name: name.to_owned(),
+            active_provider: provider == "active",
+        };
+        let models = vec![
+            choice("active", "glm-4.7", "GLM 4.7"),
+            choice("active", "gpt-5.2", ""),
+            choice("other", "claude-haiku", "Claude Haiku"),
+        ];
+
+        assert_eq!(
+            model_matching(&models, "").len(),
+            3,
+            "empty filter keeps everything"
+        );
+        let found = model_matching(&models, "GLM");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "glm-4.7");
+        let found = model_matching(&models, "gpt");
+        assert_eq!(found.len(), 1, "matches the id when the name is empty");
+        assert_eq!(found[0].id, "gpt-5.2");
+        let found = model_matching(&models, "other");
+        assert_eq!(found.len(), 1, "filters by provider too");
+        assert_eq!(found[0].id, "claude-haiku");
+        assert!(model_matching(&models, "llama").is_empty());
+    }
+}

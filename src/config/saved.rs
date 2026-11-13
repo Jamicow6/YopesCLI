@@ -1,283 +1,39 @@
-use std::{
-    collections::BTreeMap,
-    env, fs,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+//! The saved-config JSON: reading, writing, and everything that updates it.
+//!
+//! `SavedConfig` is the on-disk shape; the public types in `mod.rs` are what
+//! the rest of the crate sees. Its fields are `pub(super)` so the resolved
+//! `Config` can read them directly.
+
+use std::{collections::BTreeMap, env, fs, path::Path};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::credentials;
-
-const CONFIG_VERSION: u32 = 1;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum ProviderKind {
-    #[default]
-    #[value(skip)]
-    Unconfigured,
-    #[value(name = "openai")]
-    OpenAi,
-    Ollama,
-    #[value(skip)]
-    Custom,
-}
-
-impl ProviderKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Unconfigured => "unconfigured",
-            Self::OpenAi => "openai",
-            Self::Ollama => "ollama",
-            Self::Custom => "custom",
-        }
-    }
-
-    fn parse_env(value: &str) -> Result<Self> {
-        match value.to_ascii_lowercase().as_str() {
-            "none" | "unconfigured" => Ok(Self::Unconfigured),
-            "openai" | "openai-compatible" => Ok(Self::OpenAi),
-            "ollama" => Ok(Self::Ollama),
-            _ => bail!("invalid YOPES_PROVIDER `{value}`; expected openai or ollama"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AuthKind {
-    #[default]
-    Bearer,
-    XApiKey,
-    None,
-}
-
-impl AuthKind {
-    pub const fn choices() -> [Self; 3] {
-        [Self::Bearer, Self::XApiKey, Self::None]
-    }
-
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Bearer => "bearer",
-            Self::XApiKey => "x-api-key",
-            Self::None => "none",
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Bearer => "Bearer token",
-            Self::XApiKey => "x-api-key",
-            Self::None => "No auth",
-        }
-    }
-
-    pub const fn detail(self) -> &'static str {
-        match self {
-            Self::Bearer => "Authorization: Bearer <token>",
-            Self::XApiKey => "x-api-key: <token>",
-            Self::None => "send no authorization header",
-        }
-    }
-
-    pub const fn requires_token(self) -> bool {
-        !matches!(self, Self::None)
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::choices().into_iter().find(|auth| auth.id() == value)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct SavedModel {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    /// Dollars per million input tokens, when models.dev lists a price.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_cost: Option<f64>,
-    /// Dollars per million output tokens, when models.dev lists a price.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_cost: Option<f64>,
-    /// Manually set context-window size in tokens (e.g. 128000).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
-}
-
-#[derive(Debug, Parser)]
-#[command(name = "yopes", version = crate::update::current_version(), about = "A fast, session-first AI harness")]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Command>,
-
-    /// Model backend: openai or ollama.
-    #[arg(long, value_enum)]
-    provider: Option<ProviderKind>,
-
-    /// Model name sent to the provider.
-    #[arg(long)]
-    model: Option<String>,
-
-    /// Provider base URL, without /chat/completions or /api/chat.
-    #[arg(long)]
-    base_url: Option<String>,
-
-    /// Session JSON path. Defaults to the platform data directory.
-    #[arg(long)]
-    session: Option<PathBuf>,
-
-    /// Do not load or save the session.
-    #[arg(long)]
-    no_save: bool,
-
-    /// Custom system prompt text, appended to the built-in one.
-    #[arg(long)]
-    system_prompt: Option<String>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum Command {
-    /// Check for updates, install the latest release, and restart.
-    Update,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomProvider {
-    pub id: String,
-    pub name: String,
-    pub base_url: String,
-    pub auth: AuthKind,
-    pub models: Vec<SavedModel>,
-    /// Where to fetch the provider's model list; defaults to `<base>/models`.
-    pub models_url: Option<String>,
-    /// Plaintext token when stored without encryption; `None` when encrypted or absent.
-    pub token: Option<String>,
-    pub encrypted: bool,
-    /// The stored secret, encrypted or not.
-    pub secret: StoredSecret,
-}
-
-impl CustomProvider {
-    fn from_saved(saved: &SavedCustomProvider) -> Self {
-        Self {
-            id: saved.id.clone(),
-            name: saved.name.clone(),
-            base_url: saved.base_url.clone(),
-            auth: saved.auth,
-            models: saved.models.clone(),
-            models_url: saved.models_url.clone(),
-            token: if saved.secret.encrypted {
-                None
-            } else {
-                saved.secret.api_key.clone()
-            },
-            encrypted: saved.secret.encrypted,
-            secret: saved.secret.clone(),
-        }
-    }
-}
-
-/// A provider the user has connected, remembered so its key survives a switch
-/// to another provider.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SavedProvider {
-    /// The models.dev provider id, when the key came from the catalog.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<String>,
-    #[serde(default)]
-    pub provider_name: String,
-    #[serde(default)]
-    pub secret: StoredSecret,
-    /// The model list this provider last offered, so /models can show models
-    /// from every connected provider, not only the active one.
-    #[serde(default)]
-    pub models: Vec<SavedModel>,
-}
-
-/// A connected provider, for the interface to show what is already set up.
-#[derive(Clone, Debug)]
-pub struct ConnectedProvider {
-    pub base_url: String,
-    pub provider_id: Option<String>,
-    pub name: String,
-    #[allow(dead_code)]
-    pub has_key: bool,
-    #[allow(dead_code)]
-    pub encrypted: bool,
-    pub models: Vec<SavedModel>,
-}
-
-pub struct Config {
-    pub provider: ProviderKind,
-    pub provider_label: String,
-    pub model: String,
-    pub base_url: String,
-    pub api_key: Option<String>,
-    pub auth: AuthKind,
-    pub models: Vec<SavedModel>,
-    /// Custom system prompt text, appended to the built-in one.
-    pub system_prompt: Option<String>,
-    pub custom_providers: Vec<CustomProvider>,
-    pub session_path: Option<PathBuf>,
-    /// Directory holding every saved session file, when saving is on.
-    pub sessions_dir: Option<PathBuf>,
-    pub config_path: PathBuf,
-    /// Tavily key backing the web_search tool.
-    pub tavily_api_key: Option<String>,
-    /// Whether compaction runs automatically when the context grows large.
-    pub auto_compact: bool,
-    /// Reasoning effort to request from OpenAI-compatible backends.
-    pub reasoning_effort: Option<String>,
-}
-
-pub struct Connection {
-    pub provider: ProviderKind,
-    pub provider_name: String,
-    pub model: String,
-    pub base_url: String,
-    pub api_key: Option<String>,
-    pub api_key_env: Option<String>,
-    pub auth: AuthKind,
-    pub models: Vec<SavedModel>,
-    /// Endpoint serving the provider's model list, when it differs from the
-    /// default `<base>/models`.
-    pub models_url: Option<String>,
-    /// Id of the saved custom provider to update; `None` creates a new entry.
-    pub custom_provider_id: Option<String>,
-    /// The models.dev provider id, when the connection came from the catalog.
-    pub provider_id: Option<String>,
-    /// The key for this endpoint is already stored: keep that secret as it is
-    /// rather than writing a new one.
-    pub reuse_secret: bool,
-}
+use super::{
+    AuthKind, CONFIG_VERSION, ConnectedProvider, Connection, CustomProvider, ProviderKind,
+    SavedModel, SavedProvider, StoredSecret, credentials,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SavedConfig {
-    version: u32,
+pub(super) struct SavedConfig {
+    pub(super) version: u32,
     #[serde(default)]
-    provider: ProviderKind,
+    pub(super) provider: ProviderKind,
     #[serde(default)]
-    provider_name: String,
+    pub(super) provider_name: String,
     #[serde(default)]
-    model: String,
+    pub(super) model: String,
     #[serde(default)]
-    base_url: String,
+    pub(super) base_url: String,
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
-    auth: AuthKind,
+    pub(super) auth: AuthKind,
     #[serde(default)]
-    models: Vec<SavedModel>,
+    pub(super) models: Vec<SavedModel>,
     /// Custom system prompt text, appended to the built-in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    system_prompt: Option<String>,
+    pub(super) system_prompt: Option<String>,
     #[serde(default)]
     custom_providers: Vec<SavedCustomProvider>,
     #[serde(default)]
@@ -289,13 +45,13 @@ struct SavedConfig {
     provider_keys: BTreeMap<String, SavedProvider>,
     /// Tavily key for the web_search tool; `TAVILY_API_KEY` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    tavily_api_key: Option<String>,
+    pub(super) tavily_api_key: Option<String>,
     /// Whether compaction summarizes older turns automatically.
     #[serde(default = "auto_compact_default")]
-    auto_compact: bool,
+    pub(super) auto_compact: bool,
     /// Reasoning effort sent with OpenAI-compatible requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
+    pub(super) reasoning_effort: Option<String>,
 }
 
 fn auto_compact_default() -> bool {
@@ -314,66 +70,6 @@ struct SavedCustomProvider {
     models_url: Option<String>,
     #[serde(default)]
     secret: StoredSecret,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct StoredSecret {
-    #[serde(default)]
-    pub encrypted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub salt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nonce: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ciphertext: Option<String>,
-}
-
-impl StoredSecret {
-    /// Whether a key is stored here at all.
-    pub fn has_key(&self) -> bool {
-        self.api_key.is_some() || self.ciphertext.is_some()
-    }
-
-    /// The key as stored, when it was saved without a password.
-    pub fn plaintext(&self) -> Option<&str> {
-        if self.encrypted {
-            return None;
-        }
-        self.api_key
-            .as_deref()
-            .filter(|api_key| !api_key.trim().is_empty())
-    }
-
-    /// Unlock the key with a password. A secret saved without one opens with
-    /// any password, so callers can treat the two the same way.
-    pub fn unlock(&self, password: &str) -> Result<String> {
-        if !self.encrypted {
-            return Ok(self.plaintext().unwrap_or_default().to_owned());
-        }
-        let (Some(salt), Some(nonce), Some(ciphertext)) =
-            (&self.salt, &self.nonce, &self.ciphertext)
-        else {
-            bail!("the stored API key is missing its encryption data");
-        };
-        credentials::open(password, salt, nonce, ciphertext)
-    }
-
-    /// Prompt for the password and unlock the key.
-    fn resolve(&self) -> Result<Option<String>> {
-        if !self.encrypted {
-            return Ok(self
-                .api_key
-                .clone()
-                .filter(|api_key| !api_key.trim().is_empty()));
-        }
-        let password = credentials::prompt_password("API key password: ")?;
-        if password.is_empty() {
-            bail!("an encryption password is required to unlock the stored API key");
-        }
-        Ok(Some(self.unlock(&password)?))
-    }
 }
 
 impl SavedConfig {
@@ -399,166 +95,15 @@ impl SavedConfig {
     }
 }
 
-impl Config {
-    pub fn from_cli(cli: Cli) -> Result<Self> {
-        Self::resolve(cli)
-    }
-
-    fn resolve(cli: Cli) -> Result<Self> {
-        let config_path = default_config_path();
-        let saved = load_saved(&config_path)?;
-
-        let env_provider = env::var("YOPES_PROVIDER")
-            .ok()
-            .map(|value| ProviderKind::parse_env(&value))
-            .transpose()?;
-        let env_key = env::var("OPENAI_API_KEY")
-            .ok()
-            .filter(|api_key| !api_key.trim().is_empty());
-        let provider = cli
-            .provider
-            .or(env_provider)
-            .or_else(|| saved.as_ref().map(|saved| saved.provider))
-            .or_else(|| env_key.as_ref().map(|_| ProviderKind::OpenAi))
-            .unwrap_or(ProviderKind::Unconfigured);
-        let saved_for_provider = saved.as_ref().filter(|saved| saved.provider == provider);
-
-        let session_path = if cli.no_save {
-            None
-        } else {
-            let explicit = cli
-                .session
-                .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from));
-            Some(explicit.unwrap_or_else(default_session_with_history))
-        };
-        let sessions_dir = session_path.as_ref().map(|path| {
-            path.parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("sessions")
-        });
-
-        if provider == ProviderKind::Unconfigured {
-            return Ok(Self {
-                provider,
-                provider_label: "not connected".to_owned(),
-                model: String::new(),
-                base_url: String::new(),
-                api_key: None,
-                auth: AuthKind::Bearer,
-                models: Vec::new(),
-                system_prompt: None,
-                custom_providers: custom_providers(saved.as_ref()),
-                session_path,
-                sessions_dir,
-                config_path,
-                tavily_api_key: None,
-                auto_compact: saved.as_ref().is_none_or(|saved| saved.auto_compact),
-                reasoning_effort: saved
-                    .as_ref()
-                    .and_then(|saved| saved.reasoning_effort.clone()),
-            });
-        }
-
-        let provider_label = saved_for_provider
-            .map(|saved| saved.provider_name.trim())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(provider.as_str())
-            .to_owned();
-
-        let model = cli
-            .model
-            .or_else(|| env::var("YOPES_MODEL").ok())
-            .or_else(|| {
-                saved_for_provider
-                    .map(|saved| saved.model.clone())
-                    .filter(|model| !model.trim().is_empty())
-            })
-            .unwrap_or_else(|| default_model(provider));
-        if model.trim().is_empty() {
-            bail!("model name cannot be empty; run /connect");
-        }
-
-        let provider_base_var = match provider {
-            ProviderKind::OpenAi => Some("OPENAI_BASE_URL"),
-            ProviderKind::Ollama => Some("OLLAMA_BASE_URL"),
-            ProviderKind::Unconfigured | ProviderKind::Custom => None,
-        };
-        let base_url = cli
-            .base_url
-            .or_else(|| env::var("YOPES_BASE_URL").ok())
-            .or_else(|| provider_base_var.and_then(|name| env::var(name).ok()))
-            .or_else(|| {
-                saved_for_provider
-                    .map(|saved| saved.base_url.clone())
-                    .filter(|base_url| !base_url.trim().is_empty())
-            })
-            .unwrap_or_else(|| default_base_url(provider).to_owned());
-
-        let auth = saved_for_provider.map_or(AuthKind::Bearer, |saved| saved.auth);
-        let models = saved_for_provider
-            .map(|saved| saved.models.clone())
-            .unwrap_or_default();
-        let env_system_prompt = env::var("YOPES_SYSTEM_PROMPT")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let system_prompt = cli
-            .system_prompt
-            .filter(|value| !value.trim().is_empty())
-            .or(env_system_prompt)
-            .or_else(|| {
-                saved
-                    .as_ref()
-                    .and_then(|saved| saved.system_prompt.clone())
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .map(|value| value.trim().to_owned());
-        let api_key = resolve_api_key(saved_for_provider, env_key)?;
-        let tavily_api_key = env::var("TAVILY_API_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty())
-            .or_else(|| {
-                saved
-                    .as_ref()
-                    .and_then(|saved| saved.tavily_api_key.clone())
-                    .filter(|key| !key.trim().is_empty())
-            });
-        if provider == ProviderKind::OpenAi && api_key.is_none() && saved_for_provider.is_none() {
-            bail!(
-                "no API key for the OpenAI-compatible provider; set OPENAI_API_KEY or run /connect"
-            );
-        }
-
-        Ok(Self {
-            provider,
-            provider_label,
-            model,
-            base_url,
-            api_key,
-            auth,
-            models,
-            system_prompt,
-            custom_providers: custom_providers(saved.as_ref()),
-            session_path,
-            sessions_dir,
-            config_path,
-            tavily_api_key,
-            auto_compact: saved.as_ref().is_none_or(|saved| saved.auto_compact),
-            reasoning_effort: saved
-                .as_ref()
-                .and_then(|saved| saved.reasoning_effort.clone()),
-        })
-    }
-}
-
 /// Saved custom endpoints, with a legacy active custom connection folded in once.
-fn custom_providers(saved: Option<&SavedConfig>) -> Vec<CustomProvider> {
+pub(super) fn custom_providers(saved: Option<&SavedConfig>) -> Vec<CustomProvider> {
     let Some(saved) = saved else {
         return Vec::new();
     };
     let mut providers: Vec<CustomProvider> = saved
         .custom_providers
         .iter()
-        .map(CustomProvider::from_saved)
+        .map(custom_provider_from_saved)
         .collect();
     let legacy = saved.provider == ProviderKind::Custom
         && !saved.base_url.trim().is_empty()
@@ -589,6 +134,24 @@ fn custom_providers(saved: Option<&SavedConfig>) -> Vec<CustomProvider> {
     providers
 }
 
+fn custom_provider_from_saved(saved: &SavedCustomProvider) -> CustomProvider {
+    CustomProvider {
+        id: saved.id.clone(),
+        name: saved.name.clone(),
+        base_url: saved.base_url.clone(),
+        auth: saved.auth,
+        models: saved.models.clone(),
+        models_url: saved.models_url.clone(),
+        token: if saved.secret.encrypted {
+            None
+        } else {
+            saved.secret.api_key.clone()
+        },
+        encrypted: saved.secret.encrypted,
+        secret: saved.secret.clone(),
+    }
+}
+
 fn slug_provider_name(name: &str, existing_ids: &[String]) -> Option<String> {
     let base: String = name
         .trim()
@@ -615,7 +178,10 @@ fn slug_provider_name(name: &str, existing_ids: &[String]) -> Option<String> {
     Some(candidate)
 }
 
-fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Result<Option<String>> {
+pub(super) fn resolve_api_key(
+    saved: Option<&SavedConfig>,
+    env_key: Option<String>,
+) -> Result<Option<String>> {
     if let Some(saved) = saved {
         if saved.auth == AuthKind::None {
             return Ok(None);
@@ -645,29 +211,16 @@ fn resolve_api_key(saved: Option<&SavedConfig>, env_key: Option<String>) -> Resu
     Ok(env_key)
 }
 
-fn default_model(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Unconfigured | ProviderKind::Custom => "",
-        ProviderKind::OpenAi => "gpt-4o-mini",
-        ProviderKind::Ollama => "llama3.2",
-    }
-    .to_owned()
-}
-
-fn default_base_url(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Unconfigured | ProviderKind::Custom => "",
-        ProviderKind::OpenAi => "https://api.openai.com/v1",
-        ProviderKind::Ollama => "http://localhost:11434",
-    }
-}
-
 /// Saved custom endpoints from disk, for in-session list refreshes.
-pub fn load_custom_providers(path: &Path) -> Vec<CustomProvider> {
+pub(crate) fn load_custom_providers(path: &Path) -> Vec<CustomProvider> {
     custom_providers(load_saved(path).ok().flatten().as_ref())
 }
 
-pub fn save_connection(path: &Path, connection: &Connection, password: Option<&str>) -> Result<()> {
+pub(crate) fn save_connection(
+    path: &Path,
+    connection: &Connection,
+    password: Option<&str>,
+) -> Result<()> {
     let api_key = if connection.auth.requires_token() {
         connection
             .api_key
@@ -813,7 +366,11 @@ pub fn save_connection(path: &Path, connection: &Connection, password: Option<&s
 ///
 /// The entry is matched by id; when that provider is the active connection,
 /// its top-level model list is dropped too so a restart shows the same list.
-pub fn delete_saved_model(path: &Path, custom_provider_id: &str, model_id: &str) -> Result<()> {
+pub(crate) fn delete_saved_model(
+    path: &Path,
+    custom_provider_id: &str,
+    model_id: &str,
+) -> Result<()> {
     let mut saved = load_saved(path)?.context("no configuration file")?;
     let entry = saved
         .custom_providers
@@ -843,7 +400,7 @@ fn update_saved(path: &Path, change: impl FnOnce(&mut SavedConfig)) -> Result<()
 ///
 /// The lookup is by base URL, which is what identifies an endpoint across
 /// providers: two providers can share a name but not a URL.
-pub fn load_endpoint_secret(path: &Path, base_url: &str) -> Option<StoredSecret> {
+pub(crate) fn load_endpoint_secret(path: &Path, base_url: &str) -> Option<StoredSecret> {
     let endpoint = base_url.trim_end_matches('/');
     let saved = load_saved(path).ok().flatten()?;
     let stored = saved.provider_keys.get(endpoint)?;
@@ -851,7 +408,7 @@ pub fn load_endpoint_secret(path: &Path, base_url: &str) -> Option<StoredSecret>
 }
 
 /// Every provider with a stored key, for the interface to show what is set up.
-pub fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
+pub(crate) fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
     let Some(saved) = load_saved(path).ok().flatten() else {
         return Vec::new();
     };
@@ -883,7 +440,7 @@ pub fn load_connected_providers(path: &Path) -> Vec<ConnectedProvider> {
 }
 
 /// Forget a provider's stored key and every model it offered.
-pub fn disconnect_provider(path: &Path, base_url: &str) -> Result<()> {
+pub(crate) fn disconnect_provider(path: &Path, base_url: &str) -> Result<()> {
     let endpoint = base_url.trim_end_matches('/');
     update_saved(path, |saved| {
         saved.provider_keys.remove(endpoint);
@@ -903,7 +460,7 @@ pub fn disconnect_provider(path: &Path, base_url: &str) -> Result<()> {
 
 /// Store the active model of the current connection, so the choice survives a
 /// restart.
-pub fn save_model(path: &Path, model: &str) -> Result<()> {
+pub(crate) fn save_model(path: &Path, model: &str) -> Result<()> {
     let model = model.trim().to_owned();
     if model.is_empty() {
         return Ok(());
@@ -914,7 +471,7 @@ pub fn save_model(path: &Path, model: &str) -> Result<()> {
 }
 
 /// Store or clear the custom system prompt, in place.
-pub fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
+pub(crate) fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
     update_saved(path, |saved| {
         saved.system_prompt = value
             .map(|value| value.trim().to_owned())
@@ -922,12 +479,12 @@ pub fn save_system_prompt(path: &Path, value: Option<String>) -> Result<()> {
     })
 }
 
-pub fn save_auto_compact(path: &Path, value: bool) -> Result<()> {
+pub(crate) fn save_auto_compact(path: &Path, value: bool) -> Result<()> {
     update_saved(path, |saved| saved.auto_compact = value)
 }
 
 /// Store or clear the reasoning effort, in place; an empty value clears.
-pub fn save_reasoning_effort(path: &Path, value: Option<String>) -> Result<()> {
+pub(crate) fn save_reasoning_effort(path: &Path, value: Option<String>) -> Result<()> {
     update_saved(path, |saved| {
         saved.reasoning_effort = value
             .map(|value| value.trim().to_owned())
@@ -935,7 +492,7 @@ pub fn save_reasoning_effort(path: &Path, value: Option<String>) -> Result<()> {
     })
 }
 
-fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
+pub(super) fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -979,110 +536,19 @@ fn save_saved(path: &Path, saved: &SavedConfig) -> Result<()> {
     Ok(())
 }
 
-fn default_config_path() -> PathBuf {
-    ProjectDirs::from("dev", "Yopes", "Yopes").map_or_else(
-        || PathBuf::from(".yopes-config.json"),
-        |dirs| dirs.config_dir().join("config.json"),
-    )
-}
-
-fn default_session_path() -> PathBuf {
-    ProjectDirs::from("dev", "Yopes", "Yopes").map_or_else(
-        || PathBuf::from(".yopes-session.json"),
-        |dirs| dirs.data_local_dir().join("session.json"),
-    )
-}
-
-/// Per-session files live in a `sessions` directory next to the old single
-/// session path; opening resumes the newest one and folds the legacy file in.
-fn default_session_with_history() -> PathBuf {
-    let legacy = default_session_path();
-    let Some(data_dir) = legacy.parent() else {
-        return legacy;
-    };
-    let dir = data_dir.join("sessions");
-    if let Ok(list) = fs::read_dir(&dir) {
-        let mut sessions: Vec<(SystemTime, PathBuf)> = list
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|x| x == "json"))
-            .filter_map(|path| {
-                fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .map(|modified| (modified, path))
-            })
-            .collect();
-        // Ascending sort then pop: the most recently active session is last.
-        sessions.sort();
-        if let Some((_, newest)) = sessions.pop() {
-            return newest;
-        }
-    }
-    let named = |stamp: u128| dir.join(format!("session-{stamp}.json"));
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis());
-    if legacy.exists()
-        && fs::metadata(&legacy)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-        && fs::rename(&legacy, named(stamp)).is_ok()
-    {
-        // The legacy session becomes the newest entry, so it is what opens.
-        return named(stamp);
-    }
-    named(stamp)
-}
-
-pub fn load_session(path: Option<&Path>) -> Result<crate::session::Session> {
-    path.map_or_else(
-        || Ok(crate::session::Session::new()),
-        |path| {
-            crate::session::Session::load(path)
-                .with_context(|| format!("loading {}", path.display()))
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AuthKind, Cli, ProviderKind};
-    use clap::Parser;
-
-    #[test]
-    fn provider_values_are_stable_cli_names() {
-        let cli = Cli::try_parse_from(["yopes", "--provider", "openai"]).unwrap();
-        assert_eq!(cli.provider, Some(ProviderKind::OpenAi));
-        assert!(Cli::try_parse_from(["yopes", "--provider", "invalid"]).is_err());
-        assert!(Cli::try_parse_from(["yopes", "--provider", "custom"]).is_err());
-        assert!(Cli::try_parse_from(["yopes", "--provider", "demo"]).is_err());
-    }
-
-    #[test]
-    fn custom_auth_names_are_stable() {
-        assert_eq!(
-            serde_json::to_string(&AuthKind::XApiKey).unwrap(),
-            "\"x-api-key\""
-        );
-        assert_eq!(
-            serde_json::from_str::<AuthKind>("\"none\"").unwrap(),
-            AuthKind::None
-        );
-    }
-
-    #[test]
-    fn the_update_subcommand_parses() {
-        let cli = Cli::try_parse_from(["yopes", "update"]).unwrap();
-        assert!(matches!(cli.command, Some(super::Command::Update)));
-    }
+    use super::{
+        AuthKind, CONFIG_VERSION, Connection, ProviderKind, SavedModel, delete_saved_model,
+        disconnect_provider, load_custom_providers, load_endpoint_secret, load_saved,
+        save_connection, save_reasoning_effort, save_system_prompt, slug_provider_name,
+    };
 
     #[test]
     fn auto_compact_defaults_to_on_when_absent() {
-        use super::load_saved;
         let path =
             std::env::temp_dir().join(format!("yopes-compact-test-{}.json", std::process::id()));
-        std::fs::write(&path, format!("{{\"version\": {}}}", super::CONFIG_VERSION)).unwrap();
+        std::fs::write(&path, format!("{{\"version\": {}}}", CONFIG_VERSION)).unwrap();
         let saved = load_saved(&path).unwrap().unwrap();
         assert!(saved.auto_compact);
         let _ = std::fs::remove_file(&path);
@@ -1090,7 +556,6 @@ mod tests {
 
     #[test]
     fn switching_a_model_keeps_the_stored_key() {
-        use super::{Connection, SavedModel, load_custom_providers, save_connection};
         use std::fs;
 
         let path =
@@ -1136,7 +601,6 @@ mod tests {
 
     #[test]
     fn provider_slugs_dedupe_against_existing_ids() {
-        use super::slug_provider_name;
         assert_eq!(
             slug_provider_name("My Provider", &[]).as_deref(),
             Some("my-provider")
@@ -1158,7 +622,6 @@ mod tests {
 
     #[test]
     fn every_provider_keeps_its_own_key() {
-        use super::{Connection, ProviderKind, SavedModel, load_endpoint_secret, save_connection};
         use std::fs;
 
         let path =
@@ -1171,7 +634,7 @@ mod tests {
             base_url: base_url.to_owned(),
             api_key: Some(key.to_owned()),
             api_key_env: None,
-            auth: super::AuthKind::Bearer,
+            auth: AuthKind::Bearer,
             models: vec![SavedModel {
                 id: "one".to_owned(),
                 name: String::new(),
@@ -1216,27 +679,26 @@ mod tests {
 
     #[test]
     fn disconnecting_forgets_the_key() {
-        use super::{disconnect_provider, load_endpoint_secret};
         use std::fs;
 
         let path =
             std::env::temp_dir().join(format!("yopes-disconnect-test-{}.json", std::process::id()));
         let _ = fs::remove_file(&path);
-        let connection = super::Connection {
+        let connection = Connection {
             provider: ProviderKind::OpenAi,
             provider_name: "One".to_owned(),
             model: "m".to_owned(),
             base_url: "https://one.test/v1".to_owned(),
             api_key: Some("sk-one".to_owned()),
             api_key_env: None,
-            auth: super::AuthKind::Bearer,
+            auth: AuthKind::Bearer,
             models: Vec::new(),
             models_url: None,
             custom_provider_id: None,
             provider_id: Some("one".to_owned()),
             reuse_secret: false,
         };
-        super::save_connection(&path, &connection, None).unwrap();
+        save_connection(&path, &connection, None).unwrap();
         assert!(load_endpoint_secret(&path, "https://one.test/v1").is_some());
 
         disconnect_provider(&path, "https://one.test/v1").unwrap();
@@ -1247,7 +709,6 @@ mod tests {
 
     #[test]
     fn the_system_prompt_saves_and_clears() {
-        use super::save_system_prompt;
         use std::fs;
 
         let path =
@@ -1266,7 +727,6 @@ mod tests {
 
     #[test]
     fn the_reasoning_effort_saves_and_clears() {
-        use super::save_reasoning_effort;
         use std::fs;
 
         let path =
@@ -1285,9 +745,6 @@ mod tests {
 
     #[test]
     fn deleting_a_model_updates_both_lists_of_the_active_provider() {
-        use super::{
-            Connection, SavedModel, delete_saved_model, load_custom_providers, save_connection,
-        };
         use std::{fs, process};
 
         let path = std::env::temp_dir().join(format!("yopes-delete-test-{}.json", process::id()));

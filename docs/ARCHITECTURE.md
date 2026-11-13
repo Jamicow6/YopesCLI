@@ -7,17 +7,19 @@ loop owns all I/O, and rendering is a pure function of `App`.
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs` | CLI parsing, terminal setup (`TerminalGuard`), the `tokio::select!` event loop, `dispatch` (turns an `Action` into a spawned task), clipboard reads. |
-| `app/` | The state machine. `mod.rs` holds `App`, `Action`, `Input`, the command table, and the shared helpers every submodule needs; `keys.rs`, `turn.rs`, `stream.rs`, `connect.rs`, `palette.rs`, `pickers.rs`, `images.rs`, `format.rs`, and `mode.rs` each own one concern (input, turn lifecycle, streaming, `/connect`, palette, pickers, paste, display formatting, modes). |
-| `ui/` | Rendering only. Reads `&App`, writes ratatui frames. No state changes except scroll bookkeeping. `mod.rs` holds `draw`, the palette constants, and text helpers; `transcript.rs`, `composer.rs`, `pickers.rs`, `approval.rs`, `connect.rs`, and `help.rs` draw one panel each. |
-| `backend.rs` | HTTP client for OpenAI-compatible and Ollama endpoints: request building, SSE parsing, `complete_once` for one-shot calls. |
-| `config.rs` | CLI arguments (`Cli`, `Command`), `Config`, the saved config JSON, connection persistence. |
+| `main.rs` | CLI subcommand dispatch, the `tokio::select!` event loop, `dispatch` (turns an `Action` into a spawned task). |
+| `clipboard.rs` | Platform-gated clipboard reads (image first, then text). |
+| `terminal.rs` | `TerminalGuard` (raw mode, alternate screen, RAII restore) and the Ctrl+C interrupt future. |
+| `app/` | The state machine. `mod.rs` holds `App` and the live-request state; `action.rs` holds `Action` and the report types, `commands.rs` the slash-command table, `input.rs` the composer buffer, `keys.rs` key routing, `turn.rs` the turn lifecycle, `stream.rs` streaming events, `connect/` the `/connect` wizard (`state.rs` the stage machine, `keys.rs`/`text.rs`/`finish.rs` its handlers), plus `pickers.rs`, `palette.rs`, `images.rs`, `format.rs`, and `mode.rs`. |
+| `ui/` | Rendering only. Reads `&App`, writes ratatui frames. `mod.rs` holds `draw`, the palette constants, and text helpers; `transcript.rs`, `composer.rs`, `pickers.rs`, `approval.rs`, `connect.rs`, and `help.rs` draw one panel each; `markdown/` renders Markdown (`mod.rs` blocks, `inline.rs` spans, `table.rs` tables). |
+| `backend/` | HTTP client for OpenAI-compatible and Ollama endpoints: `mod.rs` (`Backend`, `StreamEvent`), `messages.rs` request bodies, `retry.rs` backoff, `sse.rs` stream parsing. |
+| `config/` | CLI arguments (`cli.rs`), `Config` and the provider types (`mod.rs`), the saved-config JSON and persistence (`saved.rs`). |
 | `credentials.rs` | Sealing and opening API keys (argon2 + chacha20poly1305). |
 | `catalog.rs` | Provider and model discovery from models.dev, plus the Fasfas model list. |
 | `session.rs` | `Session`, `Message`, `ToolCall`, save/load, token estimation, compaction. |
 | `diff.rs` | Line diffing, hunks, and side-by-side rows. |
 | `skills.rs` | `SKILL.md` discovery, frontmatter parsing, slash expansion. |
-| `tools/` | The tool surface: schemas, approval rules, previews, execution. |
+| `tools/` | The tool surface: `definitions.rs` schemas, `policy.rs` approval rules and system prompt, `preview.rs` change previews, `mod.rs` registry and execution, one module per family (`files`, `search`, `shell`, `web`, `todo`). |
 | `update.rs` | `yopes update` self-update. |
 
 ## Data flow
@@ -57,18 +59,19 @@ immediate frame. See the loop in `main.rs`.
 
 - **A tool** — see [ADDING-A-TOOL.md](ADDING-A-TOOL.md).
 - **A slash command** — add a `CommandSpec` to the palette table in
-  `app/mod.rs`, then handle it in `App::handle_key`'s command branch in
+  `app/commands.rs`, then handle it in `App::handle_key`'s command branch in
   `app/keys.rs`.
-- **A provider** — `ProviderKind` in `config.rs`, then the request/parse branch
-  in `backend.rs`.
+- **A provider** — `ProviderKind` in `config/mod.rs`, then the request/parse
+  branch in `backend/`.
 - **A UI panel** — a `draw_*` function in the matching `ui/` module, called
   from `ui::draw` in `ui/mod.rs`. Rendering helpers shared between panels live
   in `ui/mod.rs` so submodules reach them through `use super::*`.
 
-Both `app/` and `ui/` follow one rule: shared types, constants, and helpers
-stay in `mod.rs`, and each submodule imports them with `use super::*`. New
-methods on `App` are `pub(crate)`; free functions in a submodule are
-`pub(super)` unless nothing outside that module calls them.
+Both `app/`, `ui/`, `backend/`, `config/`, and `tools/` follow one rule:
+shared types, constants, and imports stay in the folder's `mod.rs`, and each
+submodule imports them with `use super::*`. New methods on `App` are
+`pub(crate)`; free functions in a submodule are `pub(super)` unless nothing
+outside that module calls them.
 
 ## Testing
 
