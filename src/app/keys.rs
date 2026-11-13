@@ -493,13 +493,6 @@ impl App {
         {
             return Action::None;
         }
-        if self.tool_rounds >= MAX_TOOL_ROUNDS {
-            self.error(format!(
-                "Stopped after {MAX_TOOL_ROUNDS} tool rounds. Send another message to continue."
-            ));
-            self.save_session();
-            return Action::None;
-        }
         self.begin_turn()
     }
 }

@@ -49,14 +49,6 @@ pub use connect::state::{AddProviderField, CUSTOM_PROVIDER_ID, ConnectStage, Con
 pub use format::{format_bytes, format_cost, format_tokens};
 pub use mode::{Mode, ToolsMode};
 
-/// Warn this many rounds before the stop, so a long turn is not a surprise.
-const TOOL_ROUND_HEADS_UP: usize = 10;
-
-/// The tool-round brake: real agentic turns regularly need far more than what a
-/// belt-tightening 24 allowed, but the brake still exists so a looping model
-/// cannot bill forever without a human once per hundred rounds.
-const MAX_TOOL_ROUNDS: usize = 100;
-
 /// Fraction of the model context window at which compaction triggers.
 const COMPACTION_THRESHOLD_FRAC: u64 = 3; // fire at ~1/3 of window
 /// Fraction of the model context window kept intact after compaction.
@@ -238,7 +230,6 @@ pub struct App {
     next_request_id: u64,
     pending_tools: VecDeque<ToolCall>,
     approved_tools: HashSet<String>,
-    tool_rounds: usize,
     session_path: Option<PathBuf>,
     /// Directory holding every saved session file, when saving.
     sessions_dir: Option<PathBuf>,
@@ -259,6 +250,7 @@ pub struct App {
     spent_prompt_tokens: u64,
     /// Completion tokens billed across this session.
     spent_completion_tokens: u64,
+    pub(crate) prompt_started: Option<Instant>,
 }
 
 impl App {
@@ -312,7 +304,6 @@ impl App {
             next_request_id: 0,
             pending_tools: VecDeque::new(),
             approved_tools: HashSet::new(),
-            tool_rounds: 0,
             session_path,
             sessions_dir,
             config_path: config_path.clone(),
@@ -326,6 +317,7 @@ impl App {
             connect: None,
             spent_prompt_tokens: 0,
             spent_completion_tokens: 0,
+            prompt_started: None,
         }
     }
 

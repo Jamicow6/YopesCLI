@@ -196,7 +196,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         // Stats belong under a finished answer, not under a tool-call turn.
         if let Some(usage) = message.usage {
-            if !message.content.is_empty() && !has_calls {
+            if (!message.content.is_empty() || !message.reasoning.is_empty()) && !has_calls {
                 lines.push(usage_line(usage));
             }
         }

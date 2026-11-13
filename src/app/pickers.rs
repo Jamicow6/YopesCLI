@@ -344,11 +344,11 @@ impl App {
         self.scroll = 0;
         self.follow_tail = true;
         self.notice = None;
-        self.tool_rounds = 0;
         self.pending_tools.clear();
         self.approval = None;
         self.approved_tools.clear();
         self.markdown_cache.clear();
+        self.prompt_started = None;
     }
 
     /// After the first completed reply, ask the model for a short title;

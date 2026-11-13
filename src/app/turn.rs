@@ -153,8 +153,8 @@ impl App {
 
         self.notice = None;
         self.send_pulse = Some(self.spinner);
-        self.tool_rounds = 0;
         self.session.update_title(&prompt);
+        self.prompt_started = Some(Instant::now());
         if steering {
             // Drop the blank reply the interrupted request left behind, then
             // fold the steer into the conversation and restart the turn.
@@ -740,6 +740,7 @@ impl App {
         let Some(active) = self.active.take() else {
             return Action::None;
         };
+        self.prompt_started = None;
         if active.compacting.is_some() {
             // The queued turn never started, so there is nothing to finish.
             self.info("Compaction stopped. Send another message to continue.");
@@ -747,7 +748,6 @@ impl App {
             return Action::Cancel(active.id);
         }
         self.discard_pending_tools("The user stopped the response before this tool could run.");
-        self.tool_rounds = 0;
         self.remove_empty_response();
         self.info("Response stopped. Partial output was kept.");
         self.save_session();
@@ -1006,5 +1006,78 @@ mod tests {
         assert_eq!(app.tools_mode, ToolsMode::Auto);
         assert!(app.approval.is_none());
         assert!(app.running_tool.is_some());
+    }
+
+    #[test]
+    fn model_end_sse_shows_elapsed_time_since_prompt() {
+        let mut app = test_app();
+        app.input.set("hello assistant");
+        let action = app.submit();
+        assert!(matches!(action, Action::Start { .. }));
+        assert!(app.prompt_started.is_some());
+
+        // Backdate prompt_started to simulate 500ms elapsed since prompt
+        let prompt_time = Instant::now() - std::time::Duration::from_millis(500);
+        app.prompt_started = Some(prompt_time);
+
+        let req_id = app.active_request_id().unwrap();
+        app.on_stream_event(StreamEvent::Delta {
+            request_id: req_id,
+            text: "Hello there!".to_owned(),
+        });
+        app.on_stream_event(StreamEvent::Done { request_id: req_id });
+
+        assert!(app.prompt_started.is_none());
+        let last_message = app.session.messages.last().expect("assistant message");
+        assert_eq!(last_message.role, Role::Assistant);
+        let usage = last_message.usage.expect("usage recorded");
+        assert!(usage.elapsed_ms >= 500);
+    }
+
+    #[test]
+    fn model_end_sse_with_intermediate_tools_measures_full_turn_elapsed() {
+        let mut app = test_app();
+        app.input.set("check files");
+        app.submit();
+
+        let prompt_time = Instant::now() - std::time::Duration::from_millis(1000);
+        app.prompt_started = Some(prompt_time);
+
+        let req_id = app.active_request_id().unwrap();
+        // Step 1: Model calls tool
+        app.on_stream_event(StreamEvent::ToolCalls {
+            request_id: req_id,
+            calls: vec![ToolCall::new("call-1", "read_file", r#"{"path":"foo"}"#)],
+        });
+        app.on_stream_event(StreamEvent::Done { request_id: req_id });
+
+        // Intermediate Done does NOT consume prompt_started because tools are pending
+        assert_eq!(app.prompt_started, Some(prompt_time));
+
+        // Advance tools to pop and start the tool
+        app.advance_tools();
+        assert!(app.running_tool.is_some());
+
+        // Tool completes
+        app.on_tool_result(ToolEvent {
+            call: ToolCall::new("call-1", "read_file", r#"{"path":"foo"}"#),
+            result: Ok("file content".to_owned()),
+        });
+
+        // Continue after tools starts new request
+        let req2_id = app.active_request_id().unwrap();
+        app.on_stream_event(StreamEvent::Delta {
+            request_id: req2_id,
+            text: "done reading".to_owned(),
+        });
+        app.on_stream_event(StreamEvent::Done {
+            request_id: req2_id,
+        });
+
+        // Final response end SSE consumes prompt_started and reflects total elapsed
+        assert!(app.prompt_started.is_none());
+        let last = app.session.messages.last().unwrap();
+        let usage = last.usage.expect("usage on final message");
+        assert!(usage.elapsed_ms >= 1000);
     }
 }

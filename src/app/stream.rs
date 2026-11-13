@@ -67,13 +67,6 @@ impl App {
                         message.tool_calls = Some(calls.clone());
                     }
                 }
-                self.tool_rounds = self.tool_rounds.saturating_add(1);
-                if self.tool_rounds == MAX_TOOL_ROUNDS - TOOL_ROUND_HEADS_UP {
-                    self.info(format!(
-                        "{TOOL_ROUND_HEADS_UP} tool rounds left this turn; the turn stops \
-                         at {MAX_TOOL_ROUNDS} and one more message restarts the count."
-                    ));
-                }
                 self.pending_tools.extend(calls);
                 self.follow_tail = true;
                 self.save_session();
@@ -123,8 +116,18 @@ impl App {
                 // Record what the reply cost and how long it took, so the
                 // transcript can show it under the finished message.
                 let finished = self.active.as_ref().map(|active| {
-                    let elapsed_ms =
-                        u64::try_from(active.started.elapsed().as_millis()).unwrap_or(0);
+                    let elapsed_ms = if self.pending_tools.is_empty() {
+                        self.prompt_started.take().map_or_else(
+                            || u64::try_from(active.started.elapsed().as_millis()).unwrap_or(0),
+                            |started| {
+                                u64::try_from(started.elapsed().as_millis())
+                                    .unwrap_or(0)
+                                    .max(1)
+                            },
+                        )
+                    } else {
+                        u64::try_from(active.started.elapsed().as_millis()).unwrap_or(0)
+                    };
                     let (prompt_tokens, completion_tokens) = active
                         .usage
                         .unwrap_or((active.prompt_tokens, estimated_output_tokens(&self.session)));
@@ -143,7 +146,6 @@ impl App {
                 }
                 self.active = None;
                 if self.pending_tools.is_empty() {
-                    self.tool_rounds = 0;
                     // A provider can end the stream without sending anything;
                     // the placeholder is dropped, but the user is told why no
                     // reply appeared instead of seeing nothing.
@@ -177,8 +179,8 @@ impl App {
                     let messages = self.session.messages.clone();
                     return self.begin_request(messages, None);
                 }
+                self.prompt_started = None;
                 self.discard_pending_tools("The response failed before this tool call could run.");
-                self.tool_rounds = 0;
                 self.remove_empty_response();
                 // Providers fail in the reply block, not the footer: the error
                 // belongs where the answer would have been.
