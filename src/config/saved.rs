@@ -386,6 +386,34 @@ pub(crate) fn delete_saved_model(
     save_saved(path, &saved)
 }
 
+/// Remove a saved custom provider, in place.
+///
+/// Also unconfigures the active connection if it was using this custom provider.
+// ponytail: silently ignores non-existent id; upgrade to error if caller needs existence guarantee.
+pub(crate) fn delete_custom_provider(path: &Path, id: &str) -> Result<()> {
+    update_saved(path, |saved| {
+        let endpoint = saved
+            .custom_providers
+            .iter()
+            .find(|stored| stored.id == id)
+            .map(|stored| stored.base_url.trim_end_matches('/').to_owned());
+        saved.custom_providers.retain(|stored| stored.id != id);
+        if let Some(endpoint) = endpoint {
+            saved.provider_keys.remove(&endpoint);
+            if saved.provider == ProviderKind::Custom
+                && saved.base_url.trim_end_matches('/') == endpoint
+            {
+                saved.provider = ProviderKind::Unconfigured;
+                saved.provider_name = String::new();
+                saved.model = String::new();
+                saved.base_url = String::new();
+                saved.secret = StoredSecret::default();
+                saved.models = Vec::new();
+            }
+        }
+    })
+}
+
 /// Read the saved config, apply `change`, and write it back.
 ///
 /// Works before the first connection too: a config holding just the change is
@@ -591,10 +619,10 @@ fn save_saved(path: &Path, saved: &SavedConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthKind, CONFIG_VERSION, Connection, ProviderKind, SavedModel, delete_saved_model,
-        disconnect_provider, load_custom_providers, load_endpoint_models, load_endpoint_secret,
-        load_saved, save_connection, save_reasoning_effort, save_system_prompt, slug_provider_name,
-        update_model_context_window,
+        AuthKind, CONFIG_VERSION, Connection, ProviderKind, SavedModel, delete_custom_provider,
+        delete_saved_model, disconnect_provider, load_custom_providers, load_endpoint_models,
+        load_endpoint_secret, load_saved, save_connection, save_reasoning_effort,
+        save_system_prompt, slug_provider_name, update_model_context_window,
     };
 
     #[test]
@@ -883,6 +911,43 @@ mod tests {
         let models = load_endpoint_models(&path, "https://api.openai.com/v1");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].context_window, Some(64_000));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn deleting_custom_provider_removes_from_saved_and_unconfigures() {
+        use std::{fs, process};
+
+        let path = std::env::temp_dir()
+            .join(format!("yopes-delete-provider-test-{}.json", process::id()));
+        let _ = fs::remove_file(&path);
+        let connection = Connection {
+            provider: ProviderKind::Custom,
+            provider_name: "TestCustom".to_owned(),
+            model: "m1".to_owned(),
+            base_url: "https://custom.test/v1".to_owned(),
+            api_key: Some("sk-custom".to_owned()),
+            api_key_env: None,
+            auth: AuthKind::Bearer,
+            models: vec![SavedModel {
+                id: "m1".to_owned(),
+                name: String::new(),
+                ..SavedModel::default()
+            }],
+            models_url: None,
+            custom_provider_id: None,
+            provider_id: None,
+            reuse_secret: false,
+        };
+        save_connection(&path, &connection, None).unwrap();
+        let id = load_custom_providers(&path)[0].id.clone();
+
+        delete_custom_provider(&path, &id).unwrap();
+
+        let providers = load_custom_providers(&path);
+        assert!(providers.is_empty());
+        let saved = load_saved(&path).unwrap().unwrap();
+        assert_eq!(saved.provider, ProviderKind::Unconfigured);
         let _ = fs::remove_file(&path);
     }
 }
