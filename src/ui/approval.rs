@@ -44,7 +44,7 @@ pub(super) fn draw_approval(
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]))
         .title_bottom(Line::styled(
-            " enter run · a always · esc deny ",
+            " enter run · a always · shift+tab yolo · esc deny ",
             Style::default().fg(MUTED),
         ))
         .padding(Padding::new(1, 1, 1, 1));

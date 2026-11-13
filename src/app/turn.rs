@@ -13,7 +13,17 @@ fn command_is_safe_while_streaming(prompt: &str) -> bool {
     let name = prompt.split_whitespace().next().unwrap_or_default();
     matches!(
         name,
-        "/help" | "/models" | "/tools" | "/system" | "/effort" | "/skills" | "/version" | "/quit"
+        "/help"
+            | "/models"
+            | "/tools"
+            | "/permission"
+            | "/permissions"
+            | "/yolo"
+            | "/system"
+            | "/effort"
+            | "/skills"
+            | "/version"
+            | "/quit"
     )
 }
 
@@ -210,7 +220,7 @@ impl App {
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id;
         let tools_enabled = self.mode != Mode::Chat && self.tools_mode.advertised();
-        let mode_note = self.mode.instruction();
+        let mode_note = self.mode.instruction(self.tools_mode);
         let prompt_chars = tools::system_prompt(tools_enabled).chars().count()
             + self
                 .backend
@@ -321,11 +331,11 @@ impl App {
                     self.info("Custom system prompt set");
                 }
             }
-            "/tools" => {
+            "/tools" | "/permission" | "/permissions" => {
                 let value = parts.next().unwrap_or_default().to_ascii_lowercase();
                 if value.is_empty() {
                     self.info(format!(
-                        "Tools: {} — {} · /tools on|off|auto|ask",
+                        "Tools: {} — {} · /tools on|yolo|ask|off",
                         self.tools_mode.label(),
                         self.tools_mode.detail()
                     ));
@@ -349,7 +359,16 @@ impl App {
                         mode.detail()
                     ));
                 } else {
-                    self.error("Usage: /tools on|off|auto|ask");
+                    self.error("Usage: /tools on|yolo|ask|off");
+                }
+            }
+            "/yolo" => {
+                if self.tools_mode == ToolsMode::Auto {
+                    self.tools_mode = ToolsMode::On;
+                    self.info("Permission: on — edits run automatically, risky commands ask");
+                } else {
+                    self.tools_mode = ToolsMode::Auto;
+                    self.info("Permission: yolo — all commands and edits run automatically without asking");
                 }
             }
             "/compact" => {
@@ -834,5 +853,95 @@ mod tests {
             "https://example.com/v1/Chat",
             "https://example.com/v1/chat"
         ));
+    }
+
+    #[test]
+    fn shift_tab_cycles_permission_modes() {
+        let mut app = test_app();
+        assert_eq!(app.tools_mode, ToolsMode::On);
+
+        // Press Shift+Tab (BackTab) -> Auto (yolo)
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::BackTab,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert_eq!(app.tools_mode, ToolsMode::Auto);
+        assert_eq!(app.tools_mode.label(), "yolo");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("yolo"))
+        );
+
+        // Press Shift+Tab (Tab with SHIFT) -> Ask
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.tools_mode, ToolsMode::Ask);
+        assert_eq!(app.tools_mode.label(), "ask");
+
+        // Press Shift+Tab again -> On
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::BackTab,
+            crossterm::event::KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.tools_mode, ToolsMode::On);
+        assert_eq!(app.tools_mode.label(), "on");
+    }
+
+    #[test]
+    fn slash_yolo_toggles_mode_and_prompt_includes_instruction() {
+        let mut app = test_app();
+        assert_eq!(app.tools_mode, ToolsMode::On);
+
+        // Run /yolo -> enables YOLO
+        app.command("/yolo");
+        assert_eq!(app.tools_mode, ToolsMode::Auto);
+        assert!(
+            app.mode
+                .instruction(app.tools_mode)
+                .is_some_and(|inst| inst.contains("BUILD MODE (YOLO)"))
+        );
+
+        // Run /yolo again -> disables YOLO (back to On)
+        app.command("/yolo");
+        assert_eq!(app.tools_mode, ToolsMode::On);
+        assert!(
+            !app.mode
+                .instruction(app.tools_mode)
+                .is_some_and(|inst| inst.contains("YOLO"))
+        );
+    }
+
+    #[test]
+    fn shift_tab_during_approval_enables_yolo_and_approves() {
+        let mut app = test_app();
+        app.approval = Some(ToolApproval {
+            call: ToolCall::new(
+                "call-1",
+                "run_command",
+                r#"{"command":"cargo test","risk":true}"#,
+            ),
+            note: None,
+            diffs: Vec::new(),
+            scroll: 0,
+            page_height: 0,
+        });
+        app.pending_tools.push_back(ToolCall::new(
+            "call-1",
+            "run_command",
+            r#"{"command":"cargo test","risk":true}"#,
+        ));
+
+        // Press Shift+Tab (BackTab) during approval
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::BackTab,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert!(matches!(action, Action::RunTool { .. }));
+        assert_eq!(app.tools_mode, ToolsMode::Auto);
+        assert!(app.approval.is_none());
+        assert!(app.running_tool.is_some());
     }
 }

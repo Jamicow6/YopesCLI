@@ -6,7 +6,10 @@ All notable changes to YopesCLI are recorded here. The format follows
 
 ## [Unreleased]
 
-### Changed
+### Added
+
+- Permission cycling via `Shift+Tab` (`on` · `yolo` · `ask`), YOLO mode execution without interactive confirmation, and `/yolo` shortcut command.
+
 
 - Release builds are self-contained on Ubuntu runners: the Windows binary is
   cross-compiled with MinGW instead of running on the Windows hosted pool, so
