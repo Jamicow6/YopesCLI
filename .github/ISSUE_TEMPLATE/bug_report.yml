@@ -45,7 +45,6 @@ body:
     attributes:
       label: Provider
       options:
-        - Fasfas AI
         - OpenAI-compatible
         - Ollama
         - Not provider-specific

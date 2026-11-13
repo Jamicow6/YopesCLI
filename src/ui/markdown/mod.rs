@@ -10,7 +10,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::{ACCENT, MUTED, TEXT};
+use super::{ACCENT, MUTED, TEXT, normalize_line};
 
 /// Code stays distinct from inline accents without competing with diff colours.
 pub(super) const CODE: Color = Color::LightCyan;
@@ -75,25 +75,6 @@ pub(super) fn markdown_lines(markdown: &str, width: u16) -> Vec<Line<'static>> {
 
         output.push(Line::from(inline_spans(line, Style::default().fg(TEXT))));
         index += 1;
-    }
-    output
-}
-
-/// Tabs become spaces before parsing: ratatui has no tab stops, and Markdown
-/// indentation is measured in columns.
-fn normalize_line(line: &str) -> String {
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    let mut output = String::with_capacity(line.len());
-    let mut column = 0;
-    for ch in line.chars() {
-        if ch == '\t' {
-            let spaces = 4 - column % 4;
-            output.push_str(&" ".repeat(spaces));
-            column += spaces;
-        } else {
-            output.push(ch);
-            column += 1;
-        }
     }
     output
 }

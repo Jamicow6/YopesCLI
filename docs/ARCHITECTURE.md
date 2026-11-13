@@ -15,7 +15,7 @@ loop owns all I/O, and rendering is a pure function of `App`.
 | `backend/` | HTTP client for OpenAI-compatible and Ollama endpoints: `mod.rs` (`Backend`, `StreamEvent`), `messages.rs` request bodies, `retry.rs` backoff, `sse.rs` stream parsing. |
 | `config/` | CLI arguments (`cli.rs`), `Config` and the provider types (`mod.rs`), the saved-config JSON and persistence (`saved.rs`). |
 | `credentials.rs` | Sealing and opening API keys (argon2 + chacha20poly1305). |
-| `catalog.rs` | Provider and model discovery from models.dev, plus the Fasfas model list. |
+| `catalog.rs` | Provider and model discovery from models.dev. |
 | `session.rs` | `Session`, `Message`, `ToolCall`, save/load, token estimation, compaction. |
 | `diff.rs` | Line diffing, hunks, and side-by-side rows. |
 | `skills.rs` | `SKILL.md` discovery, frontmatter parsing, slash expansion. |
