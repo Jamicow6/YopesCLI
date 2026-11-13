@@ -35,8 +35,6 @@ pub enum Action {
     LoadCatalog,
     /// Fetch models.dev again, bypassing the cached copy.
     RefreshCatalog,
-    /// Fetch the Fasfas `/v1/models` list with the key entered in /connect.
-    FetchFasfas(String),
     /// Fetch a custom provider's model list from its models endpoint.
     FetchCustomModels {
         url: String,
