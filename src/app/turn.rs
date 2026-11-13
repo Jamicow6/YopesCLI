@@ -17,6 +17,37 @@ fn command_is_safe_while_streaming(prompt: &str) -> bool {
     )
 }
 
+fn normalize_endpoint_url(url: &str) -> (String, &str) {
+    let url = url.trim().trim_end_matches('/');
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if let Some((host, path)) = rest.split_once('/') {
+            (
+                format!(
+                    "{}://{}",
+                    scheme.to_ascii_lowercase(),
+                    host.to_ascii_lowercase()
+                ),
+                path,
+            )
+        } else {
+            (
+                format!(
+                    "{}://{}",
+                    scheme.to_ascii_lowercase(),
+                    rest.to_ascii_lowercase()
+                ),
+                "",
+            )
+        }
+    } else {
+        (url.to_ascii_lowercase(), "")
+    }
+}
+
+fn endpoints_match(a: &str, b: &str) -> bool {
+    normalize_endpoint_url(a) == normalize_endpoint_url(b)
+}
+
 impl App {
     pub(crate) fn scroll_up(&mut self, amount: usize) {
         self.follow_tail = false;
@@ -601,14 +632,15 @@ impl App {
                 .as_ref()
                 .is_some_and(|id| id.to_ascii_lowercase() == needle)
                 || p.name.to_ascii_lowercase() == needle
-                || p.base_url.to_ascii_lowercase() == needle
-                || p.base_url.trim_end_matches('/').to_ascii_lowercase() == needle
+                || endpoints_match(&p.base_url, target)
         }) {
             let endpoint = provider.base_url.clone();
             self.disconnect_endpoint(&endpoint);
             return;
         }
-        if self.backend.provider_label().to_ascii_lowercase() == needle {
+        if self.backend.provider_label().to_ascii_lowercase() == needle
+            || endpoints_match(self.backend.base_url(), target)
+        {
             let endpoint = self.backend.base_url().to_owned();
             self.disconnect_endpoint(&endpoint);
             return;
@@ -787,5 +819,17 @@ mod tests {
         assert_eq!(app.session.messages[2].content, "$ echo hello_slash");
         assert_eq!(app.session.messages[3].role, Role::Tool);
         assert!(app.session.messages[3].content.contains("hello_slash"));
+    }
+
+    #[test]
+    fn endpoint_url_matching_preserves_path_case() {
+        assert!(endpoints_match(
+            "https://Example.COM/v1/chat",
+            "https://example.com/v1/chat/"
+        ));
+        assert!(!endpoints_match(
+            "https://example.com/v1/Chat",
+            "https://example.com/v1/chat"
+        ));
     }
 }
