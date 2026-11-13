@@ -157,6 +157,44 @@ impl OpenAiState {
             .collect()
     }
 
+    pub(super) fn record_tool_start(
+        &mut self,
+        index: usize,
+        id: String,
+        name: String,
+    ) -> Vec<ParsedEvent> {
+        let builder = self.calls.entry(index).or_default();
+        if !id.is_empty() {
+            builder.id = id;
+        }
+        if !name.is_empty() {
+            builder.name = name;
+        }
+        self.progress()
+    }
+
+    pub(super) fn record_tool_delta(
+        &mut self,
+        index: usize,
+        partial_json: &str,
+    ) -> Vec<ParsedEvent> {
+        let builder = self.calls.entry(index).or_default();
+        builder.arguments.push_str(partial_json);
+        self.progress()
+    }
+
+    pub(super) fn record_full_tool_call(
+        &mut self,
+        name: String,
+        arguments: String,
+    ) -> Vec<ParsedEvent> {
+        let index = self.calls.len();
+        let builder = self.calls.entry(index).or_default();
+        builder.name = name;
+        builder.arguments = arguments;
+        self.progress()
+    }
+
     pub(super) fn finish(self, request_id: u64) -> Vec<ToolCall> {
         self.calls
             .into_iter()
@@ -356,9 +394,259 @@ pub(super) fn parse_ollama_line(line: &str) -> Result<(Vec<ParsedEvent>, bool)> 
     Ok((events, false))
 }
 
+#[derive(Deserialize)]
+struct AnthropicChunk {
+    #[serde(rename = "type")]
+    kind: String,
+    index: Option<usize>,
+    message: Option<AnthropicMessage>,
+    content_block: Option<AnthropicContentBlock>,
+    delta: Option<AnthropicDelta>,
+    usage: Option<AnthropicUsage>,
+    error: Option<AnthropicError>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicMessage {
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicContentBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicDelta {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
+    thinking: Option<String>,
+    partial_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicError {
+    message: String,
+}
+
+pub(super) fn parse_anthropic_line(
+    line: &str,
+    state: &mut OpenAiState,
+) -> Result<(Vec<ParsedEvent>, bool)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+        return Ok((Vec::new(), false));
+    }
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok((Vec::new(), false));
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return Ok((Vec::new(), true));
+    }
+    let chunk: AnthropicChunk =
+        serde_json::from_str(data).context("invalid Anthropic stream chunk")?;
+    if let Some(err) = chunk.error {
+        bail!("Anthropic stream error: {}", err.message);
+    }
+    let mut events = Vec::new();
+
+    if let Some(usage) = chunk.message.and_then(|m| m.usage) {
+        if let Some(in_tokens) = usage.input_tokens.filter(|t| *t > 0) {
+            events.push(ParsedEvent::Usage {
+                prompt_tokens: in_tokens,
+                completion_tokens: 0,
+            });
+        }
+    }
+    if let Some(usage) = chunk.usage {
+        if let Some(out_tokens) = usage.output_tokens.filter(|t| *t > 0) {
+            events.push(ParsedEvent::Usage {
+                prompt_tokens: 0,
+                completion_tokens: out_tokens,
+            });
+        }
+    }
+
+    match chunk.kind.as_str() {
+        "content_block_start" => {
+            if let Some(block) = chunk.content_block {
+                if block.kind == "tool_use" {
+                    let index = chunk.index.unwrap_or(0);
+                    let id = block.id.unwrap_or_default();
+                    let name = block.name.unwrap_or_default();
+                    events.extend(state.record_tool_start(index, id, name));
+                }
+            }
+        }
+        "content_block_delta" => {
+            if let Some(delta) = chunk.delta {
+                match delta.kind.as_deref() {
+                    Some("text_delta") => {
+                        if let Some(text) = delta.text.filter(|t| !t.is_empty()) {
+                            events.push(ParsedEvent::Delta(text));
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(thinking) = delta.thinking.filter(|t| !t.is_empty()) {
+                            events.push(ParsedEvent::Reasoning(thinking));
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(partial) = delta.partial_json {
+                            let index = chunk.index.unwrap_or(0);
+                            events.extend(state.record_tool_delta(index, &partial));
+                        }
+                    }
+                    _ => {
+                        if let Some(text) = delta.text.filter(|t| !t.is_empty()) {
+                            events.push(ParsedEvent::Delta(text));
+                        } else if let Some(thinking) = delta.thinking.filter(|t| !t.is_empty()) {
+                            events.push(ParsedEvent::Reasoning(thinking));
+                        }
+                    }
+                }
+            }
+        }
+        "message_stop" => {
+            return Ok((events, true));
+        }
+        _ => {}
+    }
+
+    Ok((events, false))
+}
+
+#[derive(Deserialize)]
+struct GeminiChunk {
+    candidates: Option<Vec<GeminiCandidate>>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsage>,
+    error: Option<GeminiError>,
+}
+
+#[derive(Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiContent>,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GeminiContent {
+    parts: Option<Vec<GeminiPart>>,
+}
+
+#[derive(Deserialize)]
+struct GeminiPart {
+    text: Option<String>,
+    thought: Option<bool>,
+    #[serde(rename = "functionCall")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    args: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GeminiUsage {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<u64>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GeminiError {
+    message: String,
+}
+
+pub(super) fn parse_gemini_line(
+    line: &str,
+    state: &mut OpenAiState,
+) -> Result<(Vec<ParsedEvent>, bool)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+        return Ok((Vec::new(), false));
+    }
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok((Vec::new(), false));
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return Ok((Vec::new(), true));
+    }
+    let chunk: GeminiChunk = serde_json::from_str(data).context("invalid Gemini stream chunk")?;
+    if let Some(err) = chunk.error {
+        bail!("Gemini stream error: {}", err.message);
+    }
+    let mut events = Vec::new();
+    let mut done = false;
+
+    if let Some(usage) = chunk.usage_metadata {
+        let prompt_tokens = usage.prompt_token_count.unwrap_or(0);
+        let completion_tokens = usage.candidates_token_count.unwrap_or(0);
+        if prompt_tokens > 0 || completion_tokens > 0 {
+            events.push(ParsedEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+            });
+        }
+    }
+
+    if let Some(candidates) = chunk.candidates {
+        for candidate in candidates {
+            if let Some(content) = candidate.content {
+                if let Some(parts) = content.parts {
+                    for part in parts {
+                        if part.thought == Some(true) {
+                            if let Some(text) = part.text.filter(|t| !t.is_empty()) {
+                                events.push(ParsedEvent::Reasoning(text));
+                            }
+                        } else if let Some(text) = part.text.filter(|t| !t.is_empty()) {
+                            events.push(ParsedEvent::Delta(text));
+                        }
+                        if let Some(call) = part.function_call {
+                            let args_str = match call.args {
+                                Some(serde_json::Value::String(s)) => s,
+                                Some(v) => {
+                                    serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_owned())
+                                }
+                                None => "{}".to_owned(),
+                            };
+                            events.extend(state.record_full_tool_call(call.name, args_str));
+                        }
+                    }
+                }
+            }
+            if candidate.finish_reason.is_some() {
+                done = true;
+            }
+        }
+    }
+
+    Ok((events, done))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OpenAiState, ParsedEvent, parse_ollama_line, parse_openai_line, progress_detail};
+    use super::{
+        OpenAiState, ParsedEvent, parse_anthropic_line, parse_gemini_line, parse_ollama_line,
+        parse_openai_line, progress_detail,
+    };
     use crate::backend::retry::response_error_detail;
 
     #[test]
@@ -571,5 +859,111 @@ mod tests {
             ""
         );
         assert_eq!(progress_detail("list_dir", "{}"), "");
+    }
+
+    #[test]
+    fn parses_anthropic_stream_events() {
+        let mut state = OpenAiState::default();
+        // ping / message_start
+        assert_eq!(
+            parse_anthropic_line("event: message_start", &mut state).unwrap(),
+            (Vec::new(), false)
+        );
+        let (events, done) = parse_anthropic_line(
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":15}}}"#,
+            &mut state,
+        )
+        .unwrap();
+        assert!(!done);
+        assert_eq!(
+            events,
+            vec![ParsedEvent::Usage {
+                prompt_tokens: 15,
+                completion_tokens: 0
+            }]
+        );
+
+        // text delta
+        let (events, _) = parse_anthropic_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}}"#,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(events, vec![ParsedEvent::Delta("Hello world".to_owned())]);
+
+        // thinking delta
+        let (events, _) = parse_anthropic_line(
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Hmm..."}}"#,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(events, vec![ParsedEvent::Reasoning("Hmm...".to_owned())]);
+
+        // tool use start & input delta
+        parse_anthropic_line(
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"read_file"}}"#,
+            &mut state,
+        )
+        .unwrap();
+        parse_anthropic_line(
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"Cargo.toml\"}"}}"#,
+            &mut state,
+        )
+        .unwrap();
+
+        // message_stop
+        let (_, done) =
+            parse_anthropic_line(r#"data: {"type":"message_stop"}"#, &mut state).unwrap();
+        assert!(done);
+
+        let calls = state.finish(1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "toolu_01");
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].function.arguments, "{\"path\":\"Cargo.toml\"}");
+    }
+
+    #[test]
+    fn parses_gemini_stream_events() {
+        let mut state = OpenAiState::default();
+        let (events, done) = parse_gemini_line(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"Gemini reply"}],"role":"model"}}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6}}"#,
+            &mut state,
+        )
+        .unwrap();
+        assert!(!done);
+        assert_eq!(
+            events,
+            vec![
+                ParsedEvent::Usage {
+                    prompt_tokens: 12,
+                    completion_tokens: 6
+                },
+                ParsedEvent::Delta("Gemini reply".to_owned())
+            ]
+        );
+
+        // thinking / thought
+        let (events, _) = parse_gemini_line(
+            r#"data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking..."}],"role":"model"}}]}"#,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(
+            events,
+            vec![ParsedEvent::Reasoning("Thinking...".to_owned())]
+        );
+
+        // functionCall
+        parse_gemini_line(
+            r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{"path":"."}}}],"role":"model"},"finishReason":"STOP"}]}"#,
+            &mut state,
+        )
+        .unwrap();
+
+        let calls = state.finish(2);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "list_dir");
+        assert!(calls[0].function.arguments.contains(r#""path":".""#));
     }
 }

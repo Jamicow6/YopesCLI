@@ -334,9 +334,12 @@ impl App {
                     let suffix = if mode.advertised()
                         && !matches!(
                             self.backend.provider_kind(),
-                            ProviderKind::OpenAi | ProviderKind::Custom
+                            ProviderKind::OpenAi
+                                | ProviderKind::Custom
+                                | ProviderKind::Anthropic
+                                | ProviderKind::Gemini
                         ) {
-                        " · tools require an OpenAI-compatible provider"
+                        " · tools require an OpenAI, Anthropic, or Gemini provider"
                     } else {
                         ""
                     };

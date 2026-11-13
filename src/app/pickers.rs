@@ -136,6 +136,8 @@ impl App {
             .unwrap_or_default();
         let kind = if custom.is_some() {
             ProviderKind::Custom
+        } else if let Some(connected) = &connected {
+            connected.provider_kind
         } else {
             ProviderKind::OpenAi
         };

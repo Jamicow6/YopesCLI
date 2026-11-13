@@ -20,9 +20,15 @@ use crate::{
     tools,
 };
 
-use messages::{ImageStyle, request_messages};
+use messages::{
+    ImageStyle, anthropic_request_payload, anthropic_tools, gemini_request_payload, gemini_tools,
+    request_messages,
+};
 use retry::send_with_retry;
-use sse::{OpenAiState, consume_lines, parse_ollama_line, parse_openai_line, send_parsed};
+use sse::{
+    OpenAiState, consume_lines, parse_anthropic_line, parse_gemini_line, parse_ollama_line,
+    parse_openai_line, send_parsed,
+};
 
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -230,8 +236,14 @@ impl Backend {
         mode_note: Option<&'static str>,
         events: mpsc::UnboundedSender<StreamEvent>,
     ) {
-        let tooling =
-            tools_enabled && matches!(self.provider, ProviderKind::OpenAi | ProviderKind::Custom);
+        let tooling = tools_enabled
+            && matches!(
+                self.provider,
+                ProviderKind::OpenAi
+                    | ProviderKind::Custom
+                    | ProviderKind::Anthropic
+                    | ProviderKind::Gemini
+            );
         let result = match self.provider {
             ProviderKind::Unconfigured => Err(anyhow!(
                 "no provider connected; run /connect to get started"
@@ -242,6 +254,14 @@ impl Backend {
             }
             ProviderKind::Ollama => {
                 self.stream_ollama(request_id, &messages, mode_note, &events)
+                    .await
+            }
+            ProviderKind::Anthropic => {
+                self.stream_anthropic(request_id, &messages, tooling, mode_note, &events)
+                    .await
+            }
+            ProviderKind::Gemini => {
+                self.stream_gemini(request_id, &messages, tooling, mode_note, &events)
                     .await
             }
         };
@@ -353,6 +373,136 @@ impl Backend {
         })
         .await
     }
+
+    async fn stream_anthropic(
+        &self,
+        request_id: u64,
+        messages: &[Message],
+        tooling: bool,
+        mode_note: Option<&'static str>,
+        events: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let (system, payload_messages) =
+            anthropic_request_payload(messages, tooling, self.custom_prompt.as_deref(), mode_note)?;
+        let mut request = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 8192,
+            "messages": payload_messages,
+            "stream": true,
+        });
+        if let Some(sys) = system {
+            request["system"] = serde_json::Value::String(sys);
+        }
+        if tooling {
+            request["tools"] = anthropic_tools();
+        }
+        if let Some(effort) = self
+            .reasoning_effort
+            .as_deref()
+            .filter(|effort| !effort.trim().is_empty())
+        {
+            let budget = match effort {
+                "low" => 1024,
+                "medium" => 2048,
+                "high" => 4096,
+                "xhigh" => 8192,
+                _ => 2048,
+            };
+            request["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+            request["max_tokens"] = serde_json::json!(budget + 4096);
+        }
+        let url = anthropic_url(&self.base_url);
+        let response = send_with_retry("Anthropic", request_id, events, || {
+            let mut builder = self
+                .client
+                .post(&url)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request);
+            if let Some(api_key) = &self.api_key {
+                builder = builder.header("x-api-key", api_key.as_str());
+            }
+            builder
+        })
+        .await?;
+        let mut state = OpenAiState::default();
+        consume_lines(response, |line| {
+            let (parsed, done) = parse_anthropic_line(line, &mut state)?;
+            send_parsed(request_id, parsed, done, events)
+        })
+        .await?;
+        let calls = state.finish(request_id);
+        if !calls.is_empty() {
+            events.send(StreamEvent::ToolCalls { request_id, calls })?;
+        }
+        Ok(())
+    }
+
+    async fn stream_gemini(
+        &self,
+        request_id: u64,
+        messages: &[Message],
+        tooling: bool,
+        mode_note: Option<&'static str>,
+        events: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let (system_instruction, contents) =
+            gemini_request_payload(messages, tooling, self.custom_prompt.as_deref(), mode_note)?;
+        let mut request = serde_json::json!({
+            "contents": contents,
+        });
+        if let Some(system) = system_instruction {
+            request["systemInstruction"] = system;
+        }
+        if tooling {
+            request["tools"] = gemini_tools();
+        }
+        let url = gemini_url(&self.base_url, &self.model);
+        let response = send_with_retry("Gemini", request_id, events, || {
+            let mut builder = self
+                .client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&request);
+            if let Some(api_key) = &self.api_key {
+                builder = builder.header("x-goog-api-key", api_key.as_str());
+            }
+            builder
+        })
+        .await?;
+        let mut state = OpenAiState::default();
+        consume_lines(response, |line| {
+            let (parsed, done) = parse_gemini_line(line, &mut state)?;
+            send_parsed(request_id, parsed, done, events)
+        })
+        .await?;
+        let calls = state.finish(request_id);
+        if !calls.is_empty() {
+            events.send(StreamEvent::ToolCalls { request_id, calls })?;
+        }
+        Ok(())
+    }
+}
+
+fn anthropic_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/messages") {
+        base_url.to_owned()
+    } else {
+        format!("{base_url}/messages")
+    }
+}
+
+fn gemini_url(base_url: &str, model: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.contains(":streamGenerateContent") {
+        base.to_owned()
+    } else {
+        format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+    }
 }
 
 fn completion_url(base_url: &str) -> String {
@@ -366,7 +516,7 @@ fn completion_url(base_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::completion_url;
+    use super::{anthropic_url, completion_url, gemini_url};
 
     #[test]
     fn completion_url_accepts_a_base_or_full_endpoint() {
@@ -377,6 +527,25 @@ mod tests {
         assert_eq!(
             completion_url("https://api.example.com/v1/chat/completions/"),
             "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn provider_urls_handle_base_and_paths() {
+        assert_eq!(
+            anthropic_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_url("https://api.anthropic.com/v1/messages/"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            gemini_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini-2.0-flash"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
         );
     }
 }
