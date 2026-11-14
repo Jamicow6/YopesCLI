@@ -318,7 +318,10 @@ pub(super) fn draw_connect_list(
     }
     if !matches!(
         connect.stage,
-        ConnectStage::Providers | ConnectStage::Models | ConnectStage::CustomModels
+        ConnectStage::Providers
+            | ConnectStage::Models
+            | ConnectStage::CustomModels
+            | ConnectStage::ModelContextWindow
     ) {
         return;
     }
@@ -338,7 +341,7 @@ pub(super) fn draw_connect_list(
     if height == 0 {
         return;
     }
-    let selected = connect.selected.min(items.len() - 1);
+    let selected = connect.list_row().min(items.len() - 1);
     // Custom block first, then models.dev.
     // Sections need a divider row each, skipped by the selection.
     let is_providers = connect.stage == ConnectStage::Providers;
@@ -454,9 +457,9 @@ pub(super) fn draw_connect_hint(frame: &mut Frame, connect: &ConnectState, area:
         ConnectStage::ModelName => "enter continue · empty uses the model id · esc back".to_owned(),
         ConnectStage::ModelContextWindow => {
             if connect.custom_flow {
-                "enter add model · blank skips · esc back".to_owned()
+                "↑↓ preset · type custom · enter add model · esc back".to_owned()
             } else {
-                "enter save · blank resets · esc back".to_owned()
+                "↑↓ preset · type custom · enter save · esc back".to_owned()
             }
         }
         ConnectStage::CustomModels => {

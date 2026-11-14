@@ -110,6 +110,7 @@ impl App {
                                 connect.custom_model_context_window =
                                     current_context.map(|c| c.to_string()).unwrap_or_default();
                                 connect.stage = ConnectStage::ModelContextWindow;
+                                connect.sync_context_selection();
                                 connect.error = None;
                             }
                         }
@@ -225,6 +226,7 @@ impl App {
                             connect.custom_model_context_window =
                                 current_context.map(|c| c.to_string()).unwrap_or_default();
                             connect.stage = ConnectStage::ModelContextWindow;
+                            connect.sync_context_selection();
                             connect.error = None;
                         }
                     }

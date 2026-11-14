@@ -36,6 +36,70 @@ impl App {
         Action::None
     }
 
+    /// Keys on the context window preset picker: arrows choose a preset,
+    /// digits edit the custom number, enter applies the highlighted row.
+    pub(crate) fn handle_connect_context_key(&mut self, key: KeyEvent) -> Action {
+        if !self
+            .connect
+            .as_ref()
+            .is_some_and(|connect| connect.stage == ConnectStage::ModelContextWindow)
+        {
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.back_from_custom_text(ConnectStage::ModelContextWindow);
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Down => {
+                self.connect_move(key.code == KeyCode::Down);
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                let preset = {
+                    let Some(connect) = self.connect.as_ref() else {
+                        return Action::None;
+                    };
+                    let items = connect.items();
+                    let row = connect.list_row().min(items.len().saturating_sub(1));
+                    items.get(row).and_then(|item| {
+                        (item.id != CUSTOM_CONTEXT_WINDOW_ID).then(|| item.id.clone())
+                    })
+                };
+                if let Some(id) = preset {
+                    if let Some(connect) = self.connect.as_mut() {
+                        connect.custom_model_context_window = id;
+                    }
+                }
+                self.advance_custom_text(ConnectStage::ModelContextWindow)
+            }
+            KeyCode::Backspace => {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.select_custom_context();
+                    connect.custom_model_context_window.pop();
+                    connect.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(connect) = self.connect.as_mut() {
+                    connect.select_custom_context();
+                    connect.custom_model_context_window.push(character);
+                    connect.error = None;
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     pub(crate) fn back_from_custom_text(&mut self, stage: ConnectStage) {
         let Some(connect) = self.connect.as_mut() else {
             return;
@@ -180,7 +244,7 @@ impl App {
                 }
                 if let Some(connect) = self.connect.as_mut() {
                     connect.stage = ConnectStage::ModelContextWindow;
-                    connect.selected = 0;
+                    connect.sync_context_selection();
                     connect.error = None;
                 }
             }

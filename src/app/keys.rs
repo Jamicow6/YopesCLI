@@ -19,7 +19,8 @@ impl App {
                 ConnectStage::ModelId => connect.custom_model_id.push_str(&clean),
                 ConnectStage::ModelName => connect.custom_model_name.push_str(&clean),
                 ConnectStage::ModelContextWindow => {
-                    connect.custom_model_context_window.push_str(&clean)
+                    connect.custom_model_context_window.push_str(&clean);
+                    connect.select_custom_context();
                 }
                 ConnectStage::Providers | ConnectStage::Models => {
                     connect.filter.push_str(&clean);
@@ -132,7 +133,11 @@ impl App {
                 MouseEventKind::ScrollDown => self.connect_move(true),
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(index) = connect.item_at_mouse(mouse.column, mouse.row) {
-                        connect.selected = index;
+                        if connect.stage == ConnectStage::ModelContextWindow {
+                            connect.context_row = index;
+                        } else {
+                            connect.selected = index;
+                        }
                         return self.select_connect_item();
                     }
                 }

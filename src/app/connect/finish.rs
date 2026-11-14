@@ -223,13 +223,21 @@ impl App {
                     connect.stage = ConnectStage::Unlock;
                 }
             }
+            ConnectStage::ModelContextWindow => {
+                if item.id == CUSTOM_CONTEXT_WINDOW_ID {
+                    // Custom stays on the picker: the number is typed below.
+                    connect.error = None;
+                    return Action::None;
+                }
+                connect.custom_model_context_window = item.id.clone();
+                return self.advance_custom_text(ConnectStage::ModelContextWindow);
+            }
             ConnectStage::ApiKey
             | ConnectStage::Endpoint
             | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
-            | ConnectStage::ModelContextWindow
             | ConnectStage::Password
             | ConnectStage::Unlock
             | ConnectStage::AddProvider
@@ -713,7 +721,10 @@ impl App {
         if let Some(connect) = self.connect.as_mut() {
             if matches!(
                 connect.stage,
-                ConnectStage::Providers | ConnectStage::Models | ConnectStage::CustomModels
+                ConnectStage::Providers
+                    | ConnectStage::Models
+                    | ConnectStage::CustomModels
+                    | ConnectStage::ModelContextWindow
             ) {
                 connect.move_selection(forward);
             }
