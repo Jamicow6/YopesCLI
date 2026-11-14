@@ -5,6 +5,8 @@ use ratatui::layout::Rect;
 use crate::catalog::{self, Catalog};
 use crate::config::{self, AuthKind, SavedModel};
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
+/// Prefix of every reserved action row id: never a real model id.
+pub(super) const ACTION_ID_PREFIX: &str = "__action:";
 pub(super) const ADD_MODEL_ID: &str = "__action:add-model__";
 /// Rows that edit an existing saved endpoint from the model list.
 pub(super) const EDIT_ENDPOINT_ID: &str = "__action:edit-endpoint__";
@@ -104,6 +106,14 @@ pub struct ConnectItem {
     pub custom_id: Option<String>,
     /// True for the provider and model the session is currently using.
     pub active: bool,
+}
+/// One rendered row of the connect list: an item, a blank spacer, or a
+/// rule line naming the section below it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ListRow {
+    Item(usize),
+    Spacer,
+    Rule(&'static str),
 }
 /// A single-glyph logo for a models.dev provider or the custom flow.
 pub fn provider_logo(id: &str) -> &'static str {
@@ -643,30 +653,60 @@ impl ConnectState {
             return None;
         }
         let height = usize::from(area.height);
+        let rows = self.list_rows(&items);
         let selected = self.selected.min(items.len() - 1);
-        let is_providers = self.stage == ConnectStage::Providers;
-        let custom_count = if is_providers {
-            items
-                .iter()
-                .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
-                .count()
-        } else {
-            0
-        };
-        let models_divider = is_providers && custom_count > 0 && custom_count < items.len();
-        let mut rows = Vec::with_capacity(items.len() + usize::from(models_divider));
-        for index in 0..items.len() {
-            if models_divider && index == custom_count {
-                rows.push(Err(()));
-            }
-            rows.push(Ok(index));
-        }
-        let extra = usize::from(models_divider && selected >= custom_count);
-        let selected_row = selected + extra;
+        let selected_row = list_row_of(&rows, selected);
         let start_row = selected_row.saturating_sub(height.saturating_sub(1));
         let start = start_row.min(rows.len().saturating_sub(height));
         let offset = usize::from(row.saturating_sub(area.y));
-        rows.get(start + offset).and_then(|r| r.ok())
+        rows.get(start + offset).and_then(|r| match r {
+            ListRow::Item(index) => Some(*index),
+            ListRow::Spacer | ListRow::Rule(_) => None,
+        })
+    }
+
+    /// The rows of the connect list for the given items: item indices with
+    /// spacer and rule rows where the stage mixes sections. The renderer and
+    /// the mouse mapping share this so both show and skip the same rows.
+    pub(crate) fn list_rows(&self, items: &[ConnectItem]) -> Vec<ListRow> {
+        let mut rows = Vec::with_capacity(items.len() + 3);
+        match self.stage {
+            ConnectStage::Providers => {
+                let custom_count = items
+                    .iter()
+                    .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
+                    .count();
+                let divider = custom_count > 0 && custom_count < items.len();
+                for index in 0..items.len() {
+                    if divider && index == custom_count {
+                        rows.push(ListRow::Rule(" models.dev "));
+                    }
+                    rows.push(ListRow::Item(index));
+                }
+            }
+            ConnectStage::CustomModels => {
+                // The endpoint actions sit below the model rows, set apart
+                // so neither section hides the other.
+                let first_action = items
+                    .iter()
+                    .position(|item| item.id.starts_with(ACTION_ID_PREFIX))
+                    .filter(|first| *first > 0);
+                for index in 0..items.len() {
+                    if first_action == Some(index) {
+                        rows.push(ListRow::Spacer);
+                        rows.push(ListRow::Spacer);
+                        rows.push(ListRow::Rule(" manage "));
+                    }
+                    rows.push(ListRow::Item(index));
+                }
+            }
+            _ => {
+                for index in 0..items.len() {
+                    rows.push(ListRow::Item(index));
+                }
+            }
+        }
+        rows
     }
 
     pub(crate) fn active_add_provider_field_mut(&mut self) -> Option<&mut String> {
@@ -805,6 +845,14 @@ impl ConnectState {
         }
     }
 }
+
+/// The screen row of one item index, counting spacer and rule rows.
+pub(crate) fn list_row_of(rows: &[ListRow], item: usize) -> usize {
+    rows.iter()
+        .position(|row| matches!(row, ListRow::Item(index) if *index == item))
+        .unwrap_or(0)
+}
+
 pub(super) fn custom_field_mut(
     connect: &mut ConnectState,
     stage: ConnectStage,
@@ -976,6 +1024,45 @@ mod tests {
         let model_item = items.iter().find(|i| i.id == "remove-provider").unwrap();
         assert_ne!(model_item.id, REMOVE_PROVIDER_ID);
         assert_eq!(model_item.title, "ModelNamedRemoveProvider");
+    }
+
+    #[test]
+    fn custom_actions_sit_apart_from_the_model_rows() {
+        use super::{ConnectStage, ConnectState, ListRow};
+        use crate::config::SavedModel;
+        use ratatui::layout::Rect;
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::CustomModels;
+        connect.custom_models = vec![
+            SavedModel {
+                id: "one".to_owned(),
+                name: "One".to_owned(),
+                ..SavedModel::default()
+            },
+            SavedModel {
+                id: "two".to_owned(),
+                name: "Two".to_owned(),
+                ..SavedModel::default()
+            },
+        ];
+        let items = connect.items();
+        let rows = connect.list_rows(&items);
+        assert!(matches!(rows[0], ListRow::Item(0)));
+        assert!(matches!(rows[1], ListRow::Item(1)));
+        let rule = rows
+            .iter()
+            .position(|row| matches!(row, ListRow::Rule(_)))
+            .expect("the action section has a rule");
+        assert!(matches!(rows[rule - 1], ListRow::Spacer));
+        assert!(matches!(rows[rule - 2], ListRow::Spacer));
+        assert!(matches!(rows[rule + 1], ListRow::Item(2)));
+        // The mouse maps across the gap and skips the spacer rows.
+        connect.list_area.set(Rect::new(0, 0, 40, 20));
+        assert_eq!(connect.item_at_mouse(1, 0), Some(0));
+        assert_eq!(connect.item_at_mouse(1, 1), Some(1));
+        assert_eq!(connect.item_at_mouse(1, rule as u16), None);
+        assert_eq!(connect.item_at_mouse(1, rule as u16 + 1), Some(2));
     }
 
     #[test]

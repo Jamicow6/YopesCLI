@@ -45,7 +45,9 @@ pub(crate) use pickers::{ListPicker, ModelChoice, ModelRow};
 
 use format::estimated_output_tokens;
 
-pub use connect::state::{AddProviderField, CUSTOM_PROVIDER_ID, ConnectStage, ConnectState};
+pub(crate) use connect::state::{
+    AddProviderField, ConnectStage, ConnectState, ListRow, list_row_of,
+};
 pub use format::{format_bytes, format_cost, format_tokens};
 pub use mode::{Mode, ToolsMode};
 

@@ -342,28 +342,10 @@ pub(super) fn draw_connect_list(
         return;
     }
     let selected = connect.list_row().min(items.len() - 1);
-    // Custom block first, then models.dev.
-    // Sections need a divider row each, skipped by the selection.
-    let is_providers = connect.stage == ConnectStage::Providers;
-    let custom_count = if is_providers {
-        items
-            .iter()
-            .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
-            .count()
-    } else {
-        0
-    };
-    let models_divider = is_providers && custom_count > 0 && custom_count < items.len();
-    // Rows: Ok(index) renders item index, Err(label) renders a divider.
-    let mut rows = Vec::with_capacity(items.len() + usize::from(models_divider));
-    for index in 0..items.len() {
-        if models_divider && index == custom_count {
-            rows.push(Err(" models.dev "));
-        }
-        rows.push(Ok(index));
-    }
-    let extra = usize::from(models_divider && selected >= custom_count);
-    let selected_row = selected + extra;
+    // Sections (custom, models.dev, endpoint actions) get spacer and rule
+    // rows between them, skipped by the selection and the mouse.
+    let rows = connect.list_rows(&items);
+    let selected_row = list_row_of(&rows, selected);
     let start_row = selected_row.saturating_sub(height.saturating_sub(1));
     let start = start_row.min(rows.len().saturating_sub(height));
     let list = area;
@@ -371,8 +353,9 @@ pub(super) fn draw_connect_list(
 
     for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
         let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
-        let Ok(index) = *row else {
-            let Err(label) = *row else { unreachable!() };
+        let ListRow::Item(index) = row else {
+            // Spacers stay blank; rules name the section below them.
+            let ListRow::Rule(label) = row else { continue };
             let remaining = usize::from(list.width)
                 .saturating_sub(label.chars().count())
                 .saturating_sub(3);
@@ -385,8 +368,8 @@ pub(super) fn draw_connect_list(
             );
             continue;
         };
-        let item = &items[index];
-        let chosen = index == selected;
+        let item = &items[*index];
+        let chosen = *index == selected;
         let marker = if chosen { "› " } else { "  " };
         let logo_style = if chosen {
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
