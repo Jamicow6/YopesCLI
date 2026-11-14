@@ -9,7 +9,7 @@ A better coding CLI, built with Rust, Ratatui, and Tokio.
 - A quiet, minimal interface with a popout command palette.
 - Provider and model discovery from [models.dev](https://models.dev) plus custom endpoints with `/connect`.
 - One-command self-updates with `yopes update`.
-- One focused session, restored automatically between runs.
+- Persistent sessions with `/sessions`, fresh session on launch, `--resume` to continue.
 
 ## Install
 

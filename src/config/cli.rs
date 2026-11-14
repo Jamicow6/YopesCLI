@@ -28,6 +28,10 @@ pub struct Cli {
     #[arg(long)]
     pub(super) session: Option<PathBuf>,
 
+    /// Resume the most recent session.
+    #[arg(short, long)]
+    pub(super) resume: bool,
+
     /// Do not load or save the session.
     #[arg(long)]
     pub(super) no_save: bool,
@@ -68,6 +72,16 @@ mod tests {
             serde_json::from_str::<AuthKind>("\"none\"").unwrap(),
             AuthKind::None
         );
+    }
+
+    #[test]
+    fn the_resume_flag_parses() {
+        let cli = Cli::try_parse_from(["yopes", "--resume"]).unwrap();
+        assert!(cli.resume);
+        let cli = Cli::try_parse_from(["yopes", "-r"]).unwrap();
+        assert!(cli.resume);
+        let cli = Cli::try_parse_from(["yopes"]).unwrap();
+        assert!(!cli.resume);
     }
 
     #[test]

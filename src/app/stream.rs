@@ -352,6 +352,10 @@ impl App {
         let Some(path) = self.session_path.clone() else {
             return Ok(());
         };
+        // ponytail: skip untouched empty session to avoid ghost files; remove check if empty sessions need saving.
+        if self.session.messages.is_empty() && !path.exists() {
+            return Ok(());
+        }
         if self
             .session_saver
             .save_and_wait(path.clone(), self.session.clone())

@@ -306,19 +306,39 @@ impl Config {
             .unwrap_or(ProviderKind::Unconfigured);
         let saved_for_provider = saved.as_ref().filter(|saved| saved.provider == provider);
 
+        let explicit_session = cli
+            .session
+            .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from));
+
+        let sessions_dir = if cli.no_save {
+            None
+        } else if let Some(ref path) = explicit_session {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            if parent.file_name().and_then(|s| s.to_str()) == Some("sessions") {
+                Some(parent.to_path_buf())
+            } else {
+                Some(parent.join("sessions"))
+            }
+        } else {
+            Some(default_sessions_dir())
+        };
+
+        if let Some(dir) = &sessions_dir {
+            migrate_legacy_session(dir);
+        }
+
         let session_path = if cli.no_save {
             None
+        } else if let Some(path) = explicit_session {
+            Some(path)
+        } else if cli.resume {
+            sessions_dir
+                .as_ref()
+                .and_then(|dir| newest_session_path(dir))
+                .or_else(|| sessions_dir.as_ref().map(|dir| new_session_path(dir)))
         } else {
-            let explicit = cli
-                .session
-                .or_else(|| env::var("YOPES_SESSION").ok().map(PathBuf::from));
-            Some(explicit.unwrap_or_else(default_session_with_history))
+            sessions_dir.as_ref().map(|dir| new_session_path(dir))
         };
-        let sessions_dir = session_path.as_ref().map(|path| {
-            path.parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("sessions")
-        });
 
         if provider == ProviderKind::Unconfigured {
             return Ok(Self {
@@ -478,46 +498,58 @@ fn default_session_path() -> PathBuf {
     )
 }
 
-/// Per-session files live in a `sessions` directory next to the old single
-/// session path; opening resumes the newest one and folds the legacy file in.
-fn default_session_with_history() -> PathBuf {
+fn default_sessions_dir() -> PathBuf {
     let legacy = default_session_path();
-    let Some(data_dir) = legacy.parent() else {
-        return legacy;
-    };
-    let dir = data_dir.join("sessions");
-    if let Ok(list) = fs::read_dir(&dir) {
-        let mut sessions: Vec<(SystemTime, PathBuf)> = list
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|x| x == "json"))
-            .filter_map(|path| {
-                fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .map(|modified| (modified, path))
-            })
-            .collect();
-        // Ascending sort then pop: the most recently active session is last.
-        sessions.sort();
-        if let Some((_, newest)) = sessions.pop() {
-            return newest;
-        }
-    }
-    let named = |stamp: u128| dir.join(format!("session-{stamp}.json"));
-    let stamp = SystemTime::now()
+    legacy
+        .parent()
+        .map(|parent| parent.join("sessions"))
+        .unwrap_or_else(|| PathBuf::from("sessions"))
+}
+
+// ponytail: millisecond timestamp names max 1 session/ms; loop increments stamp on collision.
+fn new_session_path(dir: &Path) -> PathBuf {
+    let mut stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis());
+    loop {
+        let path = dir.join(format!("session-{stamp}.json"));
+        if !path.exists() {
+            return path;
+        }
+        stamp += 1;
+    }
+}
+
+fn newest_session_path(dir: &Path) -> Option<PathBuf> {
+    let list = fs::read_dir(dir).ok()?;
+    let mut sessions: Vec<(SystemTime, PathBuf)> = list
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .filter_map(|path| {
+            fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .map(|modified| (modified, path))
+        })
+        .collect();
+    sessions.sort();
+    sessions.pop().map(|(_, newest)| newest)
+}
+
+fn migrate_legacy_session(dir: &Path) {
+    let legacy = default_session_path();
     if legacy.exists()
         && fs::metadata(&legacy)
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false)
-        && fs::rename(&legacy, named(stamp)).is_ok()
     {
-        // The legacy session becomes the newest entry, so it is what opens.
-        return named(stamp);
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        let _ = fs::create_dir_all(dir);
+        let _ = fs::rename(&legacy, dir.join(format!("session-{stamp}.json")));
     }
-    named(stamp)
 }
 
 pub fn load_session(path: Option<&Path>) -> Result<crate::session::Session> {
@@ -528,4 +560,35 @@ pub fn load_session(path: Option<&Path>) -> Result<crate::session::Session> {
                 .with_context(|| format!("loading {}", path.display()))
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_session_path_picks_unused_file_and_newest_finds_latest() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = env::temp_dir().join(format!("yopes-session-test-{unique}"));
+        fs::create_dir_all(&temp).unwrap();
+
+        assert!(newest_session_path(&temp).is_none());
+
+        let first = new_session_path(&temp);
+        assert!(!first.exists());
+        fs::write(&first, "{}").unwrap();
+
+        let second = new_session_path(&temp);
+        assert_ne!(first, second);
+        assert!(!second.exists());
+        fs::write(&second, "{}").unwrap();
+
+        let newest = newest_session_path(&temp).unwrap();
+        assert_eq!(newest, second);
+
+        let _ = fs::remove_dir_all(&temp);
+    }
 }
