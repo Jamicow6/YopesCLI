@@ -36,6 +36,40 @@ impl App {
             return;
         }
         if !self.show_help {
+            let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+            if (trimmed.ends_with(".png")
+                || trimmed.ends_with(".jpg")
+                || trimmed.ends_with(".jpeg")
+                || trimmed.ends_with(".webp")
+                || trimmed.ends_with(".gif")
+                || trimmed.ends_with(".bmp"))
+                && std::path::Path::new(trimmed).is_file()
+            {
+                if let Ok(bytes) = std::fs::read(trimmed) {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let mut png_bytes = std::io::Cursor::new(Vec::new());
+                        if img
+                            .write_to(&mut png_bytes, image::ImageFormat::Png)
+                            .is_ok()
+                        {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD
+                                .encode(png_bytes.into_inner());
+                            let name = format!("paste-{}.png", self.next_image);
+                            self.next_image += 1;
+                            self.attachments.push(ImageAttachment {
+                                name,
+                                data: b64,
+                            });
+                            self.info(format!(
+                                "Image {} attached — send it with the next message.",
+                                self.attachments.len()
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
             self.input.insert_str(value);
             self.reset_palette();
         }
@@ -49,6 +83,34 @@ impl App {
                 }
                 MouseEventKind::ScrollDown => {
                     approval.scroll = approval.scroll.saturating_add(3);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let popup = approval.popup_area.get();
+                    if popup.width > 0 && popup.height > 0 {
+                        if mouse.row == popup.y.saturating_add(popup.height).saturating_sub(1) {
+                            let rel_x = mouse.column.saturating_sub(popup.x);
+                            if rel_x < 13 {
+                                return self.approve_pending_tool(false);
+                            } else if rel_x < 25 {
+                                return self.approve_pending_tool(true);
+                            } else if rel_x < 43 {
+                                self.tools_mode = ToolsMode::Auto;
+                                self.info("Permission: yolo — all commands and edits run automatically");
+                                return self.approve_pending_tool(true);
+                            } else {
+                                return self.deny_pending_tool();
+                            }
+                        } else if mouse.column >= popup.x
+                            && mouse.column < popup.x + popup.width
+                            && mouse.row >= popup.y
+                            && mouse.row < popup.y + popup.height
+                        {
+                            return self.approve_pending_tool(false);
+                        } else {
+                            return self.deny_pending_tool();
+                        }
+                    }
+                    return self.approve_pending_tool(false);
                 }
                 _ => {}
             }
@@ -70,7 +132,97 @@ impl App {
                 MouseEventKind::ScrollUp => self.connect_move(false),
                 MouseEventKind::ScrollDown => self.connect_move(true),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    return self.select_connect_item();
+                    if let Some(index) = connect.item_at_mouse(mouse.column, mouse.row) {
+                        connect.selected = index;
+                        return self.select_connect_item();
+                    }
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        if self.model_picker.is_some() {
+            let count = self.model_picker_count();
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(picker) = self.model_picker.as_mut() {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    }
+                    return Action::None;
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(picker) = self.model_picker.as_mut() {
+                        picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
+                    }
+                    return Action::None;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let selected = self
+                        .model_picker
+                        .as_ref()
+                        .map(|p| p.selected)
+                        .unwrap_or_default();
+                    let matches = self.model_matches();
+                    let picked = matches
+                        .get(selected.min(count.saturating_sub(1)))
+                        .map(|model| (*model).clone());
+                    self.model_picker = None;
+                    if let Some(model) = picked {
+                        self.pick_model(model);
+                    }
+                    return Action::None;
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        if self.session_picker.is_some() {
+            let count = self.session_picker_count();
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(picker) = self.session_picker.as_mut() {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    }
+                    return Action::None;
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(picker) = self.session_picker.as_mut() {
+                        picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
+                    }
+                    return Action::None;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let selected = self
+                        .session_picker
+                        .as_ref()
+                        .map(|p| p.selected)
+                        .unwrap_or_default();
+                    let sessions = self.session_matches();
+                    let picked = sessions
+                        .get(selected.min(count.saturating_sub(1)))
+                        .map(|session| session.path.clone());
+                    self.session_picker = None;
+                    if let Some(path) = picked {
+                        self.switch_session(path);
+                    }
+                    return Action::None;
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        if self.palette_open() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.palette_move(false);
+                    return Action::None;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.palette_move(true);
+                    return Action::None;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    return self.palette_accept();
                 }
                 _ => {}
             }
@@ -83,6 +235,35 @@ impl App {
                 _ => {}
             }
             return Action::None;
+        }
+        if let Some(target) = self.composer_area {
+            if mouse.column >= target.x
+                && mouse.column < target.x + target.width
+                && mouse.row >= target.y
+                && mouse.row < target.y + target.height
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let rel_x = (mouse.column - target.x) as usize;
+                        let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
+                        let pos = self.input.pos_at_coords(rel_x, rel_y, target.width as usize);
+                        self.input.selection_anchor = Some(pos);
+                        self.input.cursor = pos;
+                        return Action::None;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        let rel_x = (mouse.column - target.x) as usize;
+                        let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
+                        let pos = self.input.pos_at_coords(rel_x, rel_y, target.width as usize);
+                        if self.input.selection_anchor.is_none() {
+                            self.input.selection_anchor = Some(self.input.cursor);
+                        }
+                        self.input.cursor = pos;
+                        return Action::None;
+                    }
+                    _ => {}
+                }
+            }
         }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(3),
@@ -119,11 +300,29 @@ impl App {
             return Action::None;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(
-                key.code,
-                KeyCode::Char('c' | 'C' | 'q' | 'Q') | KeyCode::Null
-            )
+            && matches!(key.code, KeyCode::Char('q' | 'Q'))
         {
+            self.should_quit = true;
+            return Action::Quit;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'C') | KeyCode::Null)
+        {
+            if let Some(selected) = self.input.selected_text() {
+                if !selected.is_empty() {
+                    let text = selected.to_owned();
+                    self.info("Copied selection to clipboard");
+                    return Action::CopyClipboard(text);
+                }
+            }
+            if !self.input.value.is_empty() {
+                let text = self.input.value.clone();
+                self.info("Copied input to clipboard");
+                return Action::CopyClipboard(text);
+            }
+            if self.is_streaming() {
+                return self.stop_streaming();
+            }
             self.should_quit = true;
             return Action::Quit;
         }
@@ -174,12 +373,21 @@ impl App {
                     self.input.delete_word();
                     self.reset_palette();
                 }
-                KeyCode::Char('a') => {
-                    self.input.clear();
+                KeyCode::Char('a' | 'A') => {
+                    self.input.select_all();
                     self.reset_palette();
                 }
+                KeyCode::Char('x' | 'X') => {
+                    if let Some(selected) = self.input.selected_text() {
+                        let text = selected.to_owned();
+                        self.input.delete_selection();
+                        self.reset_palette();
+                        self.info("Cut selection to clipboard");
+                        return Action::CopyClipboard(text);
+                    }
+                }
                 KeyCode::Char('e') => self.input.cursor = self.input.value.len(),
-                KeyCode::Char('v') => return Action::PasteImage,
+                KeyCode::Char('v' | 'V') => return Action::PasteImage,
                 KeyCode::Char('p' | 'P') => {
                     if self.palette_open() {
                         self.palette_move(true);
@@ -214,6 +422,10 @@ impl App {
             }
             KeyCode::Enter if self.palette_open() => self.palette_accept(),
             KeyCode::Enter => self.submit(),
+            KeyCode::Esc if self.input.selection().is_some() => {
+                self.input.clear_selection();
+                Action::None
+            }
             KeyCode::Esc if self.palette_open() => {
                 self.palette_hidden = true;
                 Action::None
@@ -259,19 +471,20 @@ impl App {
                 Action::None
             }
             KeyCode::Left => {
-                self.input.left();
+                self.input.left(key.modifiers.contains(KeyModifiers::SHIFT));
                 Action::None
             }
             KeyCode::Right => {
-                self.input.right();
+                self.input
+                    .right(key.modifiers.contains(KeyModifiers::SHIFT));
                 Action::None
             }
             KeyCode::Home => {
-                self.input.cursor = 0;
+                self.input.home(key.modifiers.contains(KeyModifiers::SHIFT));
                 Action::None
             }
             KeyCode::End => {
-                self.input.cursor = self.input.value.len();
+                self.input.end(key.modifiers.contains(KeyModifiers::SHIFT));
                 Action::None
             }
             KeyCode::Up if self.palette_open() => {
@@ -283,11 +496,13 @@ impl App {
                 Action::None
             }
             KeyCode::Up if self.input.value.contains('\n') => {
-                self.input.move_vertical(false);
+                self.input
+                    .move_vertical(false, key.modifiers.contains(KeyModifiers::SHIFT));
                 Action::None
             }
             KeyCode::Down if self.input.value.contains('\n') => {
-                self.input.move_vertical(true);
+                self.input
+                    .move_vertical(true, key.modifiers.contains(KeyModifiers::SHIFT));
                 Action::None
             }
             KeyCode::Up => {
@@ -476,6 +691,7 @@ impl App {
                 diffs: change.diffs,
                 scroll: 0,
                 page_height: 0,
+                popup_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
             });
             self.follow_tail = true;
             return Action::None;

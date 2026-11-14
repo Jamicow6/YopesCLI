@@ -70,19 +70,12 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
         } else {
             Style::default().fg(ADDED)
         };
+        let title_width = (usize::from(inner.width).saturating_sub(6) * 55 / 100).clamp(16, 40);
+        let detail_width = usize::from(inner.width).saturating_sub(title_width + 4);
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(
-                format!(
-                    "{title:<width$}  ",
-                    width = inner.width.saturating_sub(34) as usize
-                ),
-                title_style,
-            ),
-            Span::styled(
-                truncate(&detail, usize::from(inner.width).saturating_sub(4).max(1)),
-                detail_style,
-            ),
+            Span::styled(format!("{} ", fit_to(&title, title_width)), title_style),
+            Span::styled(fit_to(&detail, detail_width), detail_style),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }
@@ -134,7 +127,6 @@ pub(super) fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPic
     // Rows show a window of the whole list, moving with the selection.
     let visible = inner.height as usize;
     let start = selected.saturating_sub(visible.saturating_sub(1));
-    let right_width = 4;
     for (offset, entry) in sessions.iter().skip(start).take(visible).enumerate() {
         let index = start + offset;
         let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
@@ -146,7 +138,8 @@ pub(super) fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPic
         } else {
             age_label(entry.modified)
         };
-        let left_width = inner.width.saturating_sub(right_width + 4) as usize;
+        let right_width = 8;
+        let left_width = inner.width.saturating_sub(right_width as u16 + 4) as usize;
         let title = entry.title.clone();
         let title_style = if chosen {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -155,8 +148,8 @@ pub(super) fn draw_session_picker(frame: &mut Frame, app: &App, picker: &ListPic
         };
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(format!("{} ", pad_to(&title, left_width)), title_style),
-            Span::styled(right, Style::default().fg(MUTED)),
+            Span::styled(format!("{} ", fit_to(&title, left_width)), title_style),
+            Span::styled(fit_to(&right, right_width), Style::default().fg(MUTED)),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }
@@ -226,10 +219,12 @@ pub(super) fn draw_palette(
         } else {
             Style::default().fg(MUTED)
         };
+        let desc_col_width = usize::from(inner.width).saturating_sub(name_col_width + 3);
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(pad_to(&name, name_col_width), name_style),
-            Span::styled(command.description, description_style),
+            Span::styled(fit_to(&name, name_col_width), name_style),
+            Span::raw(" "),
+            Span::styled(truncate(command.description, desc_col_width), description_style),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }

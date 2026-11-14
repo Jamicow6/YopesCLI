@@ -333,6 +333,7 @@ pub(super) fn draw_connect_list(
         }
         return;
     }
+    connect.list_area.set(area);
     let height = usize::from(area.height);
     if height == 0 {
         return;
@@ -404,7 +405,7 @@ pub(super) fn draw_connect_list(
             Span::styled(item.logo.to_string(), logo_style),
             Span::styled("  ", Style::default()),
             Span::styled(
-                pad_to(&truncate(&item.title, title_width), title_width),
+                fit_to(&item.title, title_width),
                 title_style,
             ),
         ];

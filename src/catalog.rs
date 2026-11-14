@@ -49,6 +49,113 @@ pub struct Catalog {
     pub providers: BTreeMap<String, Provider>,
 }
 
+/// Fallback providers for offline starts or before models.dev finishes fetching.
+pub fn default_catalog() -> Catalog {
+    // ponytail: hardcoded seeds for core APIs; add dynamic registry if user installs custom providers offline.
+    let mut providers = BTreeMap::new();
+    let mut openai_models = BTreeMap::new();
+    openai_models.insert(
+        "gpt-4o".to_owned(),
+        Model {
+            name: "GPT-4o".to_owned(),
+            limit: Some(Limit { context: Some(128_000) }),
+            cost: None,
+        },
+    );
+    openai_models.insert(
+        "gpt-4o-mini".to_owned(),
+        Model {
+            name: "GPT-4o mini".to_owned(),
+            limit: Some(Limit { context: Some(128_000) }),
+            cost: None,
+        },
+    );
+    openai_models.insert(
+        "o3-mini".to_owned(),
+        Model {
+            name: "o3-mini".to_owned(),
+            limit: Some(Limit { context: Some(200_000) }),
+            cost: None,
+        },
+    );
+    providers.insert(
+        "openai".to_owned(),
+        Provider {
+            name: "OpenAI".to_owned(),
+            api: Some(OPENAI_BASE_URL.to_owned()),
+            npm: Some("@ai-sdk/openai".to_owned()),
+            env: vec!["OPENAI_API_KEY".to_owned()],
+            models: openai_models,
+        },
+    );
+
+    let mut anthropic_models = BTreeMap::new();
+    anthropic_models.insert(
+        "claude-3-7-sonnet-latest".to_owned(),
+        Model {
+            name: "Claude 3.7 Sonnet".to_owned(),
+            limit: Some(Limit { context: Some(200_000) }),
+            cost: None,
+        },
+    );
+    anthropic_models.insert(
+        "claude-3-5-sonnet-latest".to_owned(),
+        Model {
+            name: "Claude 3.5 Sonnet".to_owned(),
+            limit: Some(Limit { context: Some(200_000) }),
+            cost: None,
+        },
+    );
+    anthropic_models.insert(
+        "claude-3-5-haiku-latest".to_owned(),
+        Model {
+            name: "Claude 3.5 Haiku".to_owned(),
+            limit: Some(Limit { context: Some(200_000) }),
+            cost: None,
+        },
+    );
+    providers.insert(
+        "anthropic".to_owned(),
+        Provider {
+            name: "Anthropic".to_owned(),
+            api: Some(ANTHROPIC_BASE_URL.to_owned()),
+            npm: Some("@ai-sdk/anthropic".to_owned()),
+            env: vec!["ANTHROPIC_API_KEY".to_owned()],
+            models: anthropic_models,
+        },
+    );
+
+    let mut google_models = BTreeMap::new();
+    google_models.insert(
+        "gemini-2.0-flash".to_owned(),
+        Model {
+            name: "Gemini 2.0 Flash".to_owned(),
+            limit: Some(Limit { context: Some(1_000_000) }),
+            cost: None,
+        },
+    );
+    google_models.insert(
+        "gemini-1.5-pro".to_owned(),
+        Model {
+            name: "Gemini 1.5 Pro".to_owned(),
+            limit: Some(Limit { context: Some(2_000_000) }),
+            cost: None,
+        },
+    );
+    providers.insert(
+        "google".to_owned(),
+        Provider {
+            name: "Google Gemini".to_owned(),
+            api: Some(GEMINI_BASE_URL.to_owned()),
+            npm: Some("@ai-sdk/google".to_owned()),
+            env: vec!["GEMINI_API_KEY".to_owned(), "GOOGLE_API_KEY".to_owned()],
+            models: google_models,
+        },
+    );
+
+    Catalog { providers }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Provider {
     #[serde(default)]

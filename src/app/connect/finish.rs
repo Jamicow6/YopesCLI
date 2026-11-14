@@ -311,14 +311,17 @@ impl App {
         if let Some(connect) = self.connect.as_mut() {
             connect.custom_flow = true;
             connect.custom_name = name;
+            let is_local = endpoint.contains("://localhost")
+                || endpoint.contains("://127.0.0.1")
+                || endpoint.contains("://0.0.0.0");
             connect.custom_endpoint = endpoint;
             connect.custom_models_url = models_url;
             connect.model_id = final_id;
             connect.custom_models = final_models;
-            connect.custom_auth = if connect.custom_token.trim().is_empty() {
-                config::AuthKind::None
-            } else {
+            connect.custom_auth = if !connect.custom_token.trim().is_empty() || !is_local {
                 config::AuthKind::Bearer
+            } else {
+                config::AuthKind::None
             };
             connect.error = None;
         }

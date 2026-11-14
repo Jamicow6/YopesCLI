@@ -80,6 +80,7 @@ pub struct ToolApproval {
     pub diffs: Vec<FileDiff>,
     pub scroll: usize,
     pub page_height: u16,
+    pub popup_area: std::cell::Cell<ratatui::layout::Rect>,
 }
 
 pub struct RunningTool {
@@ -224,6 +225,8 @@ pub struct App {
     pub progress_collapsed: bool,
     /// Screen row of the Progress title, for click-to-fold.
     pub progress_row: Option<u16>,
+    /// Composer target area for mouse click and drag selection.
+    pub composer_area: Option<ratatui::layout::Rect>,
     /// Unified or side-by-side diff view, kept across approvals and results.
     pub diff_sides: bool,
     active: Option<ActiveRequest>,
@@ -299,6 +302,7 @@ impl App {
             output_rows: Vec::new(),
             progress_collapsed: false,
             progress_row: None,
+            composer_area: None,
             diff_sides: true,
             active: None,
             next_request_id: 0,

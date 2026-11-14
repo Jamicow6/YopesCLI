@@ -95,7 +95,7 @@ impl App {
 
     /// Make one popup choice active, switching provider when it belongs to
     /// another connected endpoint.
-    fn pick_model(&mut self, choice: ModelChoice) {
+    pub(crate) fn pick_model(&mut self, choice: ModelChoice) {
         if choice.base_url.trim_end_matches('/') == self.backend.base_url().trim_end_matches('/') {
             self.backend.set_model(choice.id.clone());
             self.persist_model(&choice.id);

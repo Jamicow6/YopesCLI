@@ -846,6 +846,7 @@ mod tests {
             diffs: Vec::new(),
             scroll: 0,
             page_height: 0,
+            popup_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
         });
         app_approval.input.set("blocked while waiting approval");
         let action = app_approval.submit();
@@ -1024,6 +1025,7 @@ mod tests {
             diffs: Vec::new(),
             scroll: 0,
             page_height: 0,
+            popup_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
         });
         app.pending_tools.push_back(ToolCall::new(
             "call-1",

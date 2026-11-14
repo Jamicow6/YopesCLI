@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     app::{
         App, COMMANDS, CUSTOM_PROVIDER_ID, ChangeReport, CommandSpec, ConnectStage, ConnectState,
-        ListPicker, Mode, NoticeKind, ToolApproval, ToolsMode, format_bytes, format_tokens,
+        Input, ListPicker, Mode, NoticeKind, ToolApproval, ToolsMode, format_bytes, format_tokens,
     },
     diff::{ChangeKind, DiffLine, FileDiff},
     session::{Message, Role, Usage},
@@ -77,6 +77,7 @@ const ACCENT: Color = Color::Cyan;
 const ERROR: Color = Color::Red;
 const ADDED: Color = Color::Green;
 const REMOVED: Color = Color::Red;
+const YELLOW: Color = Color::Yellow;
 const TEXT: Color = Color::Reset;
 
 pub(super) fn spans_width(spans: &[Span<'_>]) -> usize {
@@ -373,6 +374,18 @@ pub(super) fn pad_to(text: &str, width: usize) -> String {
     }
 }
 
+/// Fit `text` to exactly `width` columns: truncates with ellipsis if longer,
+/// pads with spaces if shorter.
+pub(super) fn fit_to(text: &str, width: usize) -> String {
+    let truncated = truncate(text, width);
+    let display = UnicodeWidthStr::width(truncated.as_str());
+    if display >= width {
+        truncated
+    } else {
+        format!("{truncated}{}", " ".repeat(width - display))
+    }
+}
+
 /// The muted stats line under a finished reply: tokens in and out, then how long.
 fn usage_line(usage: Usage) -> Line<'static> {
     let mut text = format!(
@@ -557,6 +570,7 @@ mod tests {
             diffs: vec![FileDiff::new("hello.txt", "", "hi\n", true)],
             scroll: 0,
             page_height: 0,
+            popup_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
         };
         let lines = approval_lines(&approval, 60, false);
         let text = lines.iter().map(text_of).collect::<Vec<_>>().join("\n");
