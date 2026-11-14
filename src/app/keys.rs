@@ -236,36 +236,43 @@ impl App {
             return Action::None;
         }
         if let Some(target) = self.composer_area {
-            if mouse.column >= target.x
+            let inside = mouse.column >= target.x
                 && mouse.column < target.x + target.width
                 && mouse.row >= target.y
-                && mouse.row < target.y + target.height
+                && mouse.row < target.y + target.height;
+
+            if inside && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let rel_x = (mouse.column - target.x) as usize;
+                let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
+                let pos = self
+                    .input
+                    .pos_at_coords(rel_x, rel_y, target.width as usize);
+                self.input.selection_anchor = Some(pos);
+                self.input.cursor = pos;
+                return Action::None;
+            }
+
+            if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+                && (inside || self.input.selection_anchor.is_some())
             {
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let rel_x = (mouse.column - target.x) as usize;
-                        let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
-                        let pos = self
-                            .input
-                            .pos_at_coords(rel_x, rel_y, target.width as usize);
-                        self.input.selection_anchor = Some(pos);
-                        self.input.cursor = pos;
-                        return Action::None;
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        let rel_x = (mouse.column - target.x) as usize;
-                        let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
-                        let pos = self
-                            .input
-                            .pos_at_coords(rel_x, rel_y, target.width as usize);
-                        if self.input.selection_anchor.is_none() {
-                            self.input.selection_anchor = Some(self.input.cursor);
-                        }
-                        self.input.cursor = pos;
-                        return Action::None;
-                    }
-                    _ => {}
+                let clamped_col = mouse
+                    .column
+                    .clamp(target.x, target.x + target.width.saturating_sub(1));
+                let rel_x = (clamped_col - target.x) as usize;
+                let rel_y = if mouse.row < target.y {
+                    self.input_scroll
+                } else {
+                    let r = (mouse.row - target.y).min(target.height.saturating_sub(1));
+                    r as usize + self.input_scroll
+                };
+                let pos = self
+                    .input
+                    .pos_at_coords(rel_x, rel_y, target.width as usize);
+                if self.input.selection_anchor.is_none() {
+                    self.input.selection_anchor = Some(self.input.cursor);
                 }
+                self.input.cursor = pos;
+                return Action::None;
             }
         }
         match mouse.kind {
