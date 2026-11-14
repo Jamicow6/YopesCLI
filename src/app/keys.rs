@@ -74,6 +74,13 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> Action {
+        // Right-click pastes: terminals swallow Ctrl+V (Windows Terminal does
+        // a text-only paste before the app ever sees the key), but captured
+        // mouse events always arrive. The clipboard read prefers an image and
+        // falls back to text.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            return Action::PasteImage;
+        }
         if let Some(approval) = self.approval.as_mut() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
