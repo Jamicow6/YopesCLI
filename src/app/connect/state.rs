@@ -20,6 +20,19 @@ pub(super) const REMOVE_PROVIDER_ID: &str = "__action:remove-provider__";
 pub(super) const EDIT_KEY_ID: &str = "__action:edit-key__";
 /// Row that forces a models.dev refetch from the provider list.
 pub(super) const REFRESH_CATALOG_ID: &str = "__action:refresh-catalog__";
+/// Context window presets the wizard offers, ascending in tokens.
+pub(super) const CONTEXT_WINDOW_PRESETS: &[(u64, &str)] = &[
+    (32_000, "32K"),
+    (64_000, "64K"),
+    (128_000, "128K"),
+    (256_000, "256K"),
+    (512_000, "512K"),
+    (786_000, "786K"),
+    (960_000, "960K"),
+    (1_000_000, "1M"),
+];
+/// Row id of the Custom context window entry: its number is typed, not picked.
+pub(super) const CUSTOM_CONTEXT_WINDOW_ID: &str = "__action:custom-context__";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AddProviderField {
@@ -141,6 +154,8 @@ pub struct ConnectState {
     pub(crate) custom_model_id: String,
     pub(crate) custom_model_name: String,
     pub(crate) custom_model_context_window: String,
+    /// Highlighted row of the context window preset picker.
+    pub(crate) context_row: usize,
     pub(crate) add_provider_field: AddProviderField,
     pub(crate) popup_inner: std::cell::Cell<Rect>,
     pub(crate) list_area: std::cell::Cell<Rect>,
@@ -177,6 +192,7 @@ impl ConnectState {
             custom_model_id: String::new(),
             custom_model_name: String::new(),
             custom_model_context_window: String::new(),
+            context_row: 0,
             add_provider_field: AddProviderField::Name,
             popup_inner: std::cell::Cell::new(Rect::default()),
             list_area: std::cell::Cell::new(Rect::default()),
@@ -450,13 +466,43 @@ impl ConnectState {
                 }
                 items
             }
+            ConnectStage::ModelContextWindow => {
+                let current = self.custom_model_context_window.trim();
+                let matches_preset = |tokens: u64| tokens.to_string() == current;
+                let mut items: Vec<ConnectItem> = CONTEXT_WINDOW_PRESETS
+                    .iter()
+                    .map(|(tokens, label)| ConnectItem {
+                        id: tokens.to_string(),
+                        title: (*label).to_owned(),
+                        detail: format!("{tokens} tokens"),
+                        logo: "▸",
+                        custom_id: None,
+                        active: matches_preset(*tokens),
+                    })
+                    .collect();
+                items.push(ConnectItem {
+                    id: CUSTOM_CONTEXT_WINDOW_ID.to_owned(),
+                    title: "Custom".to_owned(),
+                    detail: if current.is_empty() {
+                        "type a number".to_owned()
+                    } else {
+                        format!("{current} tokens")
+                    },
+                    logo: "▸",
+                    custom_id: None,
+                    active: !current.is_empty()
+                        && !CONTEXT_WINDOW_PRESETS
+                            .iter()
+                            .any(|(tokens, _)| matches_preset(*tokens)),
+                });
+                items
+            }
             ConnectStage::ApiKey
             | ConnectStage::Endpoint
             | ConnectStage::ModelsEndpoint
             | ConnectStage::CustomToken
             | ConnectStage::ModelId
             | ConnectStage::ModelName
-            | ConnectStage::ModelContextWindow
             | ConnectStage::Password
             | ConnectStage::Unlock
             | ConnectStage::AddProvider
@@ -535,7 +581,7 @@ impl ConnectState {
             ConnectStage::CustomToken => "token",
             ConnectStage::ModelId => "model id",
             ConnectStage::ModelName => "model name",
-            ConnectStage::ModelContextWindow => "context window (blank to skip)",
+            ConnectStage::ModelContextWindow => "context window",
             ConnectStage::CustomModels => "model",
             ConnectStage::Password => "encryption password (optional)",
             ConnectStage::Unlock => "key password",
@@ -543,6 +589,9 @@ impl ConnectState {
         }
     }
     pub const fn uses_cursor(&self) -> bool {
+        if matches!(self.stage, ConnectStage::ModelContextWindow) {
+            return self.context_row == CONTEXT_WINDOW_PRESETS.len();
+        }
         !matches!(
             self.stage,
             ConnectStage::CustomModels | ConnectStage::AddProvider
@@ -673,7 +722,7 @@ impl ConnectState {
         if items.is_empty() {
             return None;
         }
-        items.get(self.selected.min(items.len() - 1)).cloned()
+        items.get(self.list_row().min(items.len() - 1)).cloned()
     }
     /// The endpoint of the provider row under the selection, when that row is
     /// a real provider rather than an action.
@@ -704,6 +753,20 @@ impl ConnectState {
         if len == 0 {
             return;
         }
+        if matches!(self.stage, ConnectStage::ModelContextWindow) {
+            let current = self.context_row.min(len - 1);
+            self.context_row = if forward {
+                (current + 1) % len
+            } else {
+                (current + len - 1) % len
+            };
+            // The input mirrors the highlighted preset; Custom keeps the field.
+            if self.context_row != CONTEXT_WINDOW_PRESETS.len() {
+                let (tokens, _) = CONTEXT_WINDOW_PRESETS[self.context_row];
+                self.custom_model_context_window = tokens.to_string();
+            }
+            return;
+        }
         let current = self.selected.min(len - 1);
         self.selected = if forward {
             (current + 1) % len
@@ -718,6 +781,28 @@ impl ConnectState {
         }
         let current = self.selected.min(len - 1) as isize;
         self.selected = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+    /// Land the context preset picker on the row matching the current value,
+    /// or on Custom when it is blank or not one of the presets.
+    pub(crate) fn sync_context_selection(&mut self) {
+        let current = self.custom_model_context_window.trim();
+        self.context_row = CONTEXT_WINDOW_PRESETS
+            .iter()
+            .position(|(tokens, _)| tokens.to_string() == current)
+            .unwrap_or(CONTEXT_WINDOW_PRESETS.len());
+    }
+    /// Jump the context preset picker to Custom so typed input lands there.
+    pub(crate) fn select_custom_context(&mut self) {
+        self.context_row = CONTEXT_WINDOW_PRESETS.len();
+    }
+    /// The row the connect list highlights: the context preset picker keeps
+    /// its own row so the model list cursor survives leaving the stage.
+    pub fn list_row(&self) -> usize {
+        if matches!(self.stage, ConnectStage::ModelContextWindow) {
+            self.context_row
+        } else {
+            self.selected
+        }
     }
 }
 pub(super) fn custom_field_mut(
@@ -909,5 +994,73 @@ mod tests {
         assert_eq!(connect.item_at_mouse(60, 5), None);
         assert_eq!(connect.item_at_mouse(10, 2), None);
         assert_eq!(connect.item_at_mouse(10, 25), None);
+    }
+
+    #[test]
+    fn context_window_stage_lists_presets_then_custom() {
+        use super::{CONTEXT_WINDOW_PRESETS, ConnectStage, ConnectState};
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::ModelContextWindow;
+        connect.custom_model_context_window = "128000".to_owned();
+        connect.sync_context_selection();
+
+        let items = connect.items();
+        assert_eq!(items.len(), CONTEXT_WINDOW_PRESETS.len() + 1);
+        assert_eq!(items[0].title, "32K");
+        assert_eq!(items[0].id, "32000");
+        assert_eq!(items[2].id, "128000");
+        assert!(items[2].active, "matching preset is marked active");
+        let custom = items.last().unwrap();
+        assert_eq!(custom.title, "Custom");
+        assert!(!custom.active);
+        assert_eq!(connect.list_row(), 2);
+    }
+
+    #[test]
+    fn context_preset_navigation_wraps_and_previews_values() {
+        use super::{CONTEXT_WINDOW_PRESETS, ConnectStage, ConnectState};
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::ModelContextWindow;
+        connect.custom_model_context_window = "400000".to_owned();
+        connect.sync_context_selection();
+        assert_eq!(connect.list_row(), CONTEXT_WINDOW_PRESETS.len());
+
+        connect.move_selection(false);
+        assert_eq!(connect.list_row(), CONTEXT_WINDOW_PRESETS.len() - 1);
+        assert_eq!(connect.custom_model_context_window, "1000000");
+
+        connect.move_selection(true);
+        assert_eq!(connect.list_row(), CONTEXT_WINDOW_PRESETS.len());
+    }
+
+    #[test]
+    fn blank_context_window_lands_on_custom_with_hint() {
+        use super::{CONTEXT_WINDOW_PRESETS, ConnectStage, ConnectState};
+
+        let mut connect = ConnectState::loading();
+        connect.stage = ConnectStage::ModelContextWindow;
+        connect.sync_context_selection();
+        assert_eq!(connect.list_row(), CONTEXT_WINDOW_PRESETS.len());
+
+        let items = connect.items();
+        let custom = items.last().unwrap();
+        assert_eq!(custom.detail, "type a number");
+        assert!(!custom.active);
+    }
+
+    #[test]
+    fn context_presets_cover_the_requested_sizes_in_order() {
+        use super::CONTEXT_WINDOW_PRESETS;
+
+        let tokens: Vec<u64> = CONTEXT_WINDOW_PRESETS.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            tokens,
+            vec![
+                32_000, 64_000, 128_000, 256_000, 512_000, 786_000, 960_000, 1_000_000
+            ]
+        );
+        assert!(tokens.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }
