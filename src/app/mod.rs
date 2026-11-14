@@ -80,6 +80,7 @@ pub struct ToolApproval {
     pub diffs: Vec<FileDiff>,
     pub scroll: usize,
     pub page_height: u16,
+    pub popup_area: std::cell::Cell<ratatui::layout::Rect>,
 }
 
 pub struct RunningTool {
@@ -211,6 +212,8 @@ pub struct App {
     /// The models offered by every connected provider, rebuilt when the
     /// picker opens.
     pub model_choices: Vec<ModelChoice>,
+    /// Whether models are actively being fetched in the background.
+    pub fetching_models: bool,
     /// Popup picker opened by `/sessions`.
     pub session_picker: Option<ListPicker>,
     pub running_tool: Option<RunningTool>,
@@ -224,6 +227,8 @@ pub struct App {
     pub progress_collapsed: bool,
     /// Screen row of the Progress title, for click-to-fold.
     pub progress_row: Option<u16>,
+    /// Composer target area for mouse click and drag selection.
+    pub composer_area: Option<ratatui::layout::Rect>,
     /// Unified or side-by-side diff view, kept across approvals and results.
     pub diff_sides: bool,
     active: Option<ActiveRequest>,
@@ -292,6 +297,7 @@ impl App {
             approval: None,
             model_picker: None,
             model_choices: Vec::new(),
+            fetching_models: false,
             session_picker: None,
             running_tool: None,
             changes: HashMap::new(),
@@ -299,6 +305,7 @@ impl App {
             output_rows: Vec::new(),
             progress_collapsed: false,
             progress_row: None,
+            composer_area: None,
             diff_sides: true,
             active: None,
             next_request_id: 0,

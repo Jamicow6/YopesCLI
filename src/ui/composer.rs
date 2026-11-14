@@ -32,19 +32,25 @@ pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(
             format!(" {}", app.mode.label()),
-            Style::default().fg(app.mode.color()),
+            Style::default()
+                .fg(app.mode.color())
+                .add_modifier(Modifier::BOLD),
         ),
     ];
-    if app.tools_mode == ToolsMode::Auto {
-        title_spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
-        title_spans.push(Span::styled(
-            "yolo",
-            Style::default()
-                .fg(ratatui::style::Color::Rgb(255, 120, 50))
-                .add_modifier(Modifier::BOLD),
-        ));
-    } else if app.tools_mode == ToolsMode::Ask {
-        title_spans.push(Span::styled(" · ask", Style::default().fg(MUTED)));
+    match app.tools_mode {
+        ToolsMode::Auto => {
+            title_spans.push(Span::styled(
+                " [YOLO]",
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            ));
+        }
+        ToolsMode::Ask => {
+            title_spans.push(Span::styled(" [ASK]", Style::default().fg(MUTED)));
+        }
+        ToolsMode::Off => {
+            title_spans.push(Span::styled(" [OFF]", Style::default().fg(MUTED)));
+        }
+        ToolsMode::On => {}
     }
     title_spans.push(Span::styled("  ", Style::default()));
     title_spans.push(Span::styled(
@@ -91,16 +97,31 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     let pulse = app
         .send_pulse
         .is_some_and(|mark| app.spinner.saturating_sub(mark) < 5);
-    let prompt_style = if pulse {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    let (prompt_marker, prompt_style) = if app.tools_mode == ToolsMode::Auto {
+        (
+            "⚡",
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        )
+    } else if pulse {
+        (
+            "›",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )
     } else if app.is_busy() {
-        Style::default().fg(MUTED)
+        ("›", Style::default().fg(MUTED))
     } else {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        (
+            "›",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )
     };
-    frame.render_widget(Paragraph::new("›").style(prompt_style), columns[0]);
+    frame.render_widget(
+        Paragraph::new(prompt_marker).style(prompt_style),
+        columns[0],
+    );
 
     let target = columns[1];
+    app.composer_area = Some(target);
     if target.width == 0 || target.height == 0 {
         return;
     }
@@ -112,12 +133,73 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         app.input_scroll = before.saturating_add(1).saturating_sub(height);
     }
     frame.render_widget(
-        Paragraph::new(app.input.with_cursor())
-            .style(Style::default().fg(TEXT))
+        Paragraph::new(render_composer_text(&app.input))
             .wrap(Wrap { trim: false })
             .scroll((app.input_scroll.min(u16::MAX as usize) as u16, 0)),
         target,
     );
+}
+
+fn render_composer_text(input: &Input) -> Text<'static> {
+    let sel = input.selection();
+    let sel_style = Style::default().add_modifier(Modifier::REVERSED);
+    let norm_style = Style::default().fg(TEXT);
+    let cursor_style = Style::default().fg(ACCENT);
+
+    let mut lines = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_chunk = String::new();
+    let mut current_style = norm_style;
+
+    let flush_chunk = |spans: &mut Vec<Span<'static>>, chunk: &mut String, style: Style| {
+        if !chunk.is_empty() {
+            spans.push(Span::styled(std::mem::take(chunk), style));
+        }
+    };
+
+    let total_len = input.value.len();
+    let mut idx = 0;
+    let mut chars = input.value.char_indices().peekable();
+
+    while idx <= total_len {
+        if idx == input.cursor {
+            flush_chunk(&mut current_spans, &mut current_chunk, current_style);
+            current_spans.push(Span::styled("▌", cursor_style));
+        }
+
+        if idx == total_len {
+            break;
+        }
+
+        let (_, ch) = chars.next().unwrap();
+        let next_idx = idx + ch.len_utf8();
+
+        let is_selected = if let Some(ref r) = sel {
+            idx >= r.start && idx < r.end
+        } else {
+            false
+        };
+
+        let target_style = if is_selected { sel_style } else { norm_style };
+        if target_style != current_style {
+            flush_chunk(&mut current_spans, &mut current_chunk, current_style);
+            current_style = target_style;
+        }
+
+        if ch == '\n' {
+            flush_chunk(&mut current_spans, &mut current_chunk, current_style);
+            lines.push(Line::from(std::mem::take(&mut current_spans)));
+        } else {
+            current_chunk.push(ch);
+        }
+
+        idx = next_idx;
+    }
+
+    flush_chunk(&mut current_spans, &mut current_chunk, current_style);
+    lines.push(Line::from(current_spans));
+
+    Text::from(lines)
 }
 
 /// The native progress panel: the session's task checklist above the composer.
@@ -246,6 +328,14 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             text.push_str(" · esc stop");
             (text, ACCENT)
         }
+    } else if app.fetching_models {
+        (
+            format!(
+                "{} fetching models · esc stop",
+                SPINNER[app.spinner % SPINNER.len()]
+            ),
+            ACCENT,
+        )
     } else if let Some(notice) = &app.notice {
         (
             notice.message.clone(),
@@ -258,19 +348,17 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         // The mode is the idle status's first word: Tab cycles build · plan · chat.
         let text = if app.tools_mode == ToolsMode::Auto {
             format!(
-                "mode {} (yolo) · enter send · / commands · F1 help",
+                "mode {} · [yolo] · shift+tab permissions · enter send · / commands",
                 app.mode.label()
             )
         } else {
             format!(
-                "mode {} · enter send · / commands · F1 help",
+                "mode {} · shift+tab yolo · enter send · / commands · F1 help",
                 app.mode.label()
             )
         };
         let color = match app.mode {
-            Mode::Build if app.tools_mode == ToolsMode::Auto => {
-                ratatui::style::Color::Rgb(255, 120, 50)
-            }
+            Mode::Build if app.tools_mode == ToolsMode::Auto => YELLOW,
             Mode::Build => MUTED,
             _ => ACCENT,
         };

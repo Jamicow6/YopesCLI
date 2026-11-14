@@ -31,6 +31,8 @@ pub enum Action {
     },
     /// Read the clipboard on Ctrl+V and attach an image when it holds one.
     PasteImage,
+    /// Copy text to system clipboard.
+    CopyClipboard(String),
     Quit,
     LoadCatalog,
     /// Fetch models.dev again, bypassing the cached copy.

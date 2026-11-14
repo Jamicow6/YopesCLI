@@ -371,6 +371,11 @@ fn dispatch(
                 let _ = sender.send(read);
             });
         }
+        Action::CopyClipboard(text) => {
+            tokio::task::spawn_blocking(move || {
+                let _ = crate::clipboard::write_clipboard(&text);
+            });
+        }
         Action::RunTool { call } => {
             let sender = tool_events.clone();
             if call.function.name == "delegate" {

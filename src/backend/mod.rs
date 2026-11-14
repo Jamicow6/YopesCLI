@@ -144,6 +144,10 @@ impl Backend {
         &self.models
     }
 
+    pub fn set_saved_models(&mut self, models: Vec<SavedModel>) {
+        self.models = models;
+    }
+
     /// Dollars per million tokens for the active model, when the catalog that
     /// saved this connection listed a price.
     pub fn model_price(&self) -> Option<(f64, f64)> {
@@ -248,6 +252,15 @@ impl Backend {
             ProviderKind::Unconfigured => Err(anyhow!(
                 "no provider connected; run /connect to get started"
             )),
+            _ if self.model.trim().is_empty() => {
+                Err(anyhow!("no model selected; run /models or /connect"))
+            }
+            _ if self.base_url.trim().is_empty() => {
+                Err(anyhow!("no endpoint URL configured; run /connect"))
+            }
+            _ if self.auth.requires_token() && self.api_key.is_none() => {
+                Err(anyhow!("no API key configured; run /connect"))
+            }
             ProviderKind::OpenAi | ProviderKind::Custom => {
                 self.stream_openai(request_id, &messages, tooling, mode_note, &events)
                     .await

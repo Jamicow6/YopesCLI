@@ -143,6 +143,7 @@ pub struct ConnectState {
     pub(crate) custom_model_context_window: String,
     pub(crate) add_provider_field: AddProviderField,
     pub(crate) popup_inner: std::cell::Cell<Rect>,
+    pub(crate) list_area: std::cell::Cell<Rect>,
     /// The key already stored for the endpoint being connected, if any.
     pub(crate) stored_secret: Option<config::StoredSecret>,
     /// The endpoint whose stored key is being unlocked.
@@ -158,7 +159,7 @@ impl ConnectState {
             error: None,
             filter: String::new(),
             selected: 0,
-            catalog: None,
+            catalog: Some(crate::catalog::default_catalog()),
             saved_custom: Vec::new(),
             provider_id: None,
             model_id: None,
@@ -178,6 +179,7 @@ impl ConnectState {
             custom_model_context_window: String::new(),
             add_provider_field: AddProviderField::Name,
             popup_inner: std::cell::Cell::new(Rect::default()),
+            list_area: std::cell::Cell::new(Rect::default()),
             stored_secret: None,
             unlock_endpoint: String::new(),
             unlocked_key: None,
@@ -576,6 +578,48 @@ impl ConnectState {
         }
     }
 
+    pub(crate) fn item_at_mouse(&self, col: u16, row: u16) -> Option<usize> {
+        let area = self.list_area.get();
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        if col < area.x || col >= area.x.saturating_add(area.width) {
+            return None;
+        }
+        if row < area.y || row >= area.y.saturating_add(area.height) {
+            return None;
+        }
+        let items = self.items();
+        if items.is_empty() {
+            return None;
+        }
+        let height = usize::from(area.height);
+        let selected = self.selected.min(items.len() - 1);
+        let is_providers = self.stage == ConnectStage::Providers;
+        let custom_count = if is_providers {
+            items
+                .iter()
+                .take_while(|item| item.id == CUSTOM_PROVIDER_ID || item.custom_id.is_some())
+                .count()
+        } else {
+            0
+        };
+        let models_divider = is_providers && custom_count > 0 && custom_count < items.len();
+        let mut rows = Vec::with_capacity(items.len() + usize::from(models_divider));
+        for index in 0..items.len() {
+            if models_divider && index == custom_count {
+                rows.push(Err(()));
+            }
+            rows.push(Ok(index));
+        }
+        let extra = usize::from(models_divider && selected >= custom_count);
+        let selected_row = selected + extra;
+        let start_row = selected_row.saturating_sub(height.saturating_sub(1));
+        let start = start_row.min(rows.len().saturating_sub(height));
+        let offset = usize::from(row.saturating_sub(area.y));
+        rows.get(start + offset).and_then(|r| r.ok())
+    }
+
     pub(crate) fn active_add_provider_field_mut(&mut self) -> Option<&mut String> {
         match self.add_provider_field {
             AddProviderField::Name => Some(&mut self.custom_name),
@@ -847,5 +891,23 @@ mod tests {
         let model_item = items.iter().find(|i| i.id == "remove-provider").unwrap();
         assert_ne!(model_item.id, REMOVE_PROVIDER_ID);
         assert_eq!(model_item.title, "ModelNamedRemoveProvider");
+    }
+
+    #[test]
+    fn item_at_mouse_resolves_row_in_connect_list() {
+        use super::ConnectState;
+        use ratatui::layout::Rect;
+
+        let connect = ConnectState::loading();
+        connect.list_area.set(Rect::new(5, 5, 50, 10));
+
+        // Click within list bounds on first item
+        assert_eq!(connect.item_at_mouse(10, 5), Some(0));
+
+        // Click outside bounds
+        assert_eq!(connect.item_at_mouse(2, 5), None);
+        assert_eq!(connect.item_at_mouse(60, 5), None);
+        assert_eq!(connect.item_at_mouse(10, 2), None);
+        assert_eq!(connect.item_at_mouse(10, 25), None);
     }
 }

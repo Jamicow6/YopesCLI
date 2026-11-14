@@ -2,11 +2,10 @@ use super::*;
 
 impl App {
     pub(crate) fn model_matches(&self) -> Vec<&ModelChoice> {
-        let filter = self
-            .model_picker
-            .as_ref()
-            .map_or("", |picker| picker.filter.as_str());
-        model_matching(&self.model_choices, filter)
+        let (filter, provider_filter) = self.model_picker.as_ref().map_or(("", None), |picker| {
+            (picker.filter.as_str(), picker.provider_filter.as_deref())
+        });
+        model_matching_with_provider(&self.model_choices, filter, provider_filter)
     }
 
     /// Rows shown in the `/models` popup for its current filter.
@@ -15,7 +14,7 @@ impl App {
     }
 
     /// Every model offered by a connected provider, active provider first.
-    fn build_model_choices(&self) -> Vec<ModelChoice> {
+    pub(crate) fn build_model_choices(&self) -> Vec<ModelChoice> {
         let mut choices: Vec<ModelChoice> = Vec::new();
         let active = self.backend.base_url().trim_end_matches('/').to_owned();
         let mut seen = std::collections::HashSet::new();
@@ -95,7 +94,7 @@ impl App {
 
     /// Make one popup choice active, switching provider when it belongs to
     /// another connected endpoint.
-    fn pick_model(&mut self, choice: ModelChoice) {
+    pub(crate) fn pick_model(&mut self, choice: ModelChoice) {
         if choice.base_url.trim_end_matches('/') == self.backend.base_url().trim_end_matches('/') {
             self.backend.set_model(choice.id.clone());
             self.persist_model(&choice.id);
@@ -175,6 +174,53 @@ impl App {
         ));
     }
 
+    pub(crate) fn trigger_fetch_models_for_filter(
+        &mut self,
+        provider_filter: Option<&str>,
+    ) -> Action {
+        let is_custom = self.backend.provider_kind() == ProviderKind::Custom;
+        let active_base = self.backend.base_url().to_owned();
+        let target_prov = provider_filter.map(str::to_ascii_lowercase);
+
+        if let Some(filter_name) = &target_prov {
+            if let Some(custom) = self
+                .custom_providers
+                .iter()
+                .find(|p| p.name.to_ascii_lowercase() == *filter_name)
+            {
+                let url = custom
+                    .models_url
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/models", custom.base_url.trim_end_matches('/')));
+                let token = custom.token.clone();
+                let auth = custom.auth;
+                self.fetching_models = true;
+                return Action::FetchCustomModels { url, token, auth };
+            }
+            self.fetching_models = true;
+            return Action::RefreshCatalog;
+        }
+
+        if is_custom {
+            let custom = self
+                .custom_providers
+                .iter()
+                .find(|p| p.base_url.trim_end_matches('/') == active_base.trim_end_matches('/'));
+            let url = custom
+                .and_then(|c| c.models_url.clone())
+                .unwrap_or_else(|| format!("{}/models", active_base.trim_end_matches('/')));
+            let token = custom.and_then(|c| c.token.clone());
+            let auth = self.backend.auth();
+            self.fetching_models = true;
+            Action::FetchCustomModels { url, token, auth }
+        } else if self.backend.provider_kind() != ProviderKind::Unconfigured {
+            self.fetching_models = true;
+            Action::RefreshCatalog
+        } else {
+            Action::None
+        }
+    }
+
     pub(crate) fn handle_model_picker_key(&mut self, key: KeyEvent) -> Action {
         if key.code == KeyCode::Esc {
             self.model_picker = None;
@@ -186,8 +232,58 @@ impl App {
         match key.code {
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => {
-                let count = model_matching(&self.model_choices, &picker.filter).len();
+                let count = model_matching_with_provider(
+                    &self.model_choices,
+                    &picker.filter,
+                    picker.provider_filter.as_deref(),
+                )
+                .len();
                 picker.selected = (picker.selected + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Tab => {
+                let providers = provider_names_from_choices(&self.model_choices);
+                if !providers.is_empty() {
+                    let next = match &picker.provider_filter {
+                        None => Some(providers[0].clone()),
+                        Some(current) => {
+                            let idx = providers.iter().position(|p| p == current);
+                            match idx {
+                                Some(i) if i + 1 < providers.len() => {
+                                    Some(providers[i + 1].clone())
+                                }
+                                _ => None,
+                            }
+                        }
+                    };
+                    picker.provider_filter = next;
+                    picker.selected = 0;
+                }
+            }
+            KeyCode::BackTab => {
+                let providers = provider_names_from_choices(&self.model_choices);
+                if !providers.is_empty() {
+                    let prev = match &picker.provider_filter {
+                        None => Some(providers.last().unwrap().clone()),
+                        Some(current) => {
+                            let idx = providers.iter().position(|p| p == current);
+                            match idx {
+                                Some(0) => None,
+                                Some(i) => Some(providers[i - 1].clone()),
+                                None => None,
+                            }
+                        }
+                    };
+                    picker.provider_filter = prev;
+                    picker.selected = 0;
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let pf = picker.provider_filter.clone();
+                return self.trigger_fetch_models_for_filter(pf.as_deref());
+            }
+            KeyCode::F(5) => {
+                let pf = picker.provider_filter.clone();
+                return self.trigger_fetch_models_for_filter(pf.as_deref());
             }
             KeyCode::Backspace => {
                 picker.filter.pop();
@@ -203,7 +299,11 @@ impl App {
             }
             KeyCode::Enter => {
                 let picked = {
-                    let matches = model_matching(&self.model_choices, &picker.filter);
+                    let matches = model_matching_with_provider(
+                        &self.model_choices,
+                        &picker.filter,
+                        picker.provider_filter.as_deref(),
+                    );
                     matches
                         .get(picker.selected.min(matches.len().saturating_sub(1)))
                         .map(|model| (*model).clone())
@@ -355,7 +455,10 @@ impl App {
     /// it replaces the prompt-derived fallback and lands back through
     /// on_session_title.
     pub(crate) fn maybe_name_session(&mut self) -> Action {
-        if !self.backend.is_configured() || self.session.auto_named {
+        if !self.backend.is_configured()
+            || self.backend.model().trim().is_empty()
+            || self.session.auto_named
+        {
             return Action::None;
         }
         let excerpt = |text: &str| -> String {
@@ -424,6 +527,7 @@ impl App {
 pub struct ListPicker {
     pub filter: String,
     pub selected: usize,
+    pub provider_filter: Option<String>,
 }
 
 /// One row of the `/models` popup: a model on any connected provider.
@@ -437,16 +541,42 @@ pub struct ModelChoice {
     pub active_provider: bool,
 }
 
+pub(crate) fn provider_names_from_choices(choices: &[ModelChoice]) -> Vec<String> {
+    let mut names = Vec::new();
+    for choice in choices {
+        if !names.iter().any(|n| n == &choice.provider) {
+            names.push(choice.provider.clone());
+        }
+    }
+    names
+}
+
 /// Saved models matching the picker filter, in stored order.
+#[allow(dead_code)]
 pub(crate) fn model_matching<'a>(models: &'a [ModelChoice], filter: &str) -> Vec<&'a ModelChoice> {
+    model_matching_with_provider(models, filter, None)
+}
+
+/// Saved models matching the picker filter and optional provider filter, in stored order.
+pub(crate) fn model_matching_with_provider<'a>(
+    models: &'a [ModelChoice],
+    filter: &str,
+    provider_filter: Option<&str>,
+) -> Vec<&'a ModelChoice> {
     let filter = filter.to_ascii_lowercase();
     models
         .iter()
         .filter(|model| {
+            if let Some(pf) = provider_filter {
+                if !model.provider.eq_ignore_ascii_case(pf) {
+                    return false;
+                }
+            }
             filter.is_empty()
                 || model.name.to_ascii_lowercase().contains(&filter)
                 || model.id.to_ascii_lowercase().contains(&filter)
-                || model.provider.to_ascii_lowercase().contains(&filter)
+                || (provider_filter.is_none()
+                    && model.provider.to_ascii_lowercase().contains(&filter))
         })
         .collect()
 }
@@ -529,5 +659,10 @@ mod tests {
         assert_eq!(found.len(), 1, "filters by provider too");
         assert_eq!(found[0].id, "claude-haiku");
         assert!(model_matching(&models, "llama").is_empty());
+
+        let found = super::model_matching_with_provider(&models, "", Some("active"));
+        assert_eq!(found.len(), 2, "filters down to active provider only");
+        let found = super::model_matching_with_provider(&models, "claude", Some("active"));
+        assert!(found.is_empty(), "provider filter takes precedence");
     }
 }

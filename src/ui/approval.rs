@@ -31,22 +31,37 @@ pub(super) fn draw_approval(
     } else {
         Modifier::empty()
     });
+    approval.popup_area.set(popup);
     let has_command = tools::command_text(&approval.call).is_some();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
-        .title_top(Line::from(vec![Span::styled(
-            if has_command {
-                " run this command? "
-            } else {
-                " apply this change? "
-            },
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )]))
-        .title_bottom(Line::styled(
-            " enter run · a always · shift+tab yolo · esc deny ",
-            Style::default().fg(MUTED),
-        ))
+        .title_top(Line::from(vec![
+            Span::styled(
+                "● ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if has_command {
+                    "Run this command? "
+                } else {
+                    "Apply this change? "
+                },
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .title_bottom(Line::from(vec![
+            Span::styled(
+                " [Enter] Run ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" [A] Always ", Style::default().fg(MUTED)),
+            Span::styled(
+                " [Shift+Tab] YOLO ",
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" [Esc] Deny ", Style::default().fg(ERROR)),
+        ]))
         .padding(Padding::new(1, 1, 1, 1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);

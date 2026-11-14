@@ -147,7 +147,23 @@ impl App {
             }
         }
         if !self.backend.is_configured() {
+            self.input.set(value);
             self.error("No provider connected. Run /connect to get started.");
+            return Action::None;
+        }
+        if self.backend.model().trim().is_empty() {
+            self.input.set(value);
+            self.error("No model selected. Run /models or /connect to choose a model.");
+            return Action::None;
+        }
+        if self.backend.base_url().trim().is_empty() {
+            self.input.set(value);
+            self.error("No endpoint URL configured. Run /connect to configure this provider.");
+            return Action::None;
+        }
+        if self.backend.auth().requires_token() && self.backend.api_key().is_none() {
+            self.input.set(value);
+            self.error("No API key configured for this provider. Run /connect to enter a key.");
             return Action::None;
         }
 
@@ -390,6 +406,8 @@ impl App {
                 if value.is_empty() || value == "now" {
                     if !self.backend.is_configured() {
                         self.error("No provider connected. Run /connect to get started.");
+                    } else if self.backend.model().trim().is_empty() {
+                        self.error("No model selected. Run /models or /connect to choose a model.");
                     } else if let Some(split) = self
                         .session
                         .compaction_split(
@@ -828,6 +846,7 @@ mod tests {
             diffs: Vec::new(),
             scroll: 0,
             page_height: 0,
+            popup_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
         });
         app_approval.input.set("blocked while waiting approval");
         let action = app_approval.submit();
@@ -903,6 +922,22 @@ mod tests {
             app.notice
                 .as_ref()
                 .is_some_and(|n| n.message.contains("Connected to Ollama"))
+        );
+    }
+
+    #[test]
+    fn submit_with_empty_model_warns_and_keeps_input() {
+        let mut app = test_app();
+        app.backend.set_model(String::new());
+        app.input.set("test message".to_owned());
+        let action = app.submit();
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input.value, "test message");
+        assert!(app.session.messages.is_empty());
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("No model selected"))
         );
     }
 
@@ -990,6 +1025,7 @@ mod tests {
             diffs: Vec::new(),
             scroll: 0,
             page_height: 0,
+            popup_area: std::cell::Cell::new(ratatui::layout::Rect::default()),
         });
         app.pending_tools.push_back(ToolCall::new(
             "call-1",
