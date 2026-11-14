@@ -99,9 +99,23 @@ pub(super) fn web_fetch(arguments: &str) -> Result<String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         bail!("url must start with http:// or https://");
     }
+    let parsed_url = reqwest::Url::parse(url).context("invalid URL")?;
+    if is_blocked_destination(&parsed_url) {
+        bail!("access to local or private network addresses is blocked");
+    }
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.stop();
+            }
+            if is_blocked_destination(attempt.url()) {
+                attempt.error("redirect to private or local network address blocked")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .context("creating the fetch client")?;
     let response = client
@@ -219,4 +233,36 @@ fn decode_entities(text: &str) -> String {
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
+}
+
+fn is_blocked_destination(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    let host = host.trim_matches('[').trim_matches(']');
+    if host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+    {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                ipv4.is_loopback()
+                    || ipv4.is_private()
+                    || ipv4.is_link_local()
+                    || ipv4.is_unspecified()
+                    || (ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0 == 64))
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()
+                    || ipv6.is_unspecified()
+                    || ((ipv6.segments()[0] & 0xfe00) == 0xfc00)
+                    || ((ipv6.segments()[0] & 0xffc0) == 0xfe80)
+            }
+        };
+    }
+    false
 }

@@ -230,6 +230,14 @@ mod tests {
             "run_command",
             r#"{"command":"rm -rf build","risk":true}"#
         )));
+        assert!(requires_approval(&call(
+            "write_file",
+            r#"{"path":"../../../../etc/passwd","content":"root"}"#
+        )));
+        assert!(requires_approval(&call(
+            "edit_file",
+            r#"{"path":"../../../../etc/shadow","old_text":"a","new_text":"b"}"#
+        )));
     }
 
     #[test]
@@ -350,6 +358,20 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "gamma = 3\r\nbeta = 20\r\ngamma = 3\r\n"
         );
+
+        let leading_lf = json!({
+            "path": target,
+            "old_text": "\nbeta = 20\n",
+            "new_text": "\nbeta = 200\n",
+        });
+        execute(
+            &ToolCall::new("call_25", "edit_file", leading_lf.to_string()),
+            None,
+        )
+        .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "gamma = 3\r\nbeta = 200\r\ngamma = 3\r\n");
+        assert!(!content.contains("\r\r\n"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -476,6 +498,16 @@ mod tests {
         let scheme = ToolCall::new("call_31", "web_fetch", r#"{"url":"ftp://example.test"}"#);
         let error = execute(&scheme, None).unwrap_err().to_string();
         assert!(error.contains("http"), "{error}");
+        let local = ToolCall::new("call_32", "web_fetch", r#"{"url":"http://127.0.0.1:8080"}"#);
+        let error = execute(&local, None).unwrap_err().to_string();
+        assert!(error.contains("blocked"), "{error}");
+        let meta = ToolCall::new(
+            "call_33",
+            "web_fetch",
+            r#"{"url":"http://169.254.169.254"}"#,
+        );
+        let error = execute(&meta, None).unwrap_err().to_string();
+        assert!(error.contains("blocked"), "{error}");
 
         assert_eq!(
             strip_html(

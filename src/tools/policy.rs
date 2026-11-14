@@ -12,17 +12,84 @@ use crate::{session::ToolCall, temp};
 
 /// Whether a tool call needs the user's approval.
 ///
-/// File writes and edits never ask: their diff is shown in the transcript and
-/// they are easy to undo. Only a command the model marks as risky asks.
+/// Workspace writes and edits within the project or temp directory run
+/// automatically. Commands flagged as risky or any file modification
+/// escaping the workspace requires user approval.
 pub fn requires_approval(call: &ToolCall) -> bool {
     if call.function.name == "delegate" {
         // A subagent request spends extra tokens on the user's account.
         return true;
     }
-    matches!(
+    if matches!(
         call.function.name.as_str(),
         "run_command" | "bash_background"
     ) && command_risk(&call.function.arguments)
+    {
+        return true;
+    }
+    is_external_modification(call)
+}
+
+fn is_external_modification(call: &ToolCall) -> bool {
+    let args: Value = match serde_json::from_str(&call.function.arguments) {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+    match call.function.name.as_str() {
+        "write_file" | "edit_file" => args
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|p| !is_within_allowed_roots(Path::new(p))),
+        "multi_edit" => args
+            .get("edits")
+            .and_then(Value::as_array)
+            .is_some_and(|edits| {
+                edits.iter().any(|edit| {
+                    edit.get("path")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| !is_within_allowed_roots(Path::new(p)))
+                })
+            }),
+        _ => false,
+    }
+}
+
+fn is_within_allowed_roots(path: &Path) -> bool {
+    let ws = normalize_path(&env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let temp = normalize_path(&temp::platform_temp_root());
+    let path = if path.is_absolute() {
+        normalize_path(path)
+    } else {
+        normalize_path(&ws.join(path))
+    };
+    is_subpath(&path, &ws) || is_subpath(&path, &temp)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn is_subpath(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let p = path.to_string_lossy().to_ascii_lowercase();
+        let r = root.to_string_lossy().to_ascii_lowercase();
+        p == r || p.starts_with(&format!("{}\\", r)) || p.starts_with(&format!("{}/", r))
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
 }
 
 /// The `risk` flag the model set on a `run_command` or `bash_background` call.

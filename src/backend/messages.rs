@@ -14,6 +14,11 @@ pub(super) fn request_messages(
     mode_note: Option<&'static str>,
 ) -> Result<Vec<serde_json::Value>> {
     let mut request = Vec::with_capacity(messages.len() + 1);
+    let valid_tool_call_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flat_map(|calls| calls.iter().map(|c| c.id.as_str()))
+        .collect();
     // Images returned by tools are sent after the tool messages, so every
     // tool_call id still gets its own tool message first.
     let mut tool_images: Vec<&crate::session::ImageAttachment> = Vec::new();
@@ -48,7 +53,11 @@ pub(super) fn request_messages(
         if message.error.is_some() {
             continue;
         }
-        if message.role == Role::Tool && !tooling {
+        let is_valid_tool_call = message
+            .tool_call_id
+            .as_deref()
+            .is_some_and(|id| valid_tool_call_ids.contains(id));
+        if message.role == Role::Tool && (!tooling || !is_valid_tool_call) {
             if image_style == ImageStyle::Ollama && !message.images.is_empty() {
                 let images = message
                     .images
@@ -208,6 +217,11 @@ pub(super) fn anthropic_request_payload(
     }
 
     let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
+    let valid_tool_call_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flat_map(|calls| calls.iter().map(|c| c.id.as_str()))
+        .collect();
     for message in messages {
         if message.error.is_some() {
             continue;
@@ -281,6 +295,26 @@ pub(super) fn anthropic_request_payload(
             }
             Role::Tool => {
                 let call_id = message.tool_call_id.as_deref().unwrap_or_default();
+                if !valid_tool_call_ids.contains(call_id) {
+                    let text_block = serde_json::json!({
+                        "type": "text",
+                        "text": format!("Command output:\n{}", message.content),
+                    });
+                    if let Some(last) = anthropic_messages
+                        .last_mut()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    {
+                        if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                            arr.push(text_block);
+                            continue;
+                        }
+                    }
+                    anthropic_messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [text_block],
+                    }));
+                    continue;
+                }
                 let tool_result_block = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": call_id,
@@ -467,10 +501,25 @@ pub(super) fn gemini_request_payload(
             }
             Role::Tool => {
                 let call_id = message.tool_call_id.as_deref().unwrap_or_default();
-                let func_name = call_names
-                    .get(call_id)
-                    .map(|s| s.as_str())
-                    .unwrap_or("tool");
+                let Some(func_name) = call_names.get(call_id).map(|s| s.as_str()) else {
+                    let text_part = serde_json::json!({
+                        "text": format!("Command output:\n{}", message.content),
+                    });
+                    if let Some(last) = contents
+                        .last_mut()
+                        .filter(|c| c.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    {
+                        if let Some(arr) = last.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                            arr.push(text_part);
+                            continue;
+                        }
+                    }
+                    contents.push(serde_json::json!({
+                        "role": "user",
+                        "parts": [text_part],
+                    }));
+                    continue;
+                };
                 let part = serde_json::json!({
                     "functionResponse": {
                         "name": func_name,
@@ -713,5 +762,29 @@ mod tests {
             contents[2]["parts"][0]["functionResponse"]["name"],
             "list_dir"
         );
+    }
+
+    #[test]
+    fn orphaned_tool_messages_become_user_content_so_api_never_rejects_400() {
+        use super::{anthropic_request_payload, gemini_request_payload};
+
+        let messages = vec![
+            Message::new(Role::User, "$ echo hi"),
+            Message::tool_result("user-cmd-1", "hi"),
+        ];
+
+        let openai = request_messages(&messages, true, ImageStyle::None, None, None).unwrap();
+        assert_eq!(openai.len(), 3);
+        assert_eq!(openai[1]["role"], "user");
+        assert_eq!(openai[2]["role"], "user");
+        assert!(openai[2]["content"].as_str().unwrap().contains("hi"));
+
+        let (_, anthropic) = anthropic_request_payload(&messages, true, None, None).unwrap();
+        assert_eq!(anthropic.len(), 1);
+        assert_eq!(anthropic[0]["role"], "user");
+
+        let (_, gemini) = gemini_request_payload(&messages, true, None, None).unwrap();
+        assert_eq!(gemini.len(), 1);
+        assert_eq!(gemini[0]["role"], "user");
     }
 }

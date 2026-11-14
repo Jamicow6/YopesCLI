@@ -107,7 +107,12 @@ impl Mode {
             Self::Plan => {
                 matches!(
                     tool,
-                    "write_file" | "edit_file" | "multi_edit" | "run_command" | "bash_background"
+                    "write_file"
+                        | "edit_file"
+                        | "multi_edit"
+                        | "run_command"
+                        | "bash_background"
+                        | "bash_kill"
                 )
             }
             Self::Chat => true,
@@ -161,6 +166,7 @@ mod tests {
         assert!(Mode::Plan.denied("multi_edit"));
         assert!(Mode::Plan.denied("run_command"));
         assert!(Mode::Plan.denied("bash_background"));
+        assert!(Mode::Plan.denied("bash_kill"));
         assert!(Mode::Chat.denied("read_file"));
         assert!(
             Mode::Plan
