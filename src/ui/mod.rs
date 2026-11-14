@@ -100,6 +100,8 @@ const CAT_ROWS: [&str; 6] = [
 ];
 /// The tail flicks through these positions.
 const TAILS: [&str; 4] = ["", "\\", "\\\\", "\\~"];
+/// The yarn ball spins while rolling.
+const BALL_FRAMES: [&str; 4] = ["(o)", "(@)", "(O)", "(@)"];
 /// How wide the whole mascot is, so every row lines up.
 const MASCOT_WIDTH: usize = 15;
 /// The ball of yarn rolls this many steps out and back.
@@ -117,33 +119,81 @@ pub(super) fn responsive_palette_width(area_width: u16) -> u16 {
 
 /// One frame of the welcome mascot.
 ///
-/// The cat blinks now and then, its tail flicks, and the ball of yarn rolls
-/// out and back with the thread trailing behind it.
+/// The cat tracks the rolling yarn, blinks, twitches its ears, paws the ball,
+/// and snoozes during longer idle stretches.
 fn mascot_frame(step: usize) -> Vec<Line<'static>> {
+    // ponytail: procedural tick animation; add stateful sprite machine if interactive pet actions are needed.
     let mut rows: Vec<String> = CAT_ROWS.iter().map(|row| (*row).to_owned()).collect();
-    rows[4].push_str(TAILS[(step / 4) % TAILS.len()]);
-    // The cat blinks every few seconds.
-    if step % 40 == 39 {
+    let sleeping = step % 160 >= 135;
+
+    if sleeping {
+        let z = match (step / 4) % 3 {
+            0 => "  /\\_/\\  z",
+            1 => "  /\\_/\\  Z",
+            _ => "  /\\_/\\ zZ",
+        };
+        rows[0] = z.to_owned();
         rows[1] = rows[1].replace("o.o", "-.-");
-    }
-    // The ball rolls out and back; the thread trails behind it.
-    let travel = (step / 2) % (YARN_TRAVEL * 2);
-    let (position, trailing_left) = if travel < YARN_TRAVEL {
-        (travel, true)
+        rows[2] = rows[2].replace('^', "v");
+        let mut yarn = String::from("(o)");
+        yarn.push_str(&"~".repeat(MASCOT_WIDTH - 3));
+        rows.push(yarn);
     } else {
-        (YARN_TRAVEL * 2 - travel, false)
-    };
-    let mut yarn = String::new();
-    if trailing_left {
-        yarn.push_str(&"~".repeat(position));
-        yarn.push_str("(o)");
-        yarn.push_str(&" ".repeat(MASCOT_WIDTH - position - 3));
-    } else {
-        yarn.push_str(&" ".repeat(position));
-        yarn.push_str("(o)");
-        yarn.push_str(&"~".repeat(MASCOT_WIDTH - position - 3));
+        // Ear twitches and occasional mew.
+        if step % 70 == 20 {
+            rows[0] = "  --_/\\  ".to_owned();
+        } else if step % 70 == 50 {
+            rows[0] = "  /\\_--  ".to_owned();
+        } else if step % 160 == 70 {
+            rows[0] = "  /\\_/\\  *mew".to_owned();
+        }
+
+        // Yarn ball position and rolling direction.
+        let travel = (step / 2) % (YARN_TRAVEL * 2);
+        let (position, trailing_left) = if travel < YARN_TRAVEL {
+            (travel, true)
+        } else {
+            (YARN_TRAVEL * 2 - travel, false)
+        };
+
+        // Eye tracking: follow the yarn, blink, or smile when batting.
+        let eyes = if step % 40 >= 38 {
+            "-.-"
+        } else if position >= 5 && !trailing_left {
+            "^.^"
+        } else {
+            match position {
+                0..=1 => "<.<",
+                2..=3 => "o.o",
+                _ => ">.>",
+            }
+        };
+        rows[1] = rows[1].replace("o.o", eyes);
+
+        // Paw bats the yarn at the right turn.
+        if position >= 5 && trailing_left {
+            rows[4] = rows[4].replace("|_)", "/_)");
+            rows[5] = "   \"    / ".to_owned();
+        }
+
+        // Tail flick.
+        rows[4].push_str(TAILS[(step / 4) % TAILS.len()]);
+
+        // Rolling yarn ball.
+        let ball = BALL_FRAMES[(step / 2) % BALL_FRAMES.len()];
+        let mut yarn = String::new();
+        if trailing_left {
+            yarn.push_str(&"~".repeat(position));
+            yarn.push_str(ball);
+            yarn.push_str(&" ".repeat(MASCOT_WIDTH - position - 3));
+        } else {
+            yarn.push_str(&" ".repeat(position));
+            yarn.push_str(ball);
+            yarn.push_str(&"~".repeat(MASCOT_WIDTH - position - 3));
+        }
+        rows.push(yarn);
     }
-    rows.push(yarn);
+
     rows.into_iter()
         .map(|row| {
             let mut row = row;
@@ -644,7 +694,7 @@ mod tests {
     fn the_mascot_animates_and_keeps_its_width() {
         use super::mascot_frame;
 
-        let frames: Vec<Vec<String>> = (0..40)
+        let frames: Vec<Vec<String>> = (0..200)
             .map(|step| {
                 mascot_frame(step)
                     .into_iter()
@@ -666,7 +716,7 @@ mod tests {
             );
             assert_eq!(frame.len(), 7, "the cat and the ball of yarn");
         }
-        // The tail flicks, so the frames differ.
+        // The mascot animates across ticks.
         let first = &frames[0];
         let later = &frames[8];
         assert_ne!(first, later, "the mascot should move");

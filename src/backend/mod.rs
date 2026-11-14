@@ -248,6 +248,15 @@ impl Backend {
             ProviderKind::Unconfigured => Err(anyhow!(
                 "no provider connected; run /connect to get started"
             )),
+            _ if self.model.trim().is_empty() => {
+                Err(anyhow!("no model selected; run /models or /connect"))
+            }
+            _ if self.base_url.trim().is_empty() => {
+                Err(anyhow!("no endpoint URL configured; run /connect"))
+            }
+            _ if self.auth.requires_token() && self.api_key.is_none() => {
+                Err(anyhow!("no API key configured; run /connect"))
+            }
             ProviderKind::OpenAi | ProviderKind::Custom => {
                 self.stream_openai(request_id, &messages, tooling, mode_note, &events)
                     .await

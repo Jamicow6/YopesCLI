@@ -355,7 +355,10 @@ impl App {
     /// it replaces the prompt-derived fallback and lands back through
     /// on_session_title.
     pub(crate) fn maybe_name_session(&mut self) -> Action {
-        if !self.backend.is_configured() || self.session.auto_named {
+        if !self.backend.is_configured()
+            || self.backend.model().trim().is_empty()
+            || self.session.auto_named
+        {
             return Action::None;
         }
         let excerpt = |text: &str| -> String {

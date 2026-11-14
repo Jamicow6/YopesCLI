@@ -34,18 +34,27 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(TEXT),
         ));
         welcome.push(Line::raw(""));
-        if app.backend.is_configured() {
-            welcome.push(Line::styled(
-                "Type a message to begin.",
-                Style::default().fg(MUTED),
-            ));
-        } else {
+        if !app.backend.is_configured() {
             welcome.push(Line::styled(
                 "No provider connected.",
                 Style::default().fg(MUTED),
             ));
             welcome.push(Line::styled(
                 "Run /connect to add a provider or a custom endpoint.",
+                Style::default().fg(MUTED),
+            ));
+        } else if app.backend.model().is_empty() {
+            welcome.push(Line::styled(
+                "No model selected.",
+                Style::default().fg(MUTED),
+            ));
+            welcome.push(Line::styled(
+                "Run /models or /connect to choose a model.",
+                Style::default().fg(MUTED),
+            ));
+        } else {
+            welcome.push(Line::styled(
+                "Type a message to begin.",
                 Style::default().fg(MUTED),
             ));
         }

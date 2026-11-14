@@ -377,9 +377,6 @@ impl Config {
                     .filter(|model| !model.trim().is_empty())
             })
             .unwrap_or_else(|| default_model(provider));
-        if model.trim().is_empty() {
-            bail!("model name cannot be empty; run /connect");
-        }
 
         let provider_base_var = match provider {
             ProviderKind::OpenAi => Some("OPENAI_BASE_URL"),
@@ -588,6 +585,36 @@ mod tests {
 
         let newest = newest_session_path(&temp).unwrap();
         assert_eq!(newest, second);
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn custom_provider_with_empty_model_does_not_bail() {
+        let temp = env::temp_dir().join(format!(
+            "yopes-config-empty-model-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let config_file = temp.join(".yopes-config.json");
+        fs::write(
+            &config_file,
+            r#"{
+                "version": 1,
+                "provider": "custom",
+                "provider_name": "Local",
+                "model": "",
+                "base_url": "http://localhost:11434/v1"
+            }"#,
+        )
+        .unwrap();
+
+        let saved = load_saved(&config_file).unwrap().unwrap();
+        assert_eq!(saved.model, "");
+        assert_eq!(saved.provider, ProviderKind::Custom);
 
         let _ = fs::remove_dir_all(&temp);
     }
