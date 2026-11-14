@@ -544,11 +544,8 @@ impl App {
                     if self.backend.provider_kind() == ProviderKind::Custom {
                         self.backend.set_saved_models(saved_models.clone());
                     }
-                    let _ = config::update_endpoint_models(
-                        &self.config_path,
-                        &base_url,
-                        &saved_models,
-                    );
+                    let _ =
+                        config::update_endpoint_models(&self.config_path, &base_url, &saved_models);
                     self.model_choices = self.build_model_choices();
                     self.info(format!(
                         "Fetched {} models for {}.",

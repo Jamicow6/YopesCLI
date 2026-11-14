@@ -2,12 +2,9 @@ use super::*;
 
 impl App {
     pub(crate) fn model_matches(&self) -> Vec<&ModelChoice> {
-        let (filter, provider_filter) = self
-            .model_picker
-            .as_ref()
-            .map_or(("", None), |picker| {
-                (picker.filter.as_str(), picker.provider_filter.as_deref())
-            });
+        let (filter, provider_filter) = self.model_picker.as_ref().map_or(("", None), |picker| {
+            (picker.filter.as_str(), picker.provider_filter.as_deref())
+        });
         model_matching_with_provider(&self.model_choices, filter, provider_filter)
     }
 
@@ -191,9 +188,10 @@ impl App {
                 .iter()
                 .find(|p| p.name.to_ascii_lowercase() == *filter_name)
             {
-                let url = custom.models_url.clone().unwrap_or_else(|| {
-                    format!("{}/models", custom.base_url.trim_end_matches('/'))
-                });
+                let url = custom
+                    .models_url
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/models", custom.base_url.trim_end_matches('/')));
                 let token = custom.token.clone();
                 let auth = custom.auth;
                 self.fetching_models = true;
@@ -554,6 +552,7 @@ pub(crate) fn provider_names_from_choices(choices: &[ModelChoice]) -> Vec<String
 }
 
 /// Saved models matching the picker filter, in stored order.
+#[allow(dead_code)]
 pub(crate) fn model_matching<'a>(models: &'a [ModelChoice], filter: &str) -> Vec<&'a ModelChoice> {
     model_matching_with_provider(models, filter, None)
 }

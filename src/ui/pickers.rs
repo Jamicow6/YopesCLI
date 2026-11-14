@@ -26,7 +26,10 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
     };
 
     let title_top = Line::from(vec![
-        Span::styled(format!(" models{filter_field} "), Style::default().fg(MUTED)),
+        Span::styled(
+            format!(" models{filter_field} "),
+            Style::default().fg(MUTED),
+        ),
         Span::styled(
             format!("[{prov_label}]"),
             if picker.provider_filter.is_some() {
