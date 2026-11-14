@@ -58,7 +58,9 @@ pub fn default_catalog() -> Catalog {
         "gpt-4o".to_owned(),
         Model {
             name: "GPT-4o".to_owned(),
-            limit: Some(Limit { context: Some(128_000) }),
+            limit: Some(Limit {
+                context: Some(128_000),
+            }),
             cost: None,
         },
     );
@@ -66,7 +68,9 @@ pub fn default_catalog() -> Catalog {
         "gpt-4o-mini".to_owned(),
         Model {
             name: "GPT-4o mini".to_owned(),
-            limit: Some(Limit { context: Some(128_000) }),
+            limit: Some(Limit {
+                context: Some(128_000),
+            }),
             cost: None,
         },
     );
@@ -74,7 +78,9 @@ pub fn default_catalog() -> Catalog {
         "o3-mini".to_owned(),
         Model {
             name: "o3-mini".to_owned(),
-            limit: Some(Limit { context: Some(200_000) }),
+            limit: Some(Limit {
+                context: Some(200_000),
+            }),
             cost: None,
         },
     );
@@ -94,7 +100,9 @@ pub fn default_catalog() -> Catalog {
         "claude-3-7-sonnet-latest".to_owned(),
         Model {
             name: "Claude 3.7 Sonnet".to_owned(),
-            limit: Some(Limit { context: Some(200_000) }),
+            limit: Some(Limit {
+                context: Some(200_000),
+            }),
             cost: None,
         },
     );
@@ -102,7 +110,9 @@ pub fn default_catalog() -> Catalog {
         "claude-3-5-sonnet-latest".to_owned(),
         Model {
             name: "Claude 3.5 Sonnet".to_owned(),
-            limit: Some(Limit { context: Some(200_000) }),
+            limit: Some(Limit {
+                context: Some(200_000),
+            }),
             cost: None,
         },
     );
@@ -110,7 +120,9 @@ pub fn default_catalog() -> Catalog {
         "claude-3-5-haiku-latest".to_owned(),
         Model {
             name: "Claude 3.5 Haiku".to_owned(),
-            limit: Some(Limit { context: Some(200_000) }),
+            limit: Some(Limit {
+                context: Some(200_000),
+            }),
             cost: None,
         },
     );
@@ -130,7 +142,9 @@ pub fn default_catalog() -> Catalog {
         "gemini-2.0-flash".to_owned(),
         Model {
             name: "Gemini 2.0 Flash".to_owned(),
-            limit: Some(Limit { context: Some(1_000_000) }),
+            limit: Some(Limit {
+                context: Some(1_000_000),
+            }),
             cost: None,
         },
     );
@@ -138,7 +152,9 @@ pub fn default_catalog() -> Catalog {
         "gemini-1.5-pro".to_owned(),
         Model {
             name: "Gemini 1.5 Pro".to_owned(),
-            limit: Some(Limit { context: Some(2_000_000) }),
+            limit: Some(Limit {
+                context: Some(2_000_000),
+            }),
             cost: None,
         },
     );

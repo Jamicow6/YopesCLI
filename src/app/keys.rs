@@ -57,10 +57,7 @@ impl App {
                                 .encode(png_bytes.into_inner());
                             let name = format!("paste-{}.png", self.next_image);
                             self.next_image += 1;
-                            self.attachments.push(ImageAttachment {
-                                name,
-                                data: b64,
-                            });
+                            self.attachments.push(ImageAttachment { name, data: b64 });
                             self.info(format!(
                                 "Image {} attached — send it with the next message.",
                                 self.attachments.len()
@@ -95,7 +92,9 @@ impl App {
                                 return self.approve_pending_tool(true);
                             } else if rel_x < 43 {
                                 self.tools_mode = ToolsMode::Auto;
-                                self.info("Permission: yolo — all commands and edits run automatically");
+                                self.info(
+                                    "Permission: yolo — all commands and edits run automatically",
+                                );
                                 return self.approve_pending_tool(true);
                             } else {
                                 return self.deny_pending_tool();
@@ -246,7 +245,9 @@ impl App {
                     MouseEventKind::Down(MouseButton::Left) => {
                         let rel_x = (mouse.column - target.x) as usize;
                         let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
-                        let pos = self.input.pos_at_coords(rel_x, rel_y, target.width as usize);
+                        let pos = self
+                            .input
+                            .pos_at_coords(rel_x, rel_y, target.width as usize);
                         self.input.selection_anchor = Some(pos);
                         self.input.cursor = pos;
                         return Action::None;
@@ -254,7 +255,9 @@ impl App {
                     MouseEventKind::Drag(MouseButton::Left) => {
                         let rel_x = (mouse.column - target.x) as usize;
                         let rel_y = (mouse.row - target.y) as usize + self.input_scroll;
-                        let pos = self.input.pos_at_coords(rel_x, rel_y, target.width as usize);
+                        let pos = self
+                            .input
+                            .pos_at_coords(rel_x, rel_y, target.width as usize);
                         if self.input.selection_anchor.is_none() {
                             self.input.selection_anchor = Some(self.input.cursor);
                         }

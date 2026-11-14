@@ -365,6 +365,7 @@ pub(super) fn normalize_line(line: &str) -> String {
 
 /// Pad `text` with spaces to `width` display columns, so CJK and emoji
 /// align like ASCII does.
+#[cfg(test)]
 pub(super) fn pad_to(text: &str, width: usize) -> String {
     let display = UnicodeWidthStr::width(text);
     if display >= width {

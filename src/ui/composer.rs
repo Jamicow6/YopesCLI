@@ -98,15 +98,27 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
         .send_pulse
         .is_some_and(|mark| app.spinner.saturating_sub(mark) < 5);
     let (prompt_marker, prompt_style) = if app.tools_mode == ToolsMode::Auto {
-        ("⚡", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD))
+        (
+            "⚡",
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        )
     } else if pulse {
-        ("›", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+        (
+            "›",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )
     } else if app.is_busy() {
         ("›", Style::default().fg(MUTED))
     } else {
-        ("›", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+        (
+            "›",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )
     };
-    frame.render_widget(Paragraph::new(prompt_marker).style(prompt_style), columns[0]);
+    frame.render_widget(
+        Paragraph::new(prompt_marker).style(prompt_style),
+        columns[0],
+    );
 
     let target = columns[1];
     app.composer_area = Some(target);

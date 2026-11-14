@@ -37,7 +37,10 @@ pub(super) fn draw_approval(
         .border_type(BorderType::Rounded)
         .border_style(border)
         .title_top(Line::from(vec![
-            Span::styled("● ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "● ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 if has_command {
                     "Run this command? "

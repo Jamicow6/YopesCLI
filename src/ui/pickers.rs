@@ -224,7 +224,10 @@ pub(super) fn draw_palette(
             Span::styled(marker, Style::default().fg(ACCENT)),
             Span::styled(fit_to(&name, name_col_width), name_style),
             Span::raw(" "),
-            Span::styled(truncate(command.description, desc_col_width), description_style),
+            Span::styled(
+                truncate(command.description, desc_col_width),
+                description_style,
+            ),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }
