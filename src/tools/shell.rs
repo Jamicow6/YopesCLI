@@ -90,6 +90,12 @@ struct BashJob {
     exit: Option<i32>,
 }
 
+impl Drop for BashJob {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.log_path);
+    }
+}
+
 const MAX_BASH_JOBS: usize = 16;
 static BASH_JOBS: OnceLock<Mutex<HashMap<u32, BashJob>>> = OnceLock::new();
 static JOB_SEQ: AtomicU32 = AtomicU32::new(1);
@@ -183,14 +189,7 @@ pub(super) fn bash_background(arguments: &str) -> Result<String> {
     // Finished jobs forget themselves on read, but those the model
     // never reads again stay; drop them here so the cap cannot be
     // exhausted by finished work.
-    jobs.retain(|_, job| {
-        if job.child.is_none() {
-            let _ = fs::remove_file(&job.log_path);
-            false
-        } else {
-            true
-        }
-    });
+    jobs.retain(|_, job| job.child.is_some());
     if jobs.len() >= MAX_BASH_JOBS {
         bail!(
             "too many bash jobs are waiting or running ({}, the limit is \
@@ -276,7 +275,6 @@ pub(super) fn bash_output(arguments: &str) -> Result<String> {
     }
     // A job whose child is gone and whose exit was read frees its slot.
     if job.exit.is_some() && job.child.is_none() {
-        let _ = fs::remove_file(&job.log_path);
         jobs.remove(&args.job_id);
     }
     Ok(truncate_output(result))
@@ -291,11 +289,12 @@ pub(super) fn bash_kill(arguments: &str) -> Result<String> {
             args.job_id
         );
     };
-    if let Some(mut child) = job.child.take() {
-        kill_process_tree(&mut child);
-    }
-    let _ = fs::remove_file(&job.log_path);
-    jobs.remove(&args.job_id);
+    let Some(mut child) = job.child.take() else {
+        return Ok(format!("Bash job {} already finished.", args.job_id));
+    };
+    kill_process_tree(&mut child);
+    job.child = None;
+    job.exit = Some(-1);
     Ok(format!(
         "Killed bash job {}. It reported no exit code.",
         args.job_id
