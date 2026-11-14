@@ -425,8 +425,40 @@ pub(super) fn apply_text_edit(
         return Some((updated, matches));
     }
     // Endings can only be why a multi-line needle misses.
-    if !old.contains('\n') {
+    if !old.contains('\n') && !old.contains('\r') {
         return None;
+    }
+    // Fast path for uniform line endings: direct replacement preserves exact bytes
+    if source.contains("\r\n") {
+        let old_crlf = old
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\n', "\r\n");
+        if source.contains(&old_crlf) {
+            let new_crlf = new
+                .replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .replace('\n', "\r\n");
+            let matches = source.matches(&old_crlf).count();
+            let updated = if replace_all {
+                source.replace(&old_crlf, &new_crlf)
+            } else {
+                source.replacen(&old_crlf, &new_crlf, 1)
+            };
+            return Some((updated, matches));
+        }
+    } else {
+        let old_lf = old.replace("\r\n", "\n").replace('\r', "\n");
+        if source.contains(&old_lf) {
+            let new_lf = new.replace("\r\n", "\n").replace('\r', "\n");
+            let matches = source.matches(&old_lf).count();
+            let updated = if replace_all {
+                source.replace(&old_lf, &new_lf)
+            } else {
+                source.replacen(&old_lf, &new_lf, 1)
+            };
+            return Some((updated, matches));
+        }
     }
     let (flat_source, map, crlf) = {
         let mut text = String::with_capacity(source.len());
@@ -461,11 +493,15 @@ pub(super) fn apply_text_edit(
     let mut copied = 0;
     let mut matches = 0;
     for (at, matched) in flat_source.match_indices(&flat_old) {
-        let start = map[at];
+        let mut start = map[at];
+        if start > 0 && source.as_bytes()[start - 1] == b'\r' && flat_old.starts_with('\n') {
+            start -= 1;
+        }
+        let start = start.max(copied);
         let end = if at + matched.len() == map.len() {
             source.len()
         } else {
-            map[at + matched.len()]
+            map[at + matched.len()].max(start)
         };
         updated.push_str(&source[copied..start]);
         updated.push_str(&new_text);

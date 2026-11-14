@@ -190,10 +190,20 @@ impl Session {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::new());
-        }
-        let source = fs::read_to_string(path)?;
+        let load_path = if path.exists() {
+            path.to_path_buf()
+        } else {
+            let temporary = path.with_extension("tmp");
+            let backup = path.with_extension("bak");
+            if temporary.exists() {
+                temporary
+            } else if backup.exists() {
+                backup
+            } else {
+                return Ok(Self::new());
+            }
+        };
+        let source = fs::read_to_string(&load_path)?;
         let mut session: Self = serde_json::from_str(&source)?;
         if session.version != SESSION_VERSION {
             bail!(
@@ -266,11 +276,18 @@ impl Session {
         #[cfg(windows)]
         {
             if path.exists() {
-                fs::remove_file(path)
-                    .with_context(|| format!("removing old {}", path.display()))?;
+                let backup = path.with_extension("bak");
+                let _ = fs::remove_file(&backup);
+                let _ = fs::rename(path, &backup);
+                if let Err(error) = fs::rename(&temporary, path) {
+                    let _ = fs::rename(&backup, path);
+                    return Err(error).with_context(|| format!("replacing {}", path.display()));
+                }
+                let _ = fs::remove_file(&backup);
+            } else {
+                fs::rename(&temporary, path)
+                    .with_context(|| format!("replacing {}", path.display()))?;
             }
-            fs::rename(&temporary, path)
-                .with_context(|| format!("replacing {}", path.display()))?;
         }
         Ok(())
     }

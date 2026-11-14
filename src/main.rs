@@ -43,6 +43,7 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    terminal::install_panic_hook();
     let cli = Cli::parse();
     if matches!(cli.command, Some(Command::Update)) {
         return update::run().await;

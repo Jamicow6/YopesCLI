@@ -55,8 +55,7 @@ pub(super) fn run_command(arguments: &str) -> Result<String> {
             break Some(status);
         }
         if started.elapsed() >= Duration::from_secs(timeout) {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_process_tree(&mut child);
             timed_out = true;
             break None;
         }
@@ -184,7 +183,14 @@ pub(super) fn bash_background(arguments: &str) -> Result<String> {
     // Finished jobs forget themselves on read, but those the model
     // never reads again stay; drop them here so the cap cannot be
     // exhausted by finished work.
-    jobs.retain(|_, job| job.child.is_some());
+    jobs.retain(|_, job| {
+        if job.child.is_none() {
+            let _ = fs::remove_file(&job.log_path);
+            false
+        } else {
+            true
+        }
+    });
     if jobs.len() >= MAX_BASH_JOBS {
         bail!(
             "too many bash jobs are waiting or running ({}, the limit is \
@@ -243,8 +249,7 @@ pub(super) fn bash_output(arguments: &str) -> Result<String> {
                 held = None;
             }
             None if job.started.elapsed() >= Duration::from_secs(job.timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_process_tree(child);
                 job.exit = Some(-1);
                 held = None;
             }
@@ -271,6 +276,7 @@ pub(super) fn bash_output(arguments: &str) -> Result<String> {
     }
     // A job whose child is gone and whose exit was read frees its slot.
     if job.exit.is_some() && job.child.is_none() {
+        let _ = fs::remove_file(&job.log_path);
         jobs.remove(&args.job_id);
     }
     Ok(truncate_output(result))
@@ -285,15 +291,25 @@ pub(super) fn bash_kill(arguments: &str) -> Result<String> {
             args.job_id
         );
     };
-    let Some(child) = job.child.as_mut() else {
-        return Ok(format!("Bash job {} already finished.", args.job_id));
-    };
-    let _ = child.kill();
-    let _ = child.wait();
-    job.child = None;
-    job.exit = Some(-1);
+    if let Some(mut child) = job.child.take() {
+        kill_process_tree(&mut child);
+    }
+    let _ = fs::remove_file(&job.log_path);
+    jobs.remove(&args.job_id);
     Ok(format!(
         "Killed bash job {}. It reported no exit code.",
         args.job_id
     ))
+}
+
+fn kill_process_tree(child: &mut ProcessChild) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        let _ = ProcessCommand::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

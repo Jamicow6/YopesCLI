@@ -22,6 +22,21 @@ pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
+pub(crate) fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            Show
+        );
+        default_hook(info);
+    }));
+}
+
 impl TerminalGuard {
     pub(crate) fn new() -> Result<Self> {
         enable_raw_mode().context("enabling terminal raw mode")?;

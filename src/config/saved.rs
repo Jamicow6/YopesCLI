@@ -635,10 +635,21 @@ pub(crate) fn save_reasoning_effort(path: &Path, value: Option<String>) -> Resul
 }
 
 pub(super) fn load_saved(path: &Path) -> Result<Option<SavedConfig>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let load_path = if path.exists() {
+        path.to_path_buf()
+    } else {
+        let temporary = path.with_extension("tmp");
+        let backup = path.with_extension("bak");
+        if temporary.exists() {
+            temporary
+        } else if backup.exists() {
+            backup
+        } else {
+            return Ok(None);
+        }
+    };
+    let source = fs::read_to_string(&load_path)
+        .with_context(|| format!("reading {}", load_path.display()))?;
     let saved: SavedConfig =
         serde_json::from_str(&source).with_context(|| format!("parsing {}", path.display()))?;
     if saved.version != CONFIG_VERSION {
@@ -671,9 +682,18 @@ fn save_saved(path: &Path, saved: &SavedConfig) -> Result<()> {
     #[cfg(windows)]
     {
         if path.exists() {
-            fs::remove_file(path).with_context(|| format!("removing old {}", path.display()))?;
+            let backup = path.with_extension("bak");
+            let _ = fs::remove_file(&backup);
+            let _ = fs::rename(path, &backup);
+            if let Err(error) = fs::rename(&temporary, path) {
+                let _ = fs::rename(&backup, path);
+                return Err(error).with_context(|| format!("replacing {}", path.display()));
+            }
+            let _ = fs::remove_file(&backup);
+        } else {
+            fs::rename(&temporary, path)
+                .with_context(|| format!("replacing {}", path.display()))?;
         }
-        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
     }
     Ok(())
 }

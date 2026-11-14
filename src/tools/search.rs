@@ -10,10 +10,12 @@ struct GlobArgs {
 }
 
 /// Directories the walkers never enter, so caches and dependencies stay out.
-const SKIP_DIRS: [&str; 5] = [
+const SKIP_DIRS: [&str; 7] = [
     ".git",
     "target",
     "node_modules",
+    ".venv",
+    "venv",
     "__pycache__",
     ".pytest_cache",
 ];
@@ -24,7 +26,7 @@ const MAX_WALK_DEPTH: usize = 32;
 pub(super) fn glob(arguments: &str) -> Result<String> {
     let args: GlobArgs = parse(arguments)?;
     let pattern = args.pattern.trim().replace('\\', "/");
-    let segments = pattern
+    let mut segments = pattern
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != ".")
         .map(str::to_owned)
@@ -32,6 +34,7 @@ pub(super) fn glob(arguments: &str) -> Result<String> {
     if segments.is_empty() {
         bail!("pattern cannot be empty");
     }
+    segments.dedup_by(|a, b| a == "**" && b == "**");
     if Path::new(&segments[0]).is_absolute() {
         bail!("patterns are relative to the working directory");
     }
