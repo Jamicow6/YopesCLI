@@ -144,6 +144,10 @@ impl Backend {
         &self.models
     }
 
+    pub fn set_saved_models(&mut self, models: Vec<SavedModel>) {
+        self.models = models;
+    }
+
     /// Dollars per million tokens for the active model, when the catalog that
     /// saved this connection listed a price.
     pub fn model_price(&self) -> Option<(f64, f64)> {

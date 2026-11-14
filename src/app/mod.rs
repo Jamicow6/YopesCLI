@@ -212,6 +212,8 @@ pub struct App {
     /// The models offered by every connected provider, rebuilt when the
     /// picker opens.
     pub model_choices: Vec<ModelChoice>,
+    /// Whether models are actively being fetched in the background.
+    pub fetching_models: bool,
     /// Popup picker opened by `/sessions`.
     pub session_picker: Option<ListPicker>,
     pub running_tool: Option<RunningTool>,
@@ -295,6 +297,7 @@ impl App {
             approval: None,
             model_picker: None,
             model_choices: Vec::new(),
+            fetching_models: false,
             session_picker: None,
             running_tool: None,
             changes: HashMap::new(),

@@ -328,6 +328,14 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             text.push_str(" · esc stop");
             (text, ACCENT)
         }
+    } else if app.fetching_models {
+        (
+            format!(
+                "{} fetching models · esc stop",
+                SPINNER[app.spinner % SPINNER.len()]
+            ),
+            ACCENT,
+        )
     } else if let Some(notice) = &app.notice {
         (
             notice.message.clone(),

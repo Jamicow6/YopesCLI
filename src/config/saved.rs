@@ -499,6 +499,28 @@ pub(crate) fn load_endpoint_models(path: &Path, base_url: &str) -> Vec<SavedMode
     Vec::new()
 }
 
+/// Replace the model list for an endpoint across active, saved, and custom lists.
+pub(crate) fn update_endpoint_models(
+    path: &Path,
+    endpoint: &str,
+    models: &[SavedModel],
+) -> Result<()> {
+    let endpoint = endpoint.trim_end_matches('/');
+    update_saved(path, |saved| {
+        if saved.base_url.trim_end_matches('/') == endpoint {
+            saved.models = models.to_vec();
+        }
+        if let Some(provider) = saved.provider_keys.get_mut(endpoint) {
+            provider.models = models.to_vec();
+        }
+        for custom in &mut saved.custom_providers {
+            if custom.base_url.trim_end_matches('/') == endpoint {
+                custom.models = models.to_vec();
+            }
+        }
+    })
+}
+
 /// Update the context window limit for a model across active, saved, and custom lists.
 pub(crate) fn update_model_context_window(
     path: &Path,

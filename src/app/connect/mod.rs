@@ -104,7 +104,42 @@ impl App {
         Action::None
     }
     pub(crate) fn on_catalog(&mut self, result: catalog::FetchResult) {
+        self.fetching_models = false;
         let Some(connect) = self.connect.as_mut() else {
+            match result {
+                Err(error) => self.error(format!("Could not refresh catalog: {error}")),
+                Ok(cat) => {
+                    for cp in config::load_connected_providers(&self.config_path) {
+                        if let Some(pid) = &cp.provider_id {
+                            if let Some(prov) = cat.providers.get(pid) {
+                                let models: Vec<SavedModel> = prov
+                                    .models
+                                    .iter()
+                                    .map(|(id, m)| SavedModel {
+                                        id: id.clone(),
+                                        name: m.name.clone(),
+                                        context_window: m.limit.as_ref().and_then(|l| l.context),
+                                        input_cost: m.cost.as_ref().map(|c| c.input),
+                                        output_cost: m.cost.as_ref().map(|c| c.output),
+                                    })
+                                    .collect();
+                                let _ = config::update_endpoint_models(
+                                    &self.config_path,
+                                    &cp.base_url,
+                                    &models,
+                                );
+                                if self.backend.base_url().trim_end_matches('/')
+                                    == cp.base_url.trim_end_matches('/')
+                                {
+                                    self.backend.set_saved_models(models);
+                                }
+                            }
+                        }
+                    }
+                    self.model_choices = self.build_model_choices();
+                    self.info("Refreshed models catalog.");
+                }
+            }
             return;
         };
         connect.loading = false;

@@ -512,7 +512,51 @@ impl App {
 
     /// The custom endpoint's model list arrived: merge it into the manager.
     pub(crate) fn on_custom_models(&mut self, result: Result<Vec<(String, String)>, String>) {
+        self.fetching_models = false;
         let Some(connect) = self.connect.as_mut() else {
+            match result {
+                Err(error) => self.error(format!("Could not fetch models: {error}")),
+                Ok(raw_models) => {
+                    let mut saved_models: Vec<SavedModel> = Vec::new();
+                    for (id, name) in raw_models {
+                        let id = id.trim().to_owned();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        let display_name = if name.trim().is_empty() {
+                            id.clone()
+                        } else {
+                            name
+                        };
+                        saved_models.push(SavedModel {
+                            id,
+                            name: display_name,
+                            ..SavedModel::default()
+                        });
+                    }
+                    let count = saved_models.len();
+                    let base_url = self.backend.base_url().to_owned();
+                    for cp in &mut self.custom_providers {
+                        if cp.base_url.trim_end_matches('/') == base_url.trim_end_matches('/') {
+                            cp.models = saved_models.clone();
+                        }
+                    }
+                    if self.backend.provider_kind() == ProviderKind::Custom {
+                        self.backend.set_saved_models(saved_models.clone());
+                    }
+                    let _ = config::update_endpoint_models(
+                        &self.config_path,
+                        &base_url,
+                        &saved_models,
+                    );
+                    self.model_choices = self.build_model_choices();
+                    self.info(format!(
+                        "Fetched {} models for {}.",
+                        count,
+                        self.backend.provider_label()
+                    ));
+                }
+            }
             return;
         };
         connect.loading = false;

@@ -16,15 +16,45 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
     } else {
         format!(" · {}", picker.filter)
     };
+
+    let prov_label = picker.provider_filter.as_deref().unwrap_or("All");
+    let fetch_status = if app.fetching_models {
+        let glyph = SPINNER[app.spinner % SPINNER.len()];
+        format!(" {glyph} fetching ")
+    } else {
+        String::new()
+    };
+
+    let title_top = Line::from(vec![
+        Span::styled(format!(" models{filter_field} "), Style::default().fg(MUTED)),
+        Span::styled(
+            format!("[{prov_label}]"),
+            if picker.provider_filter.is_some() {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            },
+        ),
+        Span::styled(
+            if fetch_status.is_empty() {
+                " · Tab cycle · Ctrl+R fetch ".to_owned()
+            } else {
+                fetch_status
+            },
+            if app.fetching_models {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            },
+        ),
+    ]);
+
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(MUTED))
-        .title_top(Line::styled(
-            format!(" model{filter_field} "),
-            Style::default().fg(MUTED),
-        ))
+        .title_top(title_top)
         .title_bottom(Line::styled(
-            " ↑↓ move · enter switch · esc cancel ",
+            " ↑↓ move · enter switch · tab provider · ctrl+r fetch · esc cancel ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
@@ -50,7 +80,9 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
         let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
         let chosen = index == selected;
         let marker = if chosen { "› " } else { "  " };
-        let title = if model.name.trim().is_empty() {
+
+        let is_active_model = model.active_provider && model.id == app.backend.model();
+        let display_title = if model.name.trim().is_empty() {
             model.id.clone()
         } else {
             model.name.clone()
@@ -60,22 +92,33 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
         } else {
             Style::default().fg(TEXT)
         };
-        let detail = if model.active_provider {
-            model.id.clone()
+
+        let active_mark = if is_active_model { "✓ " } else { "  " };
+        let provider_tag = format!("[{}]", model.provider);
+        let right_tag_len = active_mark.chars().count() + provider_tag.chars().count();
+
+        let left_space = usize::from(inner.width).saturating_sub(right_tag_len + 4);
+        let id_suffix = if !model.name.trim().is_empty() && model.name.trim() != model.id.trim() {
+            format!(" ({})", model.id)
         } else {
-            format!("{} · {}", model.provider, model.id)
+            String::new()
         };
-        let detail_style = if model.active_provider {
-            Style::default().fg(MUTED)
-        } else {
-            Style::default().fg(ADDED)
-        };
-        let title_width = (usize::from(inner.width).saturating_sub(6) * 55 / 100).clamp(16, 40);
-        let detail_width = usize::from(inner.width).saturating_sub(title_width + 4);
+
+        let full_title = format!("{}{}", display_title, id_suffix);
+        let fitted_title = fit_to(&full_title, left_space);
+        let title_width = UnicodeWidthStr::width(fitted_title.as_str());
+        let pad_len = left_space.saturating_sub(title_width);
+        let padding = " ".repeat(pad_len);
+
         let line = Line::from(vec![
             Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(format!("{} ", fit_to(&title, title_width)), title_style),
-            Span::styled(fit_to(&detail, detail_width), detail_style),
+            Span::styled(fitted_title, title_style),
+            Span::raw(padding),
+            Span::styled(
+                active_mark,
+                Style::default().fg(ADDED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(provider_tag, Style::default().fg(MUTED)),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }
