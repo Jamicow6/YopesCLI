@@ -41,7 +41,7 @@ mod turn;
 pub(crate) use action::{Action, ChangeReport, Notice, NoticeKind, RetryNotice, ToolEvent};
 pub(crate) use commands::{COMMANDS, CommandSpec, EFFORT_CHOICES, matching_commands};
 pub(crate) use input::Input;
-pub(crate) use pickers::{ListPicker, ModelChoice};
+pub(crate) use pickers::{ListPicker, ModelChoice, ModelRow};
 
 use format::estimated_output_tokens;
 

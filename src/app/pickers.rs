@@ -13,6 +13,35 @@ impl App {
         self.model_matches().len()
     }
 
+    /// Rows of the `/models` popup: provider section headers between model
+    /// runs on the All view, a flat list once one provider is cycled.
+    pub(crate) fn model_picker_rows(&self) -> Vec<ModelRow> {
+        let models = self.model_matches();
+        if self
+            .model_picker
+            .as_ref()
+            .is_some_and(|picker| picker.provider_filter.is_some())
+        {
+            return (0..models.len()).map(ModelRow::Model).collect();
+        }
+        // Group by provider name in first-occurrence order, so same-named
+        // providers share one section even when their models are not
+        // adjacent in the list.
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for (index, model) in models.iter().enumerate() {
+            match groups.iter_mut().find(|(name, _)| name == &model.provider) {
+                Some((_, group)) => group.push(index),
+                None => groups.push((model.provider.clone(), vec![index])),
+            }
+        }
+        let mut rows = Vec::new();
+        for (name, group) in groups {
+            rows.push(ModelRow::Header(name));
+            rows.extend(group.into_iter().map(ModelRow::Model));
+        }
+        rows
+    }
+
     /// Every model offered by a connected provider, active provider first.
     pub(crate) fn build_model_choices(&self) -> Vec<ModelChoice> {
         let mut choices: Vec<ModelChoice> = Vec::new();
@@ -541,6 +570,15 @@ pub struct ModelChoice {
     pub active_provider: bool,
 }
 
+/// One row of the `/models` popup: a provider section header or a model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModelRow {
+    /// Header naming the provider of the models below it.
+    Header(String),
+    /// Index into the filtered model list.
+    Model(usize),
+}
+
 pub(crate) fn provider_names_from_choices(choices: &[ModelChoice]) -> Vec<String> {
     let mut names = Vec::new();
     for choice in choices {
@@ -627,7 +665,7 @@ pub(crate) fn session_matching<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelChoice, model_matching};
+    use super::{ListPicker, ModelChoice, ModelRow, model_matching};
 
     #[test]
     fn model_matching_filters_on_name_id_and_provider() {
@@ -664,5 +702,79 @@ mod tests {
         assert_eq!(found.len(), 2, "filters down to active provider only");
         let found = super::model_matching_with_provider(&models, "claude", Some("active"));
         assert!(found.is_empty(), "provider filter takes precedence");
+    }
+
+    #[test]
+    fn model_picker_rows_group_by_provider_on_the_all_view() {
+        use crate::app::App;
+        use crate::backend::Backend;
+        use crate::config::{AuthKind, Config, ProviderKind};
+        use crate::session::Session;
+        use std::path::PathBuf;
+
+        let config = Config {
+            provider: ProviderKind::OpenAi,
+            provider_label: "OpenAI".to_owned(),
+            model: "gpt-4o".to_owned(),
+            base_url: "https://api.openai.com/v1".to_owned(),
+            api_key: Some("test-key".to_owned()),
+            auth: AuthKind::Bearer,
+            models: Vec::new(),
+            system_prompt: None,
+            custom_providers: Vec::new(),
+            session_path: None,
+            sessions_dir: None,
+            config_path: PathBuf::new(),
+            tavily_api_key: None,
+            auto_compact: false,
+            reasoning_effort: None,
+        };
+        let backend = Backend::new(&config).expect("backend");
+        let mut app = App::new(
+            Session::new(),
+            backend,
+            None,
+            None,
+            PathBuf::new(),
+            Vec::new(),
+            None,
+            false,
+        );
+        let choice = |provider: &str, id: &str| ModelChoice {
+            provider: provider.to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            id: id.to_owned(),
+            name: id.to_owned(),
+            active_provider: provider == "OpenAI",
+        };
+        app.model_choices = vec![
+            choice("OpenAI", "gpt-4o"),
+            choice("OpenAI", "gpt-4o-mini"),
+            choice("Groq", "llama-3"),
+            choice("OpenAI", "o3"),
+        ];
+        app.model_picker = Some(ListPicker::default());
+
+        // All view: one header per provider (first-seen order), models keep
+        // their stored order inside their provider's section.
+        let rows = app.model_picker_rows();
+        assert_eq!(
+            rows,
+            vec![
+                ModelRow::Header("OpenAI".to_owned()),
+                ModelRow::Model(0),
+                ModelRow::Model(1),
+                ModelRow::Model(3),
+                ModelRow::Header("Groq".to_owned()),
+                ModelRow::Model(2),
+            ]
+        );
+
+        // A cycled provider keeps the flat list, no headers.
+        app.model_picker = Some(ListPicker {
+            provider_filter: Some("Groq".to_owned()),
+            ..ListPicker::default()
+        });
+        assert_eq!(app.model_picker_rows(), vec![ModelRow::Model(0)]);
     }
 }

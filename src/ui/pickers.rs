@@ -74,14 +74,37 @@ pub(super) fn draw_model_picker(frame: &mut Frame, app: &App, picker: &ListPicke
         );
         return;
     }
+    let rows = app.model_picker_rows();
     let selected = picker.selected.min(models.len() - 1);
-    // The popup shows a window of the list, moving with the selection.
+    // The popup shows a window of the rows, moving with the selection.
     let visible = inner.height as usize;
-    let start = selected.saturating_sub(visible.saturating_sub(1));
-    for (offset, model) in models.iter().skip(start).take(visible).enumerate() {
-        let index = start + offset;
+    let selected_row = rows
+        .iter()
+        .position(|row| matches!(row, ModelRow::Model(index) if *index == selected))
+        .unwrap_or(0);
+    let start = selected_row.saturating_sub(visible.saturating_sub(1));
+    for (offset, entry) in rows.iter().skip(start).take(visible).enumerate() {
         let row = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
-        let chosen = index == selected;
+        let ModelRow::Model(index) = entry else {
+            let ModelRow::Header(provider) = entry else {
+                unreachable!()
+            };
+            // Section header, styled like the /connect provider divider.
+            let label = format!(" {provider} ");
+            let remaining = usize::from(row.width)
+                .saturating_sub(label.chars().count())
+                .saturating_sub(3);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    format!("  ─{label}{}", "─".repeat(remaining)),
+                    Style::default().fg(MUTED),
+                )),
+                row,
+            );
+            continue;
+        };
+        let model = &models[*index];
+        let chosen = *index == selected;
         let marker = if chosen { "› " } else { "  " };
 
         let is_active_model = model.active_provider && model.id == app.backend.model();
